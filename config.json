@@ -1,0 +1,31 @@
+{
+    "target_app": "WPS",
+    "model_type": "Heavy",
+    "interaction_mode": "mouse",
+    "camera_index": 0,
+    "cooldown": 1.0,
+    "swipe_threshold": 60,
+    "mouse_sensitivity": 40,
+    "pen_width": 20,
+    "edge_acceleration_enabled": true,
+    "edge_acceleration_strength": 100,
+    "edge_y_canvas_enabled": true,
+    "edge_y_canvas_deadzone_bottom": 18,
+    "edge_y_canvas_deadzone_top": 10,
+    "voice_assistant": "doubao",
+    "gesture_mapping": {
+        "SWIPE_RIGHT": "next_slide",
+        "SWIPE_LEFT": "prev_slide",
+        "SWIPE_UP": "start_presentation",
+        "SWIPE_DOWN": "end_presentation",
+        "FIST": "none",
+        "THUMB_UP": "switch_app",
+        "SCISSOR": "launch_voice_assistant",
+        "THUMB_DOWN": "hang_up_voice_assistant"
+    },
+    "voice_command_enabled": true,
+    "voice_command_threshold": 0.25,
+    "tencent_asr_enabled": false,
+    "tencent_asr_secret_id": "",
+    "tencent_asr_secret_key": ""
+}

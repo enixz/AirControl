@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+dist/
+build/
+*.spec.bak
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# PyInstaller
+build/
+dist/
+
+# Logs
+*.log
+
+# User config (keep config.json as default template, ignore local changes)
+# config.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WorkBuddy internal files
+.workbuddy/
+
+# Internal deliverables (not for public release)
+deliverables/
+
+# PyInstaller spec backup
+*.spec.bak
+
+# Model files (large, should be downloaded separately)
+# *.task

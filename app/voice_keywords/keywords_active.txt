@@ -1,0 +1,8 @@
+d iǎn y ī x ià @点一下
+sh uāng j ī @双击
+y òu j iàn @右键
+z uì x iǎo h uà zh ù sh ǒu @最小化助手
+h uàn x ǐng zh ù sh ǒu @唤醒助手
+q iè m ó sh ì @切模式
+b ǎn sh ū m ó sh ì @板书模式
+y ǎn sh ì m ó sh ì @演示模式

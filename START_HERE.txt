@@ -1,0 +1,70 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║   AirControl - 隔空手势控制系统                                               ║
+║   ================================                                           ║
+║                                                                              ║
+║   快速启动指南                                                               ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+【目录结构】
+
+D:\airControl\
+├── run.bat                    ← 双击此文件启动程序
+├── test_model.py              ← 测试模型加载是否正常
+├── START_HERE.txt             ← 本文件（启动指南）
+│
+├── gesture_recognizer.task    ← MediaPipe 手势识别模型 (8MB)
+├── hand_landmarker.task       ← 备用手部关键点模型
+├── hand_landmarker_heavy.task ← 备用重型模型
+│
+├── app/
+│   ├── main_ui.py             ← 主程序（GUI 悬浮窗）
+│   ├── main.py                ← 命令行版本
+│   ├── config_manager.py      ← 配置管理
+│   ├── drawing_overlay.py     ← 板书模式画布
+│   └── services/
+│       ├── hand_tracker.py    ← 手部追踪（已升级为 Gesture Recognizer）
+│       ├── gesture_recognizer.py ← 手势识别（ML 模型 + 挥动检测）
+│       ├── camera.py          ← 摄像头服务
+│       ├── mouse_controller.py ← 鼠标控制
+│       └── ppt_controller.py  ← PPT/WPS 控制
+│
+├── config.json                ← 用户配置文件
+├── requirements.txt           ← Python 依赖
+└── build.py                   ← 打包脚本
+
+【启动步骤】
+
+1. 确保已安装 Python 3.8+
+2. 双击运行 run.bat
+3. 等待摄像头窗口出现（约 2-3 秒）
+
+【测试命令】
+
+在命令行中运行：
+    python test_model.py
+
+如果看到 "所有测试通过"，说明环境正常。
+
+【常见问题】
+
+Q: 程序启动失败怎么办？
+A: 检查摄像头是否被其他程序占用（如 Zoom、Teams）
+
+Q: 手势识别不准确？
+A: 确保光线充足，手距离摄像头 30-80cm
+
+Q: 如何切换模式？
+A: 双手同时握拳 1 秒
+
+Q: 如何退出程序？
+A: 点击悬浮窗右上角 X 按钮
+
+【技术支持】
+
+- 手势识别模型：MediaPipe Gesture Recognizer (ML)
+- 支持手势：握拳、张开、点赞、食指朝上、V字、摇滚手
+- 光流回退：手部短暂丢失时自动补偿
+
+═══════════════════════════════════════════════════════════════════════════════
