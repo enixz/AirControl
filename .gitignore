@@ -25,6 +25,7 @@ dist/
 
 # Logs
 *.log
+gesture.log
 
 # User config (keep config.json as default template, ignore local changes)
 # config.json
