@@ -1,0 +1,401 @@
+# 🎯 AirControl - Gesture + Voice Control System
+
+<div align="center">
+
+![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
+![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078d4?logo=windows&logoColor=white)
+![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)
+![Stars](https://img.shields.io/github/stars/enixz/AirControl?style=social)
+
+**🚀 Free your hands, control your computer remotely**
+
+*Gesture Control · Voice Assistant · Multimodal Interaction*
+
+[中文](README.md) | [English](#quick-start)
+
+</div>
+
+---
+
+## ✨ One-line Introduction
+
+> **AirControl** is a Windows air controller based on MediaPipe + voice recognition. Control PPT presentations, mouse cursor, screen annotation, and even launch voice assistants with just **gestures** and **voice** - no keyboard or mouse needed!
+
+---
+
+## 🎬 Feature Highlights
+
+<table>
+<tr>
+<td width="50%">
+
+### 🖐️ Gesture Control
+- **Presentation Mode**: Wave to change slides, start/stop playback
+- **Mouse Mode**: Air mouse, pinch to click, scissor to scroll
+- **Drawing Mode**: Finger writing, fist to clear, shape correction
+
+</td>
+<td width="50%">
+
+### 🎤 Voice Assistant
+- **Offline Wake-up**: Sherpa-ONNX keyword detection (privacy-first)
+- **Online Recognition**: Tencent Cloud ASR for free text input
+- **Mode-aware**: Auto-switch voice commands by mode
+
+</td>
+</tr>
+<tr>
+<td>
+
+### 🧠 Smart Recognition
+- **Kalman Filter**: Dual smoothing for 21 hand landmarks
+- **Shape Correction**: Auto-detect and correct hand-drawn shapes
+- **Edge Acceleration**: Cursor speeds up near screen edges
+
+</td>
+<td>
+
+### ⚡ High Performance
+- **Async Inference**: MediaPipe runs in background thread
+- **30 FPS**: Real-time smooth hand tracking
+- **Low Latency**: < 50ms response time
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🚀 Quick Start
+
+### 1️⃣ Clone the Project
+
+```bash
+git clone https://github.com/enixz/AirControl.git
+cd AirControl
+```
+
+### 2️⃣ Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 3️⃣ Run the Program
+
+```bash
+# GUI version (recommended)
+python -m app.main_ui
+
+# Command-line version
+python -m app.main
+```
+
+> 💡 **Note**: On first run, MediaPipe model files (~16MB) will be downloaded automatically. Please ensure a stable network connection.
+
+---
+
+## 📖 Detailed Features
+
+### 🎭 Three Interaction Modes
+
+Switch modes by **double-fist** gesture (both hands):
+
+#### 1. Presentation Mode 📊
+
+Control PowerPoint or WPS presentations.
+
+| Gesture | Action | Shortcut |
+|---------|--------|----------|
+| 👋 Wave right | Next slide | → |
+| 👋 Wave left | Previous slide | ← |
+| 👋 Wave up | Start presentation | F5 |
+| 👋 Wave down | End presentation | Esc |
+| 👍 Thumb up | Switch to target app | - |
+| ✊ Fist | Customizable mapping | - |
+
+> 🛡️ **Anti-misfire Design**: Spreading all five fingers and moving freely won't trigger any action; actions won't fire within the first 0.3 seconds of hand entering the frame.
+
+#### 2. Mouse Mode 🖱️
+
+Transform your hand into an air mouse with a large circular cursor on screen.
+
+| Gesture | Action | Visual Feedback |
+|---------|--------|-----------------|
+| ☝️ Middle fingertip move | Control cursor position | White circular cursor |
+| 🤏 Thumb + index pinch | Left click | Blue ripple animation |
+| 🤏 Thumb + middle pinch | Right click | Green ripple animation |
+| ✌️ Scissor hand move | Scroll wheel | Yellow arrow indicator |
+| 🤏 Pinch & hold | Left button drag | Pulse animation |
+
+**Edge Acceleration**: When the cursor approaches screen edges, movement speed automatically increases 2-3x for easy access to taskbar and screen corners.
+
+#### 3. Drawing Mode ✏️
+
+Handwriting annotation on screen, perfect for teaching or presentation explanations.
+
+| Gesture | Action |
+|---------|--------|
+| ☝️ Index finger only | Write/Draw |
+| 👌 Thumb + index pinch | Hover (no drawing) |
+| ✊ Fist | Clear canvas |
+| ✊✊ Double fist | Toggle shape correction |
+
+**Smart Shape Correction**: When enabled, hand-drawn lines, triangles, rectangles, and ellipses are automatically corrected to standard geometric shapes.
+
+---
+
+### 🎤 Voice Assistant
+
+AirControl integrates a dual-engine voice system:
+
+#### Offline Keyword Spotting (KWS)
+- **Engine**: Sherpa-ONNX (fully offline, privacy-first)
+- **Model**: `kws-zh-wenetspeech` (Chinese, 3.3MB lightweight model)
+- **Wake word**: Customizable (default: "小助手")
+- **Commands**: Play, pause, next, previous, and other fixed commands
+
+#### Online Speech Recognition (ASR)
+- **Engine**: Tencent Cloud Real-time ASR
+- **Scenario**: Drawing mode "type on screen" feature
+- **Capability**: Free text input, supports Chinese-English mixed
+- **Limitation**: Requires API key (5 hours/month free quota)
+
+#### Mode Awareness
+Voice commands automatically switch based on current mode:
+- **Presentation Mode**: Play, pause, next, previous
+- **Mouse Mode**: Click, right-click, scroll
+- **Drawing Mode**: Clear, undo, type on screen
+
+---
+
+## 🏗️ Technical Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  AirControl Architecture                 │
+├─────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
+│  │  Camera     │  │  Voice      │  │  User       │      │
+│  │  Capture    │  │  Input      │  │  Config     │      │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘      │
+│         │                │                │              │
+│         ▼                ▼                ▼              │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │              InferenceWorker (QThread)           │    │
+│  │  ┌─────────────┐  ┌─────────────┐               │    │
+│  │  │ MediaPipe   │  │ Kalman      │               │    │
+│  │  │ HandLandmark│  │ + EMA       │               │    │
+│  │  └─────────────┘  └─────────────┘               │    │
+│  └─────────────────────────────────────────────────┘    │
+│         │                                                │
+│         ▼                                                │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │              ModeManager                         │    │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐      │    │
+│  │  │Presentat.│  │  Mouse   │  │ Drawing  │      │    │
+│  │  └──────────┘  └──────────┘  └──────────┘      │    │
+│  └─────────────────────────────────────────────────┘    │
+│         │                                                │
+│         ▼                                                │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
+│  │  PPT Ctrl   │  │  Mouse Ctrl │  │  Screen     │      │
+│  │             │  │             │  │  Drawing     │      │
+│  └─────────────┘  └─────────────┘  └─────────────┘      │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Core Technology Stack
+
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| Hand Detection | MediaPipe HandLandmarker | Real-time 21 landmark detection |
+| Gesture Recognition | ML model + rule fallback | Gesture classification (fist, open, scissor, etc.) |
+| Position Smoothing | Kalman filter + EMA | Eliminate jitter, predict on loss |
+| Shape Correction | OpenCV geometry analysis | Auto-correct hand-drawn shapes |
+| GUI | PyQt6 | Floating window, settings panel, overlays |
+| Mouse Control | Win32 API | SetCursorPos, mouse_event |
+| Voice KWS | Sherpa-ONNX | Offline keyword detection |
+| Voice ASR | Tencent Cloud | Online speech recognition |
+| Audio Capture | sounddevice | Real-time audio streaming |
+
+---
+
+## ⚙️ Configuration Options
+
+Click the ⚙️ settings button on the floating window to adjust:
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Target App | PowerPoint or WPS | WPS |
+| Model Precision | Lite (faster) / Heavy (more accurate) | Heavy |
+| Interaction Mode | presentation / mouse / draw | mouse |
+| Gesture Cooldown | Minimum interval between gestures | 1000 ms |
+| Mouse Sensitivity | Tracking sensitivity in mouse mode | 40% |
+| Pen Width | Stroke width in drawing mode | 20 px |
+| Edge Acceleration | Auto-speed boost near screen edges | Enabled |
+| Voice Assistant | Select voice assistant app | Doubao |
+| Action Mapping | Gesture-to-action mapping | See `config.json` |
+
+Settings are automatically saved to `config.json`.
+
+---
+
+## 📁 Project Structure
+
+```
+AirControl/
+├── app/
+│   ├── main.py                    # CLI entry (OpenCV window)
+│   ├── main_ui.py                 # GUI entry (PyQt6 floating window)
+│   ├── config_manager.py          # Config file read/write
+│   ├── mode_manager.py            # Mode manager (double-fist switch)
+│   ├── drawing_overlay.py         # Drawing mode fullscreen canvas
+│   ├── draw_toolbar.py            # Drawing toolbar
+│   ├── mouse_cursor_overlay.py    # Mouse cursor overlay
+│   ├── modes/
+│   │   ├── base.py                # Mode base class (strategy pattern)
+│   │   ├── presentation.py        # Presentation mode
+│   │   ├── mouse_mode.py          # Mouse mode
+│   │   └── draw_mode.py           # Drawing mode
+│   ├── services/
+│   │   ├── camera.py              # Camera service
+│   │   ├── hand_tracker.py        # Hand landmark tracking (MediaPipe + Kalman)
+│   │   ├── gesture_recognizer.py  # Gesture recognition & swipe detection
+│   │   ├── inference_worker.py    # Async inference worker thread
+│   │   ├── mouse_controller.py    # Mouse control (Win32 API)
+│   │   ├── ppt_controller.py      # PPT/WPS control
+│   │   ├── shape_recognizer.py    # Shape recognizer
+│   │   ├── voice_assistant.py     # Voice assistant service
+│   │   └── voice_command.py       # Voice command processing
+│   └── voice_keywords/            # Voice keyword configs
+├── models/
+│   └── kws-zh-wenetspeech/       # Voice wake-up model
+├── tests/                         # Unit tests
+├── config.json                    # User configuration
+├── requirements.txt               # Python dependencies
+├── build.py                       # PyInstaller build script
+├── AirControl.spec                # PyInstaller config
+├── hand_landmarker.task           # MediaPipe hand model (7.8MB)
+└── gesture_recognizer.task        # Gesture recognition model (8.4MB)
+```
+
+---
+
+## 🧪 Testing
+
+Run unit tests:
+
+```bash
+# Run all tests
+python -m pytest tests/
+
+# Run specific test
+python -m pytest tests/test_edge_map.py
+```
+
+Test coverage:
+- ✅ Configuration boundary checks
+- ✅ Edge mapping algorithms
+- ✅ Mouse controller compatibility
+- ✅ Cursor overlay
+- ✅ Voice assistant integration
+- ✅ UI integration tests
+
+---
+
+## 📦 Build Executable
+
+The project is configured with PyInstaller for one-click packaging:
+
+```bash
+python build.py
+```
+
+Output will be in the `dist/` directory with all dependencies and model files included.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Whether it's bug reports, feature requests, or code contributions.
+
+1. Fork the project
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Commit changes: `git commit -m 'feat: add your feature'`
+4. Push to branch: `git push origin feature/your-feature`
+5. Create a Pull Request
+
+### Development Setup
+
+```bash
+# Clone project
+git clone https://github.com/enixz/AirControl.git
+cd AirControl
+
+# Create virtual environment
+python -m venv .venv
+.venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run tests
+python -m pytest tests/
+```
+
+### Code Standards
+
+- Follow PEP 8 coding standards
+- Add type annotations
+- Write unit tests
+- Update documentation
+
+---
+
+## 🙏 Acknowledgments
+
+- [MediaPipe](https://mediapipe.dev/) - Hand detection and landmark tracking
+- [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) - Offline speech recognition engine
+- [PyQt6](https://riverbankcomputing.com/software/pyqt/) - GUI framework
+- [OpenCV](https://opencv.org/) - Computer vision library
+
+---
+
+## 📄 License
+
+This project is licensed under the [Apache License 2.0](LICENSE).
+
+```
+Copyright 2026 AirControl
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+---
+
+<div align="center">
+
+**If you find this useful, please give us a ⭐ Star!**
+
+[![Star History Chart](https://api.star-history.com/svg?repos=enixz/AirControl&type=Date)](https://star-history.com/#enixz/AirControl&Date)
+
+</div>
+
+---
+
+<div align="center">
+
+[⬆ Back to Top](#-aircontrol---gesture--voice-control-system)
+
+</div>
