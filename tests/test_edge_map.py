@@ -16,7 +16,7 @@ except AttributeError:
     mock_ctypes.wintypes = types.ModuleType('ctypes.wintypes')
     mock_windll = types.ModuleType('ctypes.windll')
     mock_user32 = types.ModuleType('user32')
-    mock_user32.GetSystemMetrics = lambda idx: 1920 if idx == 0 else 1080
+    mock_user32.GetSystemMetrics = lambda idx: 1920 if idx in (0, 78) else 1080
     mock_user32.GetCursorPos = lambda pt: None
     mock_user32.SetCursorPos = lambda x, y: None
     mock_user32.mouse_event = lambda *a: None

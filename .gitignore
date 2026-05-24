@@ -45,3 +45,9 @@ deliverables/
 
 # Model files (large, should be downloaded separately)
 # *.task
+# SenseVoice ASR 模型 model.int8.onnx 单文件 239MB，超 GitHub 100MB 单文件硬限。
+# 用户按 README 指引手动下载到 models/sense-voice/
+models/sense-voice/
+
+# Claude Code 工作目录（包含 worktree、隔离副本等内部产物）
+.claude/

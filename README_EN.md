@@ -151,21 +151,41 @@ AirControl integrates a dual-engine voice system:
 
 #### Offline Keyword Spotting (KWS)
 - **Engine**: Sherpa-ONNX (fully offline, privacy-first)
-- **Model**: `kws-zh-wenetspeech` (Chinese, 3.3MB lightweight model)
-- **Wake word**: Customizable (default: "小助手")
-- **Commands**: Play, pause, next, previous, and other fixed commands
+- **Model**: `kws-zh-wenetspeech` (Chinese, ~18MB lightweight model)
+- **Commands**: A fixed set of Chinese phrases mapped per mode (presentation/mouse/draw)
+- **Latency**: ~100ms keyword detection
+- **Cooldown**: 1.0s anti-bounce
 
-#### Online Speech Recognition (ASR)
-- **Engine**: Tencent Cloud Real-time ASR
-- **Scenario**: Drawing mode "type on screen" feature
-- **Capability**: Free text input, supports Chinese-English mixed
-- **Limitation**: Requires API key (5 hours/month free quota)
+#### Offline Dictation (ASR)
+- **Engine**: SenseVoice-Small (Alibaba DAMO Academy, loaded via sherpa-onnx)
+- **Scenario**: Drawing mode "speak-to-screen" — say "开始板书" to start recording,
+  say "结束板书" to stop and type the recognized text onto the canvas
+- **Languages**: Chinese / English / Japanese / Korean / Cantonese (auto-detect)
+- **Privacy**: 100% local, no network calls
+- **Disk footprint**: ~234 MB (int8 quantized)
+
+##### Model download
+
+```bash
+# Download SenseVoice-Small from the sherpa-onnx releases page:
+# https://github.com/k2-fsa/sherpa-onnx/releases  (tag: asr-models)
+# File: sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
+
+# Extract and move the directory to AirControl/models/sense-voice/
+# Expected layout:
+#   models/sense-voice/
+#     ├── model.int8.onnx
+#     └── tokens.txt
+```
+
+If the model directory is absent, dictation is silently disabled; KWS keywords keep
+working. The model file is gitignored due to GitHub's 100 MB single-file limit.
 
 #### Mode Awareness
 Voice commands automatically switch based on current mode:
-- **Presentation Mode**: Play, pause, next, previous
-- **Mouse Mode**: Click, right-click, scroll
-- **Drawing Mode**: Clear, undo, type on screen
+- **Presentation Mode**: 开始播放 / 结束播放 / 下一页 / 上一页
+- **Mouse Mode**: 点一下 / 双击 / 右键
+- **Drawing Mode**: 清屏 / 开始板书 / 结束板书 / 图形修正
 
 ---
 

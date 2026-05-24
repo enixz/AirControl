@@ -1,8 +1,17 @@
 import ctypes
 import ctypes.wintypes
+import logging
 import time
 
+logger = logging.getLogger(__name__)
+
 user32 = ctypes.windll.user32
+
+# Win32 虚拟屏幕指标 — 跨越所有显示器
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
 
 def get_cursor_pos():
     pt = ctypes.wintypes.POINT()
@@ -54,6 +63,9 @@ def _canvas_map(t, deadzone_top, deadzone_bottom):
         return t
     low = deadzone_top
     high = 1.0 - deadzone_bottom
+    if high <= low:
+        # deadzone_top + deadzone_bottom >= 1.0 时，映射整个区间到边界
+        return 0.0 if t <= low else 1.0
     if t <= low:
         return 0.0
     if t >= high:
@@ -75,8 +87,8 @@ class MouseController:
         self.edge_y_dz_top = max(0, min(20, edge_y_dz_top)) / 100.0
 
     def _get_screen_size(self):
-        """动态获取当前屏幕分辨率，支持运行时显示器变化。"""
-        return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+        """动态获取虚拟屏幕尺寸（跨越所有显示器），支持运行时显示器变化。"""
+        return user32.GetSystemMetrics(SM_CXVIRTUALSCREEN), user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
 
     def set_sensitivity(self, sensitivity):
         self.sensitivity = max(10, sensitivity) / 100.0

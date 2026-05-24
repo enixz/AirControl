@@ -1,3 +1,4 @@
+import math
 import time
 import winsound
 
@@ -58,6 +59,10 @@ class DrawMode(ModeBase):
         return True
 
     def handle(self, hands_landmarks, hands_gestures, frame_w, frame_h) -> ModeResult:
+        self._sync_frame_size(frame_w, frame_h)
+        # 除零保护：异常帧时 frame_w/h 可能为 0
+        if frame_w <= 0 or frame_h <= 0:
+            return ModeResult(gesture="NONE")
         if not self.overlay.isVisible():
             self.overlay.show_fullscreen()
 
@@ -80,6 +85,15 @@ class DrawMode(ModeBase):
             landmarks[5][1] / frame_w, landmarks[5][2] / frame_h
         )
         self.overlay.update_cursor(x_screen, y_screen)
+
+        # 笔粗距离自适应：bbox 大（近）→ 笔粗，bbox 小（远）→ 笔细
+        # sqrt(bbox) 比 bbox 本身随距离变化更线性
+        if hands_gestures:
+            bbox_area = hands_gestures[0].get("bbox_area", 0.0)
+            if bbox_area > 0:
+                hand_size = math.sqrt(bbox_area)
+                scale = hand_size / self.overlay.REFERENCE_HAND_SIZE
+                self.overlay.set_pen_scale(scale)
 
         is_explicit_stop = features["is_fist"] or features["is_open_palm"]
 

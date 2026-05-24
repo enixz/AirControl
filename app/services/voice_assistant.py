@@ -1,4 +1,7 @@
+import glob
+import json
 import os
+import string
 import time
 import logging
 import winreg
@@ -10,6 +13,30 @@ import win32process
 import psutil
 
 logger = logging.getLogger("voice_assistant")
+
+# 跨次启动磁盘缓存：避免每次冷启动都重扫开始菜单 + 全盘
+_CACHE_FILE = os.path.join(
+    os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+    "AirControl",
+    "exe_paths.json",
+)
+
+
+def _load_cache():
+    try:
+        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(_CACHE_FILE), exist_ok=True)
+        with open(_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except OSError as e:
+        logger.debug("缓存写入失败: %s", e)
 
 ASSISTANT_PROFILES = {
     "doubao": {
@@ -82,7 +109,10 @@ def _find_exe_from_registry(profile):
                                 continue
                             exe_path = None
                             _SKIP_EXE_PARTS = {"uninstall", "update", "repair", "helper", "crash"}
-                            for value_name in ("DisplayIcon", "InstallLocation"):
+                            # 收集所有候选目录：DisplayIcon / InstallLocation / UninstallString
+                            # 任何一个能拿到的"路径"都退化成它所在的目录，再去目录里找目标 exe
+                            candidate_dirs = []
+                            for value_name in ("DisplayIcon", "InstallLocation", "UninstallString"):
                                 try:
                                     val = winreg.QueryValueEx(sub_key, value_name)[0]
                                 except OSError:
@@ -90,19 +120,41 @@ def _find_exe_from_registry(profile):
                                 if not val:
                                     continue
                                 val = val.strip().strip('"')
-                                if value_name == "DisplayIcon" and "," in val:
+                                # DisplayIcon 可能是 "C:\foo\bar.exe,0" 这种形式
+                                if "," in val:
                                     val = val.split(",")[0].strip().strip('"')
+                                # 直接命中目标 exe
                                 if os.path.isfile(val) and val.lower().endswith(".exe"):
                                     basename = os.path.basename(val).lower()
                                     if not any(skip in basename for skip in _SKIP_EXE_PARTS):
                                         exe_path = val
                                         break
-                                    continue
-                                if os.path.isdir(val):
+                                # val 是文件（.ico / uninstall.exe / 其他）→ 取它的目录
+                                if os.path.isfile(val):
+                                    candidate_dirs.append(os.path.dirname(val))
+                                # val 本身是目录
+                                elif os.path.isdir(val):
+                                    candidate_dirs.append(val)
+                            # 拿到候选目录后，逐一搜目标 exe（仅本目录 + 一层子目录）
+                            if not exe_path:
+                                for d in candidate_dirs:
+                                    if not d or not os.path.isdir(d):
+                                        continue
                                     for en in profile["exe_names"]:
-                                        candidate = os.path.join(val, en)
-                                        if os.path.isfile(candidate):
-                                            exe_path = candidate
+                                        # 同级
+                                        c = os.path.join(d, en)
+                                        if os.path.isfile(c):
+                                            exe_path = c
+                                            break
+                                        # 一层子目录（如 Application\Doubao.exe）
+                                        for sub in os.listdir(d):
+                                            sub_path = os.path.join(d, sub)
+                                            if os.path.isdir(sub_path):
+                                                c2 = os.path.join(sub_path, en)
+                                                if os.path.isfile(c2):
+                                                    exe_path = c2
+                                                    break
+                                        if exe_path:
                                             break
                                     if exe_path:
                                         break
@@ -141,22 +193,197 @@ def _find_exe_from_search_roots(profile):
     return None
 
 
+def _prefer_launcher(path, exe_names):
+    """有些 Electron/Chromium 应用的 App Paths 指向内部进程（如 \\app\\xxx.exe），
+    但真正的启动器在上一层（\\xxx.exe）。检测到同名 exe 在父目录就改用父目录的版本。
+    """
+    if not path:
+        return path
+    parent = os.path.dirname(path)
+    grandparent = os.path.dirname(parent)
+    parent_name = os.path.basename(parent).lower()
+    # 仅当当前文件位于 "app" / "application" / "bin" 这种内部子目录时才提升
+    if parent_name in ("app", "application", "bin", "Doubao", "doubao") and grandparent:
+        basename = os.path.basename(path)
+        sibling = os.path.join(grandparent, basename)
+        if os.path.isfile(sibling) and os.path.normcase(sibling) != os.path.normcase(path):
+            logger.info("启动器优先: %s -> %s", path, sibling)
+            return sibling
+    return path
+
+
+def _find_exe_from_app_paths(profile):
+    """从 Windows App Paths 注册表查找（很多正版安装都会注册这里）"""
+    base = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+    for exe_name in profile["exe_names"]:
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(hive, f"{base}\\{exe_name}") as k:
+                    path, _ = winreg.QueryValueEx(k, None)
+                    if path and os.path.isfile(path):
+                        path = _prefer_launcher(path, profile["exe_names"])
+                        logger.info("App Paths 找到: %s", path)
+                        return path
+            except OSError:
+                continue
+    return None
+
+
+def _find_exe_from_start_menu(profile):
+    """解析开始菜单快捷方式 (.lnk)。已安装的应用基本都会创建这里。
+
+    这是最跨机器可靠的方式：不依赖固定路径，不依赖注册表特定字段，
+    只要应用在开始菜单里出现过就能找到。
+    """
+    try:
+        import win32com.client  # 延迟导入：未用到时不强依赖
+    except ImportError:
+        return None
+
+    keywords = [kw.lower() for kw in profile.get("registry_keywords", [])]
+    exe_names_lower = {n.lower() for n in profile["exe_names"]}
+    _SKIP_PARTS = {"uninstall", "update", "repair", "helper", "crash"}
+
+    start_menu_roots = [
+        os.path.join(os.environ.get("PROGRAMDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+        os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs"),
+    ]
+
+    try:
+        shell = win32com.client.Dispatch("WScript.Shell")
+    except Exception as e:
+        logger.debug("WScript.Shell 不可用: %s", e)
+        return None
+
+    for root in start_menu_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _, filenames in os.walk(root):
+            for fn in filenames:
+                if not fn.lower().endswith(".lnk"):
+                    continue
+                fn_low = fn.lower()
+                # 文件名或所在目录名命中关键字才解析（避免解析整个开始菜单）
+                if not any(kw in fn_low or kw in dirpath.lower() for kw in keywords):
+                    continue
+                lnk_path = os.path.join(dirpath, fn)
+                try:
+                    sc = shell.CreateShortCut(lnk_path)
+                    target = sc.Targetpath
+                except Exception:
+                    continue
+                if not target or not os.path.isfile(target):
+                    continue
+                basename = os.path.basename(target).lower()
+                if basename not in exe_names_lower:
+                    continue
+                if any(skip in basename for skip in _SKIP_PARTS):
+                    continue
+                logger.info("开始菜单找到: %s -> %s", fn, target)
+                return target
+    return None
+
+
+def _find_exe_from_all_drives(profile):
+    """兜底全盘搜（限定常见安装位置，不暴力遍历）。"""
+    _SKIP_PARTS = {"uninstall", "update", "repair", "helper", "crash"}
+    drives = [d + ":" for d in string.ascii_uppercase if os.path.isdir(d + ":")]
+    # 常见安装目录模板（不会触发 C:\Windows 之类的深度遍历）
+    tail_patterns = [
+        r"Doubao\{exe}",
+        r"Doubao\Application\{exe}",
+        r"豆包\{exe}",
+        r"ByteDance\Doubao\{exe}",
+        r"ByteDance\Doubao\Application\{exe}",
+        r"Program Files\Doubao\{exe}",
+        r"Program Files\Doubao\Application\{exe}",
+        r"Program Files (x86)\Doubao\{exe}",
+        r"TongyiQianwen\{exe}",
+        r"TongyiQianwen\Application\{exe}",
+        r"通义千问\{exe}",
+        r"Program Files\TongyiQianwen\{exe}",
+        # 用户自选盘安装常见模式
+        r"Apps\Doubao\{exe}",
+        r"Apps\豆包\{exe}",
+        r"Software\Doubao\{exe}",
+    ]
+    for drv in drives:
+        for tpl in tail_patterns:
+            for exe_name in profile["exe_names"]:
+                cand = os.path.join(drv + os.sep, tpl.format(exe=exe_name))
+                if "*" in cand:
+                    hits = glob.glob(cand)
+                    for h in hits:
+                        if os.path.isfile(h) and not any(s in h.lower() for s in _SKIP_PARTS):
+                            logger.info("全盘搜索找到: %s", h)
+                            return h
+                elif os.path.isfile(cand):
+                    logger.info("全盘搜索找到: %s", cand)
+                    return cand
+    return None
+
+
 def _find_exe(profile):
-    result = _find_exe_from_registry(profile)
-    if result:
-        return result
-    result = _find_exe_from_process(profile)
-    if result:
-        return result
-    result = _find_exe_from_search_roots(profile)
-    if result:
-        return result
+    """六路并联 + 跨次启动缓存，确保换机器也能找到。
+
+    顺序按速度 + 可靠性：
+      1. 内存缓存（本进程内重复调用）
+      2. 磁盘缓存（上次成功的路径，先验证还存在）
+      3. 进程（已在运行 → 路径最权威）
+      4. App Paths 注册表
+      5. Uninstall 注册表（含 .ico/UninstallString 退化为目录）
+      6. 开始菜单 .lnk 解析（最跨机器可靠）
+      7. 硬编码 search_roots
+      8. WindowsApps 兜底
+      9. 全盘常见目录扫描（最后兜底）
+    """
+    cache_key = profile["display_name"]
+    cache = getattr(_find_exe, "_disk_cache", None)
+    if cache is None:
+        cache = _load_cache()
+        _find_exe._disk_cache = cache
+
+    # 2. 磁盘缓存命中，校验文件还在再用
+    cached = cache.get(cache_key)
+    if cached and os.path.isfile(cached):
+        return cached
+
+    # 3-9 依次尝试
+    finders = [
+        _find_exe_from_process,
+        _find_exe_from_app_paths,
+        _find_exe_from_registry,
+        _find_exe_from_start_menu,
+        _find_exe_from_search_roots,
+    ]
+    for fn in finders:
+        try:
+            result = fn(profile)
+        except Exception as e:
+            logger.debug("%s 抛异常: %s", fn.__name__, e)
+            continue
+        if result:
+            cache[cache_key] = result
+            _save_cache(cache)
+            return result
+
+    # 8. WindowsApps 兜底
     for exe_name in profile["exe_names"]:
         candidate = os.path.join(
             os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WindowsApps", exe_name
         )
         if os.path.isfile(candidate):
+            cache[cache_key] = candidate
+            _save_cache(cache)
             return candidate
+
+    # 9. 全盘扫常见目录
+    result = _find_exe_from_all_drives(profile)
+    if result:
+        cache[cache_key] = result
+        _save_cache(cache)
+        return result
+
     return None
 
 

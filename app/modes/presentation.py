@@ -19,6 +19,7 @@ class PresentationMode(ModeBase):
         pass
 
     def handle(self, hands_landmarks, hands_gestures, frame_w, frame_h) -> ModeResult:
+        self._sync_frame_size(frame_w, frame_h)
         all_features = [self.recognizer.get_hand_features(lm) for lm in hands_landmarks] if hands_landmarks else []
 
         two_hand = self.recognizer.check_two_hand_gesture(hands_landmarks, all_features)

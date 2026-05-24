@@ -33,6 +33,13 @@ class GestureRecognizer:
         self.history_length = 10
         self.hand_present_frames = 0
         self.scroll_y_history = []
+        # 拇指 tucked 滞后状态：避免边界距离来回切换
+        self._was_tucked = False
+        # 握拳确认帧计数器
+        self._fist_confirm_frames = 0
+        # 当前帧画面尺寸（用于边缘检测自适应）
+        self.frame_w = 640
+        self.frame_h = 480
         logger.info(f"=== GestureRecognizer Started | CD: {cooldown}s, Threshold: {swipe_threshold} ===")
 
     def get_hand_features(self, landmarks):
@@ -52,10 +59,17 @@ class GestureRecognizer:
 
         thumb_up = landmarks[4][2] < landmarks[3][2] and landmarks[4][2] < landmarks[2][2]
         thumb_tip_to_index_mcp = math.hypot(landmarks[4][1] - landmarks[5][1], landmarks[4][2] - landmarks[5][2])
-        thumb_tucked = thumb_tip_to_index_mcp < hand_width * 0.7
+        # 滞后阈值：进入 tucked 需要更近（0.65），退出 tucked 需要更远（0.78）
+        # 避免拇指在边界距离时书写/悬停状态来回抖动
+        if self._was_tucked:
+            thumb_tucked = thumb_tip_to_index_mcp < hand_width * 0.78
+        else:
+            thumb_tucked = thumb_tip_to_index_mcp < hand_width * 0.65
+        self._was_tucked = thumb_tucked
         thumb_extended = thumb_tip_to_index_mcp > hand_width * 1.2
 
-        thumb_folded = thumb_tucked or (not thumb_up and not thumb_extended)
+        thumb_folded = thumb_tucked or (not thumb_up and not thumb_extended) or \
+                      (not thumb_up and thumb_tip_to_index_mcp < hand_width * 0.9)
 
         thumb_tip = landmarks[4]
         thumb_ip = landmarks[3]
@@ -120,13 +134,38 @@ class GestureRecognizer:
         self.last_action_time = time.time()
         self.history_x.clear()
         self.history_y.clear()
+        # 清理残留状态，防止模式切换后误触发
+        self._was_tucked = False
+        if hasattr(self, '_scissor_frames'):
+            self._scissor_frames = 0
+        if hasattr(self, '_scroll_direction'):
+            self._scroll_direction = 0
+        if hasattr(self, '_scroll_frames'):
+            self._scroll_frames = 0
+        if hasattr(self, '_two_hand_hold_frames'):
+            self._two_hand_hold_frames = 0
+        if hasattr(self, '_fist_confirm_frames'):
+            self._fist_confirm_frames = 0
 
     def _check_swipe(self):
         if len(self.history_x) < 4:
             return "NONE"
         dx = self.history_x[-1] - self.history_x[0]
         dy = self.history_y[-1] - self.history_y[0]
-        if abs(dx) < self.swipe_threshold and abs(dy) < self.swipe_threshold:
+
+        # 边缘区域灵敏度降级：轨迹起点或终点靠近画面边缘时提高阈值
+        # 解决 B11：手在边缘做非挥动动作时的误触发
+        # 使用相对边缘比例而非硬编码像素值，适配不同摄像头分辨率
+        edge_ratio = 0.12  # 画面边缘 12% 区域视为边缘
+        edge_x = self.frame_w * edge_ratio
+        edge_y = self.frame_h * edge_ratio
+        x_vals = (self.history_x[0], self.history_x[-1])
+        y_vals = (self.history_y[0], self.history_y[-1])
+        in_edge = any(v < edge_x or v > self.frame_w - edge_x for v in x_vals) or \
+                  any(v < edge_y or v > self.frame_h - edge_y for v in y_vals)
+        effective_threshold = self.swipe_threshold * (1.5 if in_edge else 1.0)
+
+        if abs(dx) < effective_threshold and abs(dy) < effective_threshold:
             return "NONE"
 
         pairwise_dx = [self.history_x[i+1] - self.history_x[i] for i in range(len(self.history_x) - 1)]
@@ -143,12 +182,12 @@ class GestureRecognizer:
             if avg_speed < self.swipe_threshold / 4:
                 logger.info(f"Swipe rejected: avg_speed {avg_speed:.1f} too low")
                 return "NONE"
-            if dx > self.swipe_threshold:
-                logger.info(f"=> Trigger: SWIPE_RIGHT (consistency={ratio:.2f}, speed={avg_speed:.1f})")
+            if dx > effective_threshold:
+                logger.info(f"=> Trigger: SWIPE_RIGHT (consistency={ratio:.2f}, speed={avg_speed:.1f}, edge={in_edge})")
                 self._reset_state()
                 return "SWIPE_RIGHT"
-            elif dx < -self.swipe_threshold:
-                logger.info(f"=> Trigger: SWIPE_LEFT (consistency={ratio:.2f}, speed={avg_speed:.1f})")
+            elif dx < -effective_threshold:
+                logger.info(f"=> Trigger: SWIPE_LEFT (consistency={ratio:.2f}, speed={avg_speed:.1f}, edge={in_edge})")
                 self._reset_state()
                 return "SWIPE_LEFT"
         else:
@@ -162,12 +201,12 @@ class GestureRecognizer:
             if avg_speed < self.swipe_threshold / 4:
                 logger.info(f"Swipe rejected: avg_speed {avg_speed:.1f} too low")
                 return "NONE"
-            if dy < -self.swipe_threshold:
-                logger.info(f"=> Trigger: SWIPE_UP (consistency={ratio:.2f}, speed={avg_speed:.1f})")
+            if dy < -effective_threshold:
+                logger.info(f"=> Trigger: SWIPE_UP (consistency={ratio:.2f}, speed={avg_speed:.1f}, edge={in_edge})")
                 self._reset_state()
                 return "SWIPE_UP"
-            elif dy > self.swipe_threshold:
-                logger.info(f"=> Trigger: SWIPE_DOWN (consistency={ratio:.2f}, speed={avg_speed:.1f})")
+            elif dy > effective_threshold:
+                logger.info(f"=> Trigger: SWIPE_DOWN (consistency={ratio:.2f}, speed={avg_speed:.1f}, edge={in_edge})")
                 self._reset_state()
                 return "SWIPE_DOWN"
         return "NONE"
@@ -296,9 +335,14 @@ class GestureRecognizer:
             self._reset_state()
             return "FIST"
         if ml_label in ("OTHER", "None") and features["is_fist"]:
-            logger.info("=> Trigger: FIST (fallback)")
-            self._reset_state()
-            return "FIST"
+            self._fist_confirm_frames += 1
+            if self._fist_confirm_frames >= 3:
+                logger.info("=> Trigger: FIST (fallback, confirmed %d frames)", self._fist_confirm_frames)
+                self._fist_confirm_frames = 0
+                self._reset_state()
+                return "FIST"
+        else:
+            self._fist_confirm_frames = 0
 
         if features["is_scissor"]:
             self._scissor_frames = getattr(self, '_scissor_frames', 0) + 1

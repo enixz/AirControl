@@ -7,6 +7,81 @@ import threading
 logger = logging.getLogger(__name__)
 
 
+# 关键字段校验 schema：(type, validator, default)
+# validator 是 callable，返回 True 表示通过；类型不符或验证不过用默认值
+def _is_num_in(lo, hi):
+    return lambda v: isinstance(v, (int, float)) and lo <= v <= hi
+
+
+def _is_int_in(lo, hi):
+    return lambda v: isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+_CONFIG_SCHEMA = {
+    "camera_index": (int, _is_int_in(0, 9), 0),
+    "camera_width": (
+        (int, type(None)),
+        lambda v: v is None or (isinstance(v, int) and 320 <= v <= 4096),
+        None,
+    ),
+    "camera_height": (
+        (int, type(None)),
+        lambda v: v is None or (isinstance(v, int) and 240 <= v <= 2160),
+        None,
+    ),
+    "camera_min_fps": (int, _is_int_in(5, 60), 20),
+    "cooldown": ((int, float), _is_num_in(0.0, 10.0), 1.0),
+    "swipe_threshold": (int, _is_int_in(10, 500), 60),
+    "mouse_sensitivity": (int, _is_int_in(1, 200), 40),
+    "pen_width": (int, _is_int_in(1, 100), 15),
+    "edge_acceleration_strength": (int, _is_int_in(0, 500), 30),
+    "edge_y_canvas_deadzone_bottom": (int, _is_int_in(0, 100), 18),
+    "edge_y_canvas_deadzone_top": (int, _is_int_in(0, 100), 10),
+    "dominant_hand": (
+        str,
+        lambda v: v in ("Left", "Right", "Auto"),
+        "Auto",
+    ),
+    "hand_detection_confidence": ((int, float), _is_num_in(0.1, 1.0), 0.6),
+    "hand_presence_confidence": ((int, float), _is_num_in(0.1, 1.0), 0.5),
+    "hand_tracking_confidence": ((int, float), _is_num_in(0.1, 1.0), 0.5),
+    "model_type": (str, lambda v: v in ("Heavy", "Lite", "Full"), "Heavy"),
+    "interaction_mode": (
+        str,
+        lambda v: v in ("mouse", "draw", "presentation"),
+        "mouse",
+    ),
+    "voice_command_threshold": ((int, float), _is_num_in(0.0, 1.0), 0.25),
+    "dictation_num_threads": (int, _is_int_in(1, 16), 2),
+    "floating_window_scale": ((int, float), _is_num_in(1.0, 3.0), 1.5),
+}
+
+
+def _validate_config(cfg):
+    """逐字段校验，错误用默认值兜底，返回修正后的 dict 和警告列表。"""
+    warnings = []
+    for key, (expected_type, validator, default) in _CONFIG_SCHEMA.items():
+        if key not in cfg:
+            continue
+        value = cfg[key]
+        # 类型检查 (bool 被排除在 int 之外)
+        if not isinstance(value, expected_type) or (
+            expected_type is int and isinstance(value, bool)
+        ):
+            warnings.append(
+                f"{key}={value!r} 类型不符（期望 {expected_type}），使用默认值 {default!r}"
+            )
+            cfg[key] = default
+            continue
+        # 业务规则
+        if not validator(value):
+            warnings.append(
+                f"{key}={value!r} 超出有效范围，使用默认值 {default!r}"
+            )
+            cfg[key] = default
+    return cfg, warnings
+
+
 class ConfigManager:
     def __init__(self, config_file="config.json"):
         if getattr(sys, 'frozen', False):
@@ -56,6 +131,10 @@ class ConfigManager:
                     merged_mapping = self.default_config["gesture_mapping"].copy()
                     merged_mapping.update(user_config.get("gesture_mapping", {}))
                     merged["gesture_mapping"] = merged_mapping
+                    # Schema 校验：错误字段用默认值兜底，避免误编辑导致黑屏
+                    merged, warnings = _validate_config(merged)
+                    for w in warnings:
+                        logger.warning("配置校验: %s", w)
                     return merged
             except Exception as e:
                 logger.warning("读取配置失败，使用默认配置: %s", e)
@@ -80,8 +159,9 @@ class ConfigManager:
     def batch_update(self):
         return _BatchContext(self)
 
-    def get(self, key):
-        return self.config.get(key)
+    def get(self, key, *args):
+        """获取配置值。支持可选默认值：config.get("key") 或 config.get("key", default)。"""
+        return self.config.get(key, *args)
 
     def set(self, key, value):
         self.config[key] = value

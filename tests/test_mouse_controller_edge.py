@@ -15,7 +15,10 @@ mock_windll = types.ModuleType('ctypes.windll')
 mock_user32 = types.ModuleType('user32')
 FAKE_SCREEN_W = 1920
 FAKE_SCREEN_H = 1080
-mock_user32.GetSystemMetrics = lambda idx: FAKE_SCREEN_W if idx == 0 else FAKE_SCREEN_H
+
+# SM_CXVIRTUALSCREEN=78, SM_CYVIRTUALSCREEN=79 也需要 mock（多显示器支持）
+_VIRTUAL_METRICS = {0: FAKE_SCREEN_W, 1: FAKE_SCREEN_H, 78: FAKE_SCREEN_W, 79: FAKE_SCREEN_H}
+mock_user32.GetSystemMetrics = lambda idx: _VIRTUAL_METRICS.get(idx, FAKE_SCREEN_H)
 mock_user32.GetCursorPos = lambda pt: None
 mock_user32.SetCursorPos = lambda x, y: None
 mock_user32.mouse_event = lambda *a: None
@@ -30,6 +33,10 @@ sys.modules['ctypes.wintypes'] = mock_ctypes.wintypes
 _app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app')
 sys.path.insert(0, _app_dir)
 sys.path.insert(0, os.path.join(_app_dir, 'services'))
+
+import mouse_controller as _mc_module
+# 强制替换已加载模块中的 user32 引用，防止模块缓存导致 mock 不生效
+_mc_module.user32 = mock_user32
 
 from mouse_controller import MouseController, _edge_map
 

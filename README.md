@@ -39,7 +39,7 @@
 
 ### 🎤 语音助手
 - **离线唤醒**：Sherpa-ONNX 关键词检测（隐私保护）
-- **在线识别**：腾讯云 ASR 自由文本输入
+- **离线听写**：SenseVoice-Small 把语音直接写到屏幕
 - **模式感知**：不同模式自动切换语音指令
 
 </td>
@@ -48,17 +48,19 @@
 <td>
 
 ### 🧠 智能识别
-- **卡尔曼滤波**：21 关键点双重平滑
+- **主控手自动选择**：抬哪只手用哪只手，配置零关心
+- **卡尔曼滤波 + 幽灵手恢复**：21 关键点双重平滑，短暂遮挡自动补帧
 - **形状校正**：自动识别并修正手绘图形
-- **边缘加速**：鼠标靠近屏幕边缘自动加速
+- **笔触距离自适应**：远距离自动变细，近距离自动变粗
 
 </td>
 <td>
 
 ### ⚡ 高性能
-- **异步推理**：后台线程处理 MediaPipe
-- **30 FPS**：实时流畅的手势追踪
-- **低延迟**：< 50ms 响应时间
+- **自动摄像头分辨率探测**：跨设备零配置，自动选最高 ≥20fps 模式
+- **MJPEG 强制编码**：720p 也能跑满 30fps（HD-3000 等老摄像头友好）
+- **WPS / PPT 自动定位**：扫注册表 + 通配搜索，换电脑无需改路径
+- **断线自动重连**：USB 摄像头被拔出会自动恢复
 
 </td>
 </tr>
@@ -155,17 +157,34 @@ AirControl 集成双引擎语音系统：
 - **唤醒词**：可自定义（默认："小助手"）
 - **指令**：播放、暂停、上一页、下一页等固定命令
 
-#### 在线语音识别（ASR）
-- **引擎**：腾讯云实时语音识别
-- **场景**：板书模式"打在屏幕上"功能
-- **能力**：自由文本输入，支持中英文混合
-- **限制**：需要 API 密钥（5 小时/月免费额度）
+#### 离线语音听写（ASR）
+- **引擎**：SenseVoice-Small（阿里达摩院开源，sherpa-onnx 加载）
+- **场景**：板书模式说 **"开始板书"** 开始录音，说 **"结束板书"** 停止并将语音转为文字写到画布
+- **能力**：自由文本输入；支持中、英、日、韩、粤语自动检测
+- **特性**：完全离线、无 API 配置、ITN 标点自动还原
+- **磁盘占用**：模型约 234 MB（int8 量化）
+
+##### 模型下载
+
+```bash
+# 从 sherpa-onnx 官方发布页下载 SenseVoice-Small
+# https://github.com/k2-fsa/sherpa-onnx/releases (tag: asr-models)
+# 文件名：sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
+
+# 解压后将整个目录重命名/移动到 AirControl/models/sense-voice/
+# 期望结构：
+#   models/sense-voice/
+#     ├── model.int8.onnx
+#     └── tokens.txt
+```
+
+未放置模型时听写功能自动停用，KWS 关键词不受影响。
 
 #### 模式感知
 语音指令会根据当前模式自动切换：
 - **演示模式**：播放、暂停、上一页、下一页
 - **鼠标模式**：点击、右键、滚动
-- **板书模式**：清屏、撤销、打在屏幕上
+- **板书模式**：清屏、撤销、开始板书/结束板书
 
 ---
 
@@ -214,7 +233,7 @@ AirControl 集成双引擎语音系统：
 | GUI | PyQt6 | 悬浮窗、设置面板、覆盖层 |
 | 鼠标控制 | Win32 API | SetCursorPos、mouse_event |
 | 语音 KWS | Sherpa-ONNX | 离线关键词检测 |
-| 语音 ASR | 腾讯云 | 在线语音识别 |
+| 语音 ASR | SenseVoice-Small（ONNX） | 离线语音听写 |
 | 音频采集 | sounddevice | 实时音频流 |
 
 ---
@@ -234,6 +253,27 @@ AirControl 集成双引擎语音系统：
 | 边缘加速 | 鼠标靠近边缘时自动加速 | 开启 |
 | 语音助手 | 选择语音助手应用 | 豆包 |
 | 动作映射 | 各手势对应的具体操作 | 见 `config.json` |
+
+### 进阶配置（直接编辑 `config.json`）
+
+| 字段 | 说明 | 默认 |
+|------|------|------|
+| `camera_width` / `camera_height` | 摄像头分辨率，`null` 时自动探测最高 ≥ min_fps 的模式 | `null` |
+| `camera_min_fps` | 自动探测时帧率下限，达不到的分辨率会被跳过 | 20 |
+| `camera_force_mjpeg` | 强制 MJPEG 编码（老摄像头 720p 上 30fps 必需） | true |
+| `dominant_hand` | 惯用手偏好：`Auto` / `Left` / `Right`，Auto 时纯靠运动+高度+近远自动选 | `Auto` |
+| `hand_detection_confidence` | 手部检测阈值，远距离调低（0.4-0.6） | 0.6 |
+| `hand_presence_confidence` | 手在画面中的判定阈值 | 0.5 |
+| `hand_tracking_confidence` | 帧间跟踪阈值 | 0.5 |
+| `pen_width_auto_scale` | 笔触粗细随手距自动缩放 | true |
+| `dictation_enabled` | 启用 SenseVoice 离线语音听写（draw 模式说"开始板书"） | true |
+| `dictation_language` | 听写语种：`auto`/`zh`/`en`/`ja`/`ko`/`yue` | `auto` |
+| `wps_exe_path` | 手动覆盖 WPS 路径，自动定位失败时用 | （无） |
+| `debug_overlay` | 启动即显示 FPS/手数/handedness 等调试信息 | false |
+
+> 💡 调试覆盖层也可以**运行时按 F1 切换**——不用改 config 重启。
+
+错误的配置值会被 schema 校验拦截并回退默认值（日志里会打 warning），不会让程序黑屏。
 
 配置会自动保存到 `config.json` 文件中。
 
@@ -265,10 +305,12 @@ AirControl/
 │   │   ├── ppt_controller.py      # PPT/WPS 控制
 │   │   ├── shape_recognizer.py    # 形状识别器
 │   │   ├── voice_assistant.py     # 语音助手服务
-│   │   └── voice_command.py       # 语音命令处理
+│   │   ├── voice_command.py       # 语音命令处理（KWS）
+│   │   └── voice_dictation.py     # 语音听写（SenseVoice-Small）
 │   └── voice_keywords/            # 语音关键词配置
 ├── models/
-│   └── kws-zh-wenetspeech/       # 语音唤醒词模型
+│   ├── kws-zh-wenetspeech/        # 语音唤醒词模型
+│   └── sense-voice/               # SenseVoice-Small ASR 模型（手动下载）
 ├── tests/                         # 单元测试
 ├── config.json                    # 用户配置文件
 ├── requirements.txt               # Python 依赖

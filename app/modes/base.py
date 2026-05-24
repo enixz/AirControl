@@ -51,3 +51,9 @@ class ModeBase(ABC):
     def handle(self, hands_landmarks, hands_gestures, frame_w, frame_h) -> ModeResult:
         """每帧调用，处理手势逻辑并返回结果。"""
         pass
+
+    def _sync_frame_size(self, frame_w, frame_h):
+        """将当前帧尺寸同步到 recognizer，用于边缘检测等自适应逻辑。"""
+        if self.recognizer:
+            self.recognizer.frame_w = max(frame_w, 1)
+            self.recognizer.frame_h = max(frame_h, 1)

@@ -1,7 +1,7 @@
 {
     "target_app": "WPS",
     "model_type": "Heavy",
-    "interaction_mode": "mouse",
+    "interaction_mode": "draw",
     "camera_index": 0,
     "cooldown": 1.0,
     "swipe_threshold": 60,
@@ -23,9 +23,22 @@
         "SCISSOR": "launch_voice_assistant",
         "THUMB_DOWN": "hang_up_voice_assistant"
     },
+    "camera_width": null,
+    "camera_height": null,
+    "camera_force_mjpeg": true,
+    "camera_min_fps": 20,
+    "pen_width_auto_scale": true,
+    "dominant_hand": "Auto",
+    "hand_detection_confidence": 0.6,
+    "hand_presence_confidence": 0.5,
+    "hand_tracking_confidence": 0.5,
     "voice_command_enabled": true,
     "voice_command_threshold": 0.25,
-    "tencent_asr_enabled": false,
-    "tencent_asr_secret_id": "",
-    "tencent_asr_secret_key": ""
+    "dictation_enabled": true,
+    "dictation_model_dir": "models/sense-voice",
+    "dictation_language": "auto",
+    "dictation_use_itn": true,
+    "dictation_num_threads": 2,
+    "debug_overlay": false,
+    "floating_window_scale": 1.5
 }

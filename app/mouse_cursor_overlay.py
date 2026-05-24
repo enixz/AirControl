@@ -13,6 +13,13 @@ WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_TOOLWINDOW = 0x00000080  # 不在任务栏和 Alt-Tab 中显示
 
+# SetWindowPos 用：把光标层钉在 topmost 组的最上面，避免被后开的对话框遮住
+_HWND_TOPMOST = -1
+_SWP_NOMOVE = 0x0002
+_SWP_NOSIZE = 0x0001
+_SWP_NOACTIVATE = 0x0010
+_SWP_NOSENDCHANGING = 0x0400
+
 
 class MouseCursorOverlay(QWidget):
     """鼠标模式下的视觉反馈层。
@@ -53,6 +60,8 @@ class MouseCursorOverlay(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
+        # _tick 内部计数器，每 N 次主 tick 重新把自己拉到 topmost 组最上层
+        self._topmost_tick = 0
         # 定时器在 show_fullscreen 时启动，hide 时停止，避免隐藏时无意义调用
         self.hide()
 
@@ -123,6 +132,8 @@ class MouseCursorOverlay(QWidget):
         self._pos = (int(x / self._dpr), int(y / self._dpr))
         if self.isVisible():
             self._hide_system_cursor()
+            # 鼠标动了就立刻保证可见，不依赖定时器的 50ms 节奏
+            self._reapply_topmost()
             self.update()
 
     def hide_cursor(self):
@@ -171,6 +182,28 @@ class MouseCursorOverlay(QWidget):
             dirty = True
         if dirty:
             self.update()
+
+        # 每 ~50ms 重新拉到 topmost 组最上层。否则后开的 topmost 窗口
+        # （如语音指令面板）会盖在光标上面，用户看不到自己鼠标移到了哪里。
+        # WS_EX_TRANSPARENT 已保证点击穿透，把光标钉在最上面不影响交互。
+        # SetWindowPos NOACTIVATE/NOMOVE/NOSIZE 路径很轻量，60Hz 调用也没明显开销。
+        self._topmost_tick += 1
+        if self._topmost_tick >= 3:  # 3 × 16ms ≈ 48ms ≈ 20Hz
+            self._topmost_tick = 0
+            self._reapply_topmost()
+
+    def _reapply_topmost(self):
+        """通过 Win32 SetWindowPos 把自己钉回 topmost 组最上层。
+        NOACTIVATE 保证不抢焦点，NOMOVE/NOSIZE 不动几何。
+        """
+        try:
+            ctypes.windll.user32.SetWindowPos(
+                int(self.winId()), _HWND_TOPMOST, 0, 0, 0, 0,
+                _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE | _SWP_NOSENDCHANGING,
+            )
+        except Exception:
+            # 静默失败：失效一帧不要紧，下次 tick 再试
+            pass
 
     def paintEvent(self, event):
         if self._pos is None:

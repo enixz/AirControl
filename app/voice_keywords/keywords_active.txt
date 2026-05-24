@@ -1,8 +1,9 @@
-d iǎn y ī x ià @点一下
-sh uāng j ī @双击
-y òu j iàn @右键
+q īng p íng @清屏
+k āi sh ǐ b ǎn sh ū @开始板书
+j ié sh ù b ǎn sh ū @结束板书
 z uì x iǎo h uà zh ù sh ǒu @最小化助手
-h uàn x ǐng zh ù sh ǒu @唤醒助手
-q iè m ó sh ì @切模式
-b ǎn sh ū m ó sh ì @板书模式
+x iǎn sh ì zh ù sh ǒu @显示助手
+zh ào h uàn d òu b āo @召唤豆包
 y ǎn sh ì m ó sh ì @演示模式
+sh ǔ b iāo m ó sh ì @鼠标模式
+t ú x íng x iū zh èng @图形修正
