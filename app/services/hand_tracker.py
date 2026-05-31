@@ -135,13 +135,20 @@ class HandTracker(BaseHandTracker):
         else:
             base_dir = project_root
 
-        gesture_candidates = [os.path.join(base_dir, "gesture_recognizer.task")]
+        gesture_candidates = [
+            os.path.join(base_dir, "gesture_recognizer.task"),
+            os.path.join(base_dir, "models", "gesture_recognizer.task"),
+        ]
         heavy_candidates = [
             os.path.join(base_dir, "hand_landmarker_heavy.task"),
+            os.path.join(base_dir, "models", "hand_landmarker_heavy.task"),
             os.path.join(base_dir, "hand_landmarker_full.task"),
+            os.path.join(base_dir, "models", "hand_landmarker_full.task"),
         ]
-        lite_candidates = [os.path.join(base_dir, "hand_landmarker.task")]
-
+        lite_candidates = [
+            os.path.join(base_dir, "hand_landmarker.task"),
+            os.path.join(base_dir, "models", "hand_landmarker.task"),
+        ]
         if str(preferred_model_type).lower() == "lite":
             candidates = gesture_candidates + lite_candidates + heavy_candidates
         else:

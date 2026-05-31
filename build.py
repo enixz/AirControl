@@ -26,10 +26,14 @@ def build():
         "--windowed",        # 隐藏命令行窗口
         "--name", "AirControl",
         "--add-data", f"{mediapipe_dir};mediapipe",
-        "--add-data", "gesture_recognizer.task;.",
     ]
     
-    # 强制包含 Python 运行时 DLL，解决由于环境问题导致的 Failed to load Python DLL 问题
+    # gesture_recognizer.task
+    if os.path.exists("gesture_recognizer.task"):
+        cmd.extend(["--add-data", "gesture_recognizer.task;."])
+    elif os.path.exists(os.path.join("models", "gesture_recognizer.task")):
+        cmd.extend(["--add-data", "models/gesture_recognizer.task;."])
+    
     # 动态查找 python3x.dll，兼容不同 Python 版本
     python_dir = os.path.dirname(sys.executable)
     python_ver = f"python{sys.version_info.major}{sys.version_info.minor}.dll"
@@ -46,6 +50,8 @@ def build():
     for model in ["hand_landmarker.task", "hand_landmarker_heavy.task", "hand_landmarker_full.task"]:
         if os.path.exists(model):
             cmd.extend(["--add-data", f"{model};."])
+        elif os.path.exists(os.path.join("models", model)):
+            cmd.extend(["--add-data", f"models/{model};."])
             
     cmd.append(os.path.join("app", "main_ui.py"))
     
