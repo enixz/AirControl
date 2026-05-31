@@ -16,8 +16,10 @@ import cv2
 
 logger = logging.getLogger(__name__)
 
-# 候选分辨率（高 → 低）。不放 4K：MediaPipe 在 4K 下推理成本爆炸，且消费级摄像头几乎没有
+# 候选分辨率（高 → 低）
 _RESOLUTION_CANDIDATES = [
+    (3840, 2160),   # 4K
+    (2560, 1440),   # 2K
     (1920, 1080),
     (1280, 720),
     (960, 540),

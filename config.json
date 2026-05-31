@@ -2,7 +2,7 @@
     "target_app": "WPS",
     "model_type": "Heavy",
     "interaction_mode": "draw",
-    "camera_index": 0,
+    "camera_index": 1,
     "cooldown": 1.0,
     "swipe_threshold": 60,
     "mouse_sensitivity": 40,
@@ -23,6 +23,7 @@
         "SCISSOR": "launch_voice_assistant",
         "THUMB_DOWN": "hang_up_voice_assistant"
     },
+    "detection_engine": "mediapipe",
     "camera_width": null,
     "camera_height": null,
     "camera_force_mjpeg": true,

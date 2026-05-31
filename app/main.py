@@ -7,7 +7,7 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from services.camera import CameraService
-from services.hand_tracker import HandTracker
+from services.hand_tracker_factory import create_hand_tracker
 from services.gesture_recognizer import GestureRecognizer
 from services.ppt_controller import PptController
 
@@ -18,7 +18,7 @@ def main():
     print("正在初始化模块...")
     
     camera = CameraService(camera_index=0)
-    tracker = HandTracker(max_num_hands=1, min_detection_confidence=0.7)
+    tracker = create_hand_tracker(engine="mediapipe", max_num_hands=1, min_detection_confidence=0.7)
     recognizer = GestureRecognizer(cooldown=1.0, swipe_threshold=60)
     ppt = PptController()
     

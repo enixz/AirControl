@@ -6,3 +6,9 @@ numpy
 psutil
 sherpa-onnx
 sounddevice
+ultralytics>=8.3.0
+# GPU 推理（CUDA 11.8+ / 12.x）
+# 安装命令: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# 或者: pip install torch torchvision（自动检测 CUDA 版本）
+torch>=2.1.0
+torchvision>=0.16.0

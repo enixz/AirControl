@@ -33,7 +33,7 @@ from modes import DrawMode, MouseMode, PresentationMode
 from mouse_cursor_overlay import MouseCursorOverlay
 from services.camera import CameraService, list_available_cameras
 from services.gesture_recognizer import GestureRecognizer
-from services.hand_tracker import HandTracker
+from services.hand_tracker_factory import create_hand_tracker
 from services.inference_worker import InferenceWorker
 from services.mouse_controller import MouseController
 from services.ppt_controller import PptController
@@ -336,7 +336,9 @@ class FloatingWindow(QMainWindow):
             min_fps=self.config.get("camera_min_fps") or 20,
         )
         self.camera.start()
-        self.tracker = HandTracker(
+        engine = os.environ.get("AIRCONTROL_ENGINE") or self.config.get("detection_engine", "mediapipe")
+        self.tracker = create_hand_tracker(
+            engine=engine,
             max_num_hands=2,
             min_detection_confidence=self.config.get("hand_detection_confidence") or 0.6,
             min_presence_confidence=self.config.get("hand_presence_confidence") or 0.5,
@@ -723,7 +725,9 @@ class FloatingWindow(QMainWindow):
         self.voice_assistant.set_assistant(self.config.get("voice_assistant"))
         
         # 线程安全地更新tracker
-        new_tracker = HandTracker(
+        engine = os.environ.get("AIRCONTROL_ENGINE") or self.config.get("detection_engine", "mediapipe")
+        new_tracker = create_hand_tracker(
+            engine=engine,
             max_num_hands=2,
             min_detection_confidence=self.config.get("hand_detection_confidence") or 0.6,
             min_presence_confidence=self.config.get("hand_presence_confidence") or 0.5,
