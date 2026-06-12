@@ -412,7 +412,7 @@ class AirControlOrchestrator(QObject):
             hands_landmarks = []
             hands_gestures = []
 
-        switched = self.mode_manager.maybe_switch_by_gesture(hands_landmarks, frame_w)
+        switched = self.mode_manager.maybe_switch_by_gesture(hands_landmarks, hands_gestures, frame_w)
 
         gesture = "NONE"
         if switched:

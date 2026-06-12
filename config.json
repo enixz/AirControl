@@ -21,6 +21,8 @@
     "hand_smoothing_beta": 0.015,
     "zoom_miss_frames": 10,
     "face_detect_short": 400,
+    "mode_switch_hold_sec": 1.0,
+    "mode_switch_vote_ratio": 0.6,
     "gesture_mapping": {
         "SWIPE_RIGHT": "next_slide",
         "SWIPE_LEFT": "prev_slide",
