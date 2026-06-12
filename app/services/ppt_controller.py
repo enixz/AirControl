@@ -187,7 +187,36 @@ class PptController:
     def set_target_app(self, target_app):
         self.target_app = target_app
 
+    def _ensure_app_active(self):
+        """确保目标演示软件（WPS或PowerPoint）处于前台活动状态。"""
+        def enum_windows_callback(hwnd, hwnds):
+            if win32gui.IsWindowVisible(hwnd):
+                title = win32gui.GetWindowText(hwnd)
+                if self.target_app == "WPS":
+                    if "WPS 演示" in title or "WPS Presentation" in title or "- WPS Office" in title:
+                        hwnds.append(hwnd)
+                else:
+                    if "PowerPoint" in title:
+                        hwnds.append(hwnd)
+
+        hwnds = []
+        win32gui.EnumWindows(enum_windows_callback, hwnds)
+
+        if hwnds:
+            try:
+                curr_hwnd = win32gui.GetForegroundWindow()
+                if curr_hwnd in hwnds:
+                    return True  # 已经是当前活动窗口，无需重新切换，避免抖动和延迟
+                win32gui.ShowWindow(hwnds[0], win32con.SW_RESTORE)
+                win32gui.SetForegroundWindow(hwnds[0])
+                logger.info("已自动激活并置顶 %s 窗口", self.target_app)
+                return True
+            except Exception as e:
+                logger.warning("自动激活窗口失败: %s", e)
+        return False
+
     def next_slide(self):
+        self._ensure_app_active()
         # 模拟按下 PageDown
         win32api.keybd_event(win32con.VK_NEXT, 0, 0, 0)
         win32api.keybd_event(win32con.VK_NEXT, 0, win32con.KEYEVENTF_KEYUP, 0)
@@ -195,6 +224,7 @@ class PptController:
         return True
 
     def prev_slide(self):
+        self._ensure_app_active()
         # 模拟按下 PageUp
         win32api.keybd_event(win32con.VK_PRIOR, 0, 0, 0)
         win32api.keybd_event(win32con.VK_PRIOR, 0, win32con.KEYEVENTF_KEYUP, 0)
@@ -202,6 +232,7 @@ class PptController:
         return True
         
     def start_presentation(self):
+        self._ensure_app_active()
         # 模拟 F5
         win32api.keybd_event(win32con.VK_F5, 0, 0, 0)
         win32api.keybd_event(win32con.VK_F5, 0, win32con.KEYEVENTF_KEYUP, 0)
@@ -209,6 +240,7 @@ class PptController:
         return True
         
     def end_presentation(self):
+        self._ensure_app_active()
         # 模拟 ESC
         win32api.keybd_event(win32con.VK_ESCAPE, 0, 0, 0)
         win32api.keybd_event(win32con.VK_ESCAPE, 0, win32con.KEYEVENTF_KEYUP, 0)
@@ -251,10 +283,10 @@ class PptController:
                 else:
                     if "PowerPoint" in title:
                         hwnds.append(hwnd)
-                    
+
         hwnds = []
         win32gui.EnumWindows(enum_windows_callback, hwnds)
-        
+
         if hwnds:
             try:
                 win32gui.ShowWindow(hwnds[0], win32con.SW_RESTORE)

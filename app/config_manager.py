@@ -54,6 +54,20 @@ _CONFIG_SCHEMA = {
     "voice_command_threshold": ((int, float), _is_num_in(0.0, 1.0), 0.25),
     "dictation_num_threads": (int, _is_int_in(1, 16), 2),
     "floating_window_scale": ((int, float), _is_num_in(1.0, 3.0), 1.5),
+    "zoom_sr_engine": (
+        str,
+        lambda v: v in ("auto", "espcn", "realesrgan_cpu", "realesrgan_gpu", "none"),
+        "auto",
+    ),
+    # crop-zoom 触发阈值（手 bbox 占全帧比）。far 越小→越远才放大（板书近距离更稳）。
+    "zoom_far_threshold": ((int, float), _is_num_in(0.001, 0.05), 0.008),
+    "zoom_near_threshold": ((int, float), _is_num_in(0.01, 0.20), 0.040),
+    # 手部关键点一欧元滤波：min_cutoff 越小静止越不抖；beta 越大运动越跟手。
+    "hand_smoothing_min_cutoff": ((int, float), _is_num_in(0.05, 5.0), 0.5),
+    "hand_smoothing_beta": ((int, float), _is_num_in(0.0, 1.0), 0.015),
+    # 远距离 ZOOM 鲁棒性：连续丢帧多少帧才断 ZOOM；人脸检测短边分辨率（越大越能找回远处的手）。
+    "zoom_miss_frames": (int, _is_int_in(3, 60), 10),
+    "face_detect_short": (int, _is_int_in(240, 1280), 400),
 }
 
 
@@ -99,12 +113,20 @@ class ConfigManager:
             "swipe_threshold": 60,
             "mouse_sensitivity": 40,
             "pen_width": 15,
+            "pen_width_auto_scale": False,
             "edge_acceleration_enabled": False,
             "edge_acceleration_strength": 30,
             "edge_y_canvas_enabled": True,
             "edge_y_canvas_deadzone_bottom": 18,
             "edge_y_canvas_deadzone_top": 10,
             "voice_assistant": "doubao",
+            "zoom_sr_engine": "auto",
+            "zoom_far_threshold": 0.008,
+            "zoom_near_threshold": 0.040,
+            "hand_smoothing_min_cutoff": 0.5,
+            "hand_smoothing_beta": 0.015,
+            "zoom_miss_frames": 10,
+            "face_detect_short": 400,
             "gesture_mapping": {
                 "SWIPE_RIGHT": "next_slide",
                 "SWIPE_LEFT": "prev_slide",

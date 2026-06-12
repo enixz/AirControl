@@ -49,21 +49,39 @@ class HandTracker(BaseHandTracker):
         min_tracking_confidence=0.5,
         preferred_model_type="Heavy",
         dominant_hand="Right",
+        config=None,
     ):
-        super().__init__(max_num_hands=max_num_hands, dominant_hand=dominant_hand)
+        super().__init__(max_num_hands=max_num_hands, dominant_hand=dominant_hand, config=config)
 
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self.model_path = self._resolve_model_path(project_root, preferred_model_type)
+
+        # 根据文件名判断是 HandLandmarker 还是 GestureRecognizer
+        is_landmarker = "landmarker" in os.path.basename(self.model_path).lower()
+
         base_options = python.BaseOptions(model_asset_path=self.model_path)
-        options = vision.GestureRecognizerOptions(
-            base_options=base_options,
-            running_mode=vision.RunningMode.IMAGE if static_image_mode else vision.RunningMode.VIDEO,
-            num_hands=max_num_hands,
-            min_hand_detection_confidence=min_detection_confidence,
-            min_hand_presence_confidence=min_presence_confidence,
-            min_tracking_confidence=min_tracking_confidence,
-        )
-        self.detector = vision.GestureRecognizer.create_from_options(options)
+        if is_landmarker:
+            options = vision.HandLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE if static_image_mode else vision.RunningMode.VIDEO,
+                num_hands=max_num_hands,
+                min_hand_detection_confidence=min_detection_confidence,
+                min_hand_presence_confidence=min_presence_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+            self.detector = vision.HandLandmarker.create_from_options(options)
+            self._is_pure_landmarker = True
+        else:
+            options = vision.GestureRecognizerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE if static_image_mode else vision.RunningMode.VIDEO,
+                num_hands=max_num_hands,
+                min_hand_detection_confidence=min_detection_confidence,
+                min_hand_presence_confidence=min_presence_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+            self.detector = vision.GestureRecognizer.create_from_options(options)
+            self._is_pure_landmarker = False
 
         self.mp_hands = mp.solutions.hands if hasattr(mp, 'solutions') else None
         self.mp_draw = mp.solutions.drawing_utils if hasattr(mp, 'solutions') else None
@@ -88,40 +106,22 @@ class HandTracker(BaseHandTracker):
         detection_result = self._run_recognizer(frame)
         return self._extract_results(detection_result, w, h)
 
-    def _detect_crop_zoom(self, frame, hint_center, hint_size):
+    def _detect_crop_zoom(self, frame, crop_center, crop_size):
         """裁剪放大 → MediaPipe → 坐标映射回原帧。"""
         h, w, _ = frame.shape
 
-        # 计算裁剪区域
-        crop_size = int(hint_size * self._crop_padding_ratio)
-        crop_size = max(crop_size, 240)
-        crop_size = min(crop_size, min(w, h))
-
-        if crop_size >= int(min(w, h) * 0.85):
+        # 调用基类的通用 _perform_crop_zoom
+        res = self._perform_crop_zoom(
+            frame, crop_center, crop_size,
+            run_sub_detect=self._run_recognizer
+        )
+        if not res or not callable(res[2]):
             return [], [], []
 
-        cx, cy = hint_center
-        x0 = int(round(cx - crop_size / 2))
-        y0 = int(round(cy - crop_size / 2))
-        x0 = max(0, min(x0, w - crop_size))
-        y0 = max(0, min(y0, h - crop_size))
-
-        crop = frame[y0:y0 + crop_size, x0:x0 + crop_size]
-        if crop.size == 0 or crop.shape[0] < 60 or crop.shape[1] < 60:
-            return [], [], []
-
-        target = self._crop_target_size
-        zoomed = cv2.resize(crop, (target, target), interpolation=cv2.INTER_LINEAR)
-
-        detection_result = self._run_recognizer(zoomed)
-
-        scale = crop_size / target
-        def to_orig(norm_x, norm_y):
-            return (x0 + norm_x * target * scale, y0 + norm_y * target * scale)
-
+        detection_result, _, to_orig = res
         return self._extract_results(
             detection_result, w, h,
-            min_area_ratio=0.001,
+            min_area_ratio=0.0,
             coord_transform=to_orig,
         )
 
@@ -150,7 +150,9 @@ class HandTracker(BaseHandTracker):
             os.path.join(base_dir, "models", "hand_landmarker.task"),
         ]
         if str(preferred_model_type).lower() == "lite":
-            candidates = gesture_candidates + lite_candidates + heavy_candidates
+            candidates = lite_candidates + gesture_candidates + heavy_candidates
+        elif str(preferred_model_type).lower() == "heavy" or str(preferred_model_type).lower() == "full":
+            candidates = heavy_candidates + gesture_candidates + lite_candidates
         else:
             candidates = gesture_candidates + heavy_candidates + lite_candidates
         for candidate in candidates:
@@ -169,9 +171,14 @@ class HandTracker(BaseHandTracker):
         """跑一次 MediaPipe 推理，返回原始 detection_result。"""
         img_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-        if self.static_image_mode:
-            return self.detector.recognize(mp_image)
-        return self.detector.recognize_for_video(mp_image, self._next_mp_timestamp())
+        if self._is_pure_landmarker:
+            if self.static_image_mode:
+                return self.detector.detect(mp_image)
+            return self.detector.detect_for_video(mp_image, self._next_mp_timestamp())
+        else:
+            if self.static_image_mode:
+                return self.detector.recognize(mp_image)
+            return self.detector.recognize_for_video(mp_image, self._next_mp_timestamp())
 
     def _extract_results(
         self,
@@ -222,7 +229,7 @@ class HandTracker(BaseHandTracker):
                     handedness_name = cat.category_name
                     handedness_score = float(cat.score)
 
-            if detection_result.gestures and i < len(detection_result.gestures):
+            if not self._is_pure_landmarker and hasattr(detection_result, "gestures") and detection_result.gestures and i < len(detection_result.gestures):
                 gesture = detection_result.gestures[i][0]
                 internal_label = ML_GESTURE_TO_INTERNAL.get(gesture.category_name, "OTHER")
                 hands_gestures.append({

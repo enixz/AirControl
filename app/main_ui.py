@@ -137,6 +137,18 @@ class SettingsDialog(QDialog):
             self.voice_combo.setCurrentIndex(idx)
         layout.addRow("语音助手:", self.voice_combo)
 
+        self.zoom_sr_combo = QComboBox()
+        self.zoom_sr_combo.addItem("自动调整 (Auto)", "auto")
+        self.zoom_sr_combo.addItem("ESPCN (CPU极速)", "espcn")
+        self.zoom_sr_combo.addItem("Real-ESRGAN (CPU重度)", "realesrgan_cpu")
+        self.zoom_sr_combo.addItem("Real-ESRGAN (GPU加速)", "realesrgan_gpu")
+        self.zoom_sr_combo.addItem("关闭超分", "none")
+        sr_val = self.config.get("zoom_sr_engine", "auto")
+        idx_sr = self.zoom_sr_combo.findData(sr_val)
+        if idx_sr >= 0:
+            self.zoom_sr_combo.setCurrentIndex(idx_sr)
+        layout.addRow("手势缩放超分引擎:", self.zoom_sr_combo)
+
         gesture_actions = [
             "next_slide", "prev_slide", "start_presentation",
             "end_presentation", "switch_app",
@@ -259,6 +271,7 @@ class SettingsDialog(QDialog):
             self.config.set("edge_y_canvas_deadzone_top", self.y_dz_top_spin.value())
             self.config.set("pen_width", self.pen_spin.value())
             self.config.set("voice_assistant", self.voice_combo.currentData())
+            self.config.set("zoom_sr_engine", self.zoom_sr_combo.currentData())
             self.config.set_mapping("SWIPE_RIGHT", self.right_combo.currentText())
             self.config.set_mapping("SWIPE_LEFT", self.left_combo.currentText())
             self.config.set_mapping("SWIPE_UP", self.up_combo.currentText())
@@ -332,50 +345,21 @@ class FloatingWindow(QMainWindow):
         W, H = s(320), s(240)
         self.setFixedSize(W, H)
 
-        self.video_label = QLabel(self)
-        self.video_label.resize(W, H)
+        self.video_label = QLabel()
         self.video_label.setStyleSheet("background-color: black; border-radius: 10px;")
+        self.setCentralWidget(self.video_label)
 
-        self.mode_label = QLabel(self)
-        btn_min_left = s(244)
-        label_left = s(50)
-        label_width = min(s(170), btn_min_left - label_left - s(6))
-        self.mode_label.setGeometry(label_left, s(10), label_width, s(30))
-        self.mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.mode_label.setStyleSheet(f"""
-            QLabel {{
-                color: white;
-                background-color: rgba(0, 0, 0, 140);
-                border-radius: 8px;
-                font-size: {s(15)}px;
-                font-weight: bold;
-                padding: 1px 6px;
-            }}
-        """)
+        # Use absolute positioning via layouts to allow stretch and elasticity
+        main_layout = QVBoxLayout(self.video_label)
+        main_layout.setContentsMargins(s(10), s(10), s(10), s(8))
+        main_layout.setSpacing(0)
 
-        self.hint_label = QLabel(self)
-        self.hint_label.setGeometry(s(10), s(212), s(300), s(20))
-        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hint_label.setStyleSheet(f"""
-            QLabel {{
-                color: white;
-                background-color: rgba(0, 0, 0, 150);
-                border-radius: 6px;
-                font-size: {s(9)}px;
-                padding: 1px 4px;
-            }}
-        """)
+        # Top Row
+        top_row = QHBoxLayout()
+        top_row.setSpacing(s(6))
 
-        self.voice_label = QLabel(self)
-        self.voice_label.setGeometry(s(10), s(186), s(80), s(18))
-        self.voice_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.voice_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.voice_label.mousePressEvent = lambda ev: self._toggle_voice_cheatsheet()
-        self._voice_cheatsheet_dialog = None
-        self._refresh_voice_tooltip()
-
-        self.btn_settings = QPushButton("⚙", self)
-        self.btn_settings.setGeometry(s(10), s(10), s(30), s(30))
+        self.btn_settings = QPushButton("⚙")
+        self.btn_settings.setFixedSize(s(30), s(30))
         self.btn_settings.setStyleSheet(f"""
             QPushButton {{
                 background-color: rgba(255, 255, 255, 150);
@@ -388,8 +372,22 @@ class FloatingWindow(QMainWindow):
         """)
         self.btn_settings.clicked.connect(self.open_settings)
 
-        self.btn_minimize = QPushButton("─", self)
-        self.btn_minimize.setGeometry(s(244), s(10), s(30), s(30))
+        self.mode_label = QLabel()
+        self.mode_label.setFixedHeight(s(30))
+        self.mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mode_label.setStyleSheet(f"""
+            QLabel {{
+                color: white;
+                background-color: rgba(0, 0, 0, 140);
+                border-radius: 8px;
+                font-size: {s(15)}px;
+                font-weight: bold;
+                padding: 1px 6px;
+            }}
+        """)
+
+        self.btn_minimize = QPushButton("─")
+        self.btn_minimize.setFixedSize(s(30), s(30))
         self.btn_minimize.setStyleSheet(f"""
             QPushButton {{
                 background-color: rgba(255, 255, 255, 150);
@@ -403,8 +401,8 @@ class FloatingWindow(QMainWindow):
         """)
         self.btn_minimize.clicked.connect(self.showMinimized)
 
-        self.btn_close = QPushButton("X", self)
-        self.btn_close.setGeometry(s(280), s(10), s(30), s(30))
+        self.btn_close = QPushButton("X")
+        self.btn_close.setFixedSize(s(30), s(30))
         self.btn_close.setStyleSheet(f"""
             QPushButton {{
                 background-color: rgba(255, 0, 0, 150);
@@ -418,6 +416,39 @@ class FloatingWindow(QMainWindow):
             }}
         """)
         self.btn_close.clicked.connect(self.close)
+
+        top_row.addWidget(self.btn_settings)
+        top_row.addWidget(self.mode_label, 1)
+        top_row.addWidget(self.btn_minimize)
+        top_row.addWidget(self.btn_close)
+
+        main_layout.addLayout(top_row)
+        main_layout.addStretch(1)
+
+        self.voice_label = QLabel()
+        self.voice_label.setFixedHeight(s(18))
+        self.voice_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.voice_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.voice_label.mousePressEvent = lambda ev: self._toggle_voice_cheatsheet()
+        self._voice_cheatsheet_dialog = None
+        self._refresh_voice_tooltip()
+        main_layout.addWidget(self.voice_label, 0, Qt.AlignmentFlag.AlignLeft)
+
+        main_layout.addSpacing(s(8))
+
+        self.hint_label = QLabel()
+        self.hint_label.setFixedHeight(s(20))
+        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint_label.setStyleSheet(f"""
+            QLabel {{
+                color: white;
+                background-color: rgba(0, 0, 0, 150);
+                border-radius: 6px;
+                font-size: {s(9)}px;
+                padding: 1px 4px;
+            }}
+        """)
+        main_layout.addWidget(self.hint_label)
 
         screen = QApplication.primaryScreen().geometry()
         self._default_x = screen.left() + 10
@@ -496,7 +527,8 @@ class FloatingWindow(QMainWindow):
                 Qt.AspectRatioMode.KeepAspectRatio,
             )
         )
-        self.mode_label.setText(self._mode_name_zh())
+        # 模式标签上直接显示实时帧率（_current_fps 由 fps_updated 每秒刷新），便于现场观察卡顿
+        self.mode_label.setText(f"{self._mode_name_zh()}　{self._current_fps:.0f} FPS")
         self.hint_label.setText(self._mode_hint_zh())
 
     def _on_voice_status_updated(self, text):
@@ -564,11 +596,11 @@ class FloatingWindow(QMainWindow):
     def _mode_hint_zh(self):
         mode = self.orchestrator.mode_manager.current_mode_name
         if mode == "mouse":
-            return "双拳切模式 | 中指移动 | 捏拇指左键 | 捏食指右键 | 剪刀手滚动"
+            return "单手抓握两次切模式 | 中指移动 | 捏拇指左键 | 捏食指右键 | 剪刀手滚动"
         elif mode == "draw":
-            return "双拳切模式 | 拇指并拢书写/分开停笔 | 张掌清屏"
+            return "单手抓握两次切模式 | 拇指并拢书写/分开停笔 | 张掌清屏"
         else:
-            return "双拳切模式 | 剪刀手唤醒AI | 拇指向下挂断 | 并掌翻页 | 点赞切WPS"
+            return "单手抓握两次切模式 | 剪刀手唤醒AI | 拇指向下挂断 | 并掌翻页 | 点赞切WPS"
 
     # ------------------------------------------------------------------
     # 语音指令帮助提示 (Dialog & Tooltip)
@@ -799,7 +831,34 @@ class FloatingWindow(QMainWindow):
         super().closeEvent(event)
 
 
+def is_admin():
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception:
+        return False
+
+
 def main():
+    if not is_admin():
+        import ctypes
+        script_args = sys.argv
+        if not getattr(sys, 'frozen', False):
+            script_args = [os.path.abspath(__file__)] + sys.argv[1:]
+        try:
+            # "runas" 触发 UAC 提权请求
+            ctypes.windll.shell32.ShellExecuteW(
+                None,
+                "runas",
+                sys.executable,
+                " ".join(f'"{arg}"' for arg in script_args),
+                None,
+                1,
+            )
+            sys.exit(0)
+        except Exception as e:
+            logger.warning("提权请求被拒绝或失败: %s，将以普通权限启动。", e)
+
     app = QApplication(sys.argv)
     window = FloatingWindow()
     window.show()

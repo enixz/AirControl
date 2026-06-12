@@ -1,9 +1,9 @@
-q īng p íng @清屏
-k āi sh ǐ b ǎn sh ū @开始板书
-j ié sh ù b ǎn sh ū @结束板书
+k āi sh ǐ b ō f àng @开始播放
+j ié sh ù b ō f àng @结束播放
+x ià y ī y è @下一页
+sh àng y ī y è @上一页
 z uì x iǎo h uà zh ù sh ǒu @最小化助手
 x iǎn sh ì zh ù sh ǒu @显示助手
 zh ào h uàn d òu b āo @召唤豆包
-y ǎn sh ì m ó sh ì @演示模式
+b ǎn sh ū m ó sh ì @板书模式
 sh ǔ b iāo m ó sh ì @鼠标模式
-t ú x íng x iū zh èng @图形修正

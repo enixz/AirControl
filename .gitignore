@@ -51,3 +51,11 @@ models/sense-voice/
 
 # Claude Code 工作目录（包含 worktree、隔离副本等内部产物）
 .claude/
+restore_sessions.ps1
+
+# 变焦超分模型与评估产物（模型按需下载到项目根目录，见 evaluate_sr.py）
+ESPCN_x2.pb
+FSRCNN_x2.pb
+Real-ESRGAN_x2plus.onnx
+comparison_result.png
+hand_test.jpg

@@ -42,7 +42,7 @@ def _create_mediapipe_tracker(**kwargs):
     valid_keys = {
         "static_image_mode", "max_num_hands", "min_detection_confidence",
         "min_presence_confidence", "min_tracking_confidence",
-        "preferred_model_type", "dominant_hand",
+        "preferred_model_type", "dominant_hand", "config",
     }
     filtered = {k: v for k, v in kwargs.items() if k in valid_keys}
     tracker = HandTracker(**filtered)

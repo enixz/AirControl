@@ -30,6 +30,10 @@ class AirControlOrchestrator(QObject):
     voice_status_updated = pyqtSignal(str)  # status text to be displayed
     fps_updated = pyqtSignal(float)
     mode_changed = pyqtSignal(str)  # mode name (e.g. "presentation")
+    dictation_status_signal = pyqtSignal(str, object)   # phase, payload
+    dictation_text_signal = pyqtSignal(str, object)     # text, anchor_pos
+    dictation_partial_signal = pyqtSignal(str)          # partial transcription
+    caption_full = pyqtSignal()
     
     # Signals for window control requested by actions
     minimize_requested = pyqtSignal()
@@ -104,6 +108,7 @@ class AirControlOrchestrator(QObject):
             min_tracking_confidence=self.config.get("hand_tracking_confidence") or 0.5,
             preferred_model_type=self.config.get("model_type"),
             dominant_hand=self.config.get("dominant_hand") or "Right",
+            config=self.config,
         )
 
         self.recognizer = GestureRecognizer(
@@ -310,6 +315,7 @@ class AirControlOrchestrator(QObject):
             min_tracking_confidence=self.config.get("hand_tracking_confidence") or 0.5,
             preferred_model_type=self.config.get("model_type"),
             dominant_hand=self.config.get("dominant_hand") or "Right",
+            config=self.config,
         )
         self.tracker = new_tracker
         if hasattr(self, 'inference_worker'):
@@ -388,6 +394,15 @@ class AirControlOrchestrator(QObject):
 
     def _on_fps_updated(self, fps):
         self.fps_updated.emit(fps)
+        # 节流（每5秒）记录实际推理帧率到 gesture.log，便于诊断"体感帧率不高"，
+        # 并能看出远距离 crop-zoom + ESPCN 超分是否在拖慢帧率。
+        now = time.time()
+        if now - getattr(self, "_last_fps_log_time", 0.0) >= 5.0:
+            self._last_fps_log_time = now
+            logging.getLogger("gesture").info(
+                "[FPS] 推理帧率 %.1f | 模式=%s", fps,
+                self.mode_manager.current_mode_name,
+            )
 
     def _process_frame_results(self, frame, hands_landmarks, hands_gestures):
         frame_h, frame_w = frame.shape[:2]
@@ -397,7 +412,7 @@ class AirControlOrchestrator(QObject):
             hands_landmarks = []
             hands_gestures = []
 
-        switched = self.mode_manager.maybe_switch_by_two_fists(hands_landmarks, frame_w)
+        switched = self.mode_manager.maybe_switch_by_gesture(hands_landmarks, frame_w)
 
         gesture = "NONE"
         if switched:

@@ -3,10 +3,29 @@ import time
 import winsound
 
 from .base import ModeBase, ModeResult
+from services.mouse_controller import ActiveRegionMapper, interp_tiers
 
 
 class DrawMode(ModeBase):
     """板书模式：拇指并拢开始书写，拇指分开停止书写。张掌清屏，握拳就绪。"""
+
+    # 移动灵敏度随"手在画面中的大小"换算的标定区间（相对参考掌宽的比值）。
+    # 我们无法感知真实距离，只能用掌宽作为手在画面里大小的度量：
+    #   掌宽 ≤ 参考×RESP_RATIO_FAR（手小/离得远）→ 最敏感（系数 1.0）；
+    #   掌宽 ≥ 参考×RESP_RATIO_NEAR（手大/离得近）→ 最迟钝（系数 0.0）。
+    RESP_RATIO_FAR = 0.55
+    RESP_RATIO_NEAR = 1.5
+    # 距离分段「活动区 span_floor」（piecewise-linear）：ratio=掌宽/参考掌宽（越大=越近）。
+    # span_floor 越小→小动作越被放大（远距离写满全屏）；越大（→1.0）→趋近直接绝对映射、
+    # gain≈1、画圆轻松（找回早期卡尔曼版的近距离手感），且不牺牲触达（近距离手本就充满画面）。
+    # 嫌近距离还太快就把近端调到 1.0~1.2（>1 会略损触达）；想远距离更省力就把远端调小。
+    SPAN_FLOOR_TIERS = [
+        (0.45, 0.22),  # 很远：小动作放大、写满全屏
+        (0.70, 0.45),  # 远
+        (1.00, 0.90),  # 中（舒适书写距离）：接近直接映射
+        (1.30, 1.00),  # 近及以内：直接绝对映射、gain≈1、轻松画圆
+        (1.90, 1.00),  # 很近
+    ]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -18,6 +37,8 @@ class DrawMode(ModeBase):
         self._was_fist = False
         self._fist_tap_times: list[float] = []
         self._double_fist_cooldown = 0.0
+        # 自适应活动区映射：远距离也能写满全屏（替代固定的绝对映射）
+        self._region_mapper = ActiveRegionMapper(margin=0.05)
 
     def on_enter(self):
         self.overlay.show_fullscreen()
@@ -32,6 +53,7 @@ class DrawMode(ModeBase):
         self._was_fist = False
         self._fist_tap_times.clear()
         self._double_fist_cooldown = 0.0
+        self._region_mapper.reset()
 
     def on_exit(self):
         self.overlay.hide()
@@ -69,6 +91,18 @@ class DrawMode(ModeBase):
         if not hands_landmarks:
             self.fist_hold_frames = 0
             self.open_palm_frames = 0
+            
+            # 手部跟丢缓冲：如果之前正在书写，允许短暂跟丢而不中断笔画
+            if self._was_writing:
+                self._writing_lost_frames += 1
+                if self._writing_lost_frames < 8:
+                    # 保持之前的书写状态，使用最后已知的屏幕坐标（由 overlay 维持）
+                    return ModeResult(
+                        gesture="DRAW",
+                        status_text="正在书写 (跟丢缓冲)",
+                        status_color=(0, 255, 255),
+                    )
+            
             self._was_writing = False
             self._writing_lost_frames = 0
             self.overlay.hide_cursor()
@@ -81,13 +115,36 @@ class DrawMode(ModeBase):
 
         landmarks = hands_landmarks[0]
         features = self.recognizer.get_hand_features(landmarks)
-        x_screen, y_screen = self.mouse.to_screen(
-            landmarks[5][1] / frame_w, landmarks[5][2] / frame_h
+
+        # 灵敏度随"手在画面中的大小"（掌宽）换算：手小（离得远）→ 高灵敏，
+        # 手大（离得近）→ 低灵敏。responsiveness∈[0,1]：1=远/敏感，0=近/迟钝。
+        # 不依赖无法感知的真实距离——只用掌宽这一画面度量。
+        ref_width = self.recognizer.REFERENCE_HAND_WIDTH
+        ratio = features["hand_width"] / ref_width
+        resp_span = self.RESP_RATIO_NEAR - self.RESP_RATIO_FAR
+        responsiveness = max(0.0, min(1.0, (self.RESP_RATIO_NEAR - ratio) / resp_span))
+        # (1) 平滑：手大（近）→ 强平滑、稳，少发抖。
+        self.overlay.set_motion_responsiveness(responsiveness)
+        # (2) 位移增益：按距离分段设活动区 span_floor（见 SPAN_FLOOR_TIERS）。近→span_floor
+        #     趋近 1.0 = 直接绝对映射 gain≈1（画圆轻松、找回卡尔曼手感、且不丢触达）；
+        #     远→span_floor 小 = 小动作放大、写满全屏。分段表可独立微调各距离段手感。
+        span_floor = interp_tiers(ratio, self.SPAN_FLOOR_TIERS)
+
+        # 自适应活动区：把手最近扫过的范围映射到全屏（远距离也能写满），
+        # 不再叠加边缘加速（apply_accel=False），避免双重映射失真。
+        # 书写中冻结活动区与增益（update=False）：笔画期间传递函数恒定，避免中途
+        # 重标定引起的漂移/抖动；只在悬停/就绪时校准。
+        is_drawing_now = features["index_drawing_pose"] and features["thumb_tucked"]
+        freeze = is_drawing_now or self._was_writing
+        nx, ny = self._region_mapper.map(
+            landmarks[5][1] / frame_w, landmarks[5][2] / frame_h,
+            update=not freeze, span_floor=span_floor,
         )
+        x_screen, y_screen = self.mouse.to_screen(nx, ny, apply_accel=False)
         self.overlay.update_cursor(x_screen, y_screen)
 
-        # 笔粗距离自适应：bbox 大（近）→ 笔粗，bbox 小（远）→ 笔细
-        # sqrt(bbox) 比 bbox 本身随距离变化更线性
+        # 笔粗距离自适应（默认关闭，见 config pen_width_auto_scale）：
+        # bbox 大（近）→ 笔粗，bbox 小（远）→ 笔细。sqrt(bbox) 比 bbox 随距离更线性。
         if hands_gestures:
             bbox_area = hands_gestures[0].get("bbox_area", 0.0)
             if bbox_area > 0:
@@ -114,11 +171,21 @@ class DrawMode(ModeBase):
                     status_color=(0, 255, 255),
                 )
             else:
-                # 拇指分开时强制抬笔
+                # 拇指分开缓动：如果之前在书写，允许 5 帧的姿势抖动缓冲
                 if self._was_writing:
-                    self.overlay.force_lift_pen()
-                    self._was_writing = False
-                    self._writing_lost_frames = 0
+                    self._writing_lost_frames += 1
+                    if self._writing_lost_frames < 5:
+                        self.overlay.draw_to(x_screen, y_screen)
+                        return ModeResult(
+                            gesture="DRAW",
+                            status_text="正在书写",
+                            status_color=(0, 255, 255),
+                        )
+                    else:
+                        self.overlay.force_lift_pen()
+                        self._was_writing = False
+                        self._writing_lost_frames = 0
+                
                 self.overlay.update_cursor(x_screen, y_screen)
                 return ModeResult(
                     gesture="DRAW_HOVER",

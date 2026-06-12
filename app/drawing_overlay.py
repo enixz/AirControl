@@ -1,4 +1,5 @@
 import ctypes
+import logging
 import math
 from collections import deque
 
@@ -34,6 +35,13 @@ class DrawingOverlay(QWidget):
     SMOOTH_ALPHA_FAST = 0.85
     SPEED_LOW_THRESHOLD = 8.0
     SPEED_HIGH_THRESHOLD = 60.0
+    # 移动灵敏度随手在画面中的大小换算的阻尼下限：
+    # 手大（离得近）→ responsiveness→0 → alpha 乘以 MOTION_DAMP_MIN（更平滑、稳）；
+    # 手小（离得远）→ responsiveness→1 → alpha 不衰减（敏感、响应快）。
+    # 注意：近距离的抗抖动现在主要靠 DrawMode 的 PRECISION_TIERS（降低位移增益），
+    # 所以这里不必再用极强平滑——阻尼下限调高，减少"墨迹追不上手/不跟手"的延迟。
+    # 调小 → 更稳但更滞后；调大（≤1）→ 更跟手但更易抖。
+    MOTION_DAMP_MIN = 0.7
 
     # 笔粗距离自适应参数
     MIN_PEN_WIDTH = 4         # 极远时下限
@@ -58,10 +66,16 @@ class DrawingOverlay(QWidget):
         self.idle_count = 0
         self.truly_lifted = False
         self.cursor_pos = None
+        # 移动灵敏度系数（0=大手/近/迟钝，1=小手/远/敏感），由 DrawMode 每帧传入。
+        # 默认 0.5（中性），EMA 抑制抖动。见 set_motion_responsiveness。
+        self._motion_resp = 0.5
         self._recent_points: deque = deque(maxlen=2)
         self._undo_stack: list = []
         self._max_undo = 30
         self._click_through_applied = False
+        # 板书模式下隐藏 Windows 系统箭头光标，让书写光标（红色圆环）替代它。
+        # 与 MouseCursorOverlay 同一套 ShowCursor 计数器机制，幂等。
+        self._system_cursor_hidden = False
         self._shape_correction_enabled = True
         self._current_stroke: list = []
         # 听写实时字幕（partial ASR）— 不写到 canvas，由 paintEvent 动态绘制
@@ -105,6 +119,29 @@ class DrawingOverlay(QWidget):
             import logging
             logging.error("DrawingOverlay _make_click_through failed: %s", e)
 
+    def _hide_system_cursor(self):
+        """隐藏 Windows 系统鼠标指针（幂等：多次调用安全）。
+        让板书模式的书写光标（红色圆环）替代系统箭头，避免两个光标并存。"""
+        if self._system_cursor_hidden:
+            return
+        try:
+            while ctypes.windll.user32.ShowCursor(False) >= 0:
+                pass
+            self._system_cursor_hidden = True
+        except Exception as e:
+            logging.warning("DrawingOverlay 隐藏系统光标失败: %s", e)
+
+    def _show_system_cursor(self):
+        """恢复 Windows 系统鼠标指针（幂等）。"""
+        if not self._system_cursor_hidden:
+            return
+        try:
+            while ctypes.windll.user32.ShowCursor(True) < 0:
+                pass
+            self._system_cursor_hidden = False
+        except Exception as e:
+            logging.warning("DrawingOverlay 恢复系统光标失败: %s", e)
+
     def show_fullscreen(self):
         """显示全屏绘制层。不用 Qt 的 showFullScreen()，避免它重置窗口标志。
         每次显示前重置 _click_through_applied，防止隐藏后再显示时 Win32 样式丢失。"""
@@ -115,6 +152,14 @@ class DrawingOverlay(QWidget):
         self.raise_()
         self._make_click_through()
         self._ensure_canvas()
+        # 重置标志后再隐藏，确保外部 Win32 操作改变过 ShowCursor 计数器时仍能正确隐藏。
+        self._system_cursor_hidden = False
+        self._hide_system_cursor()
+
+    def hide(self):
+        """隐藏绘制层并恢复系统光标（退出板书模式时调用）。"""
+        self._show_system_cursor()
+        super().hide()
 
     def _ensure_canvas(self):
         size = self.size()
@@ -158,6 +203,16 @@ class DrawingOverlay(QWidget):
     def set_pen_color(self, color: QColor):
         self.pen_color = QColor(color.red(), color.green(), color.blue(), 220)
 
+    def set_motion_responsiveness(self, r):
+        """DrawMode 每帧传入手在画面中的大小换算出的灵敏度系数。
+
+        r∈[0,1]：手越小（离得越远）r 越接近 1（越敏感、少平滑）；
+        手越大（离得越近）r 越接近 0（越迟钝、强平滑、更稳，不再过敏发抖）。
+        EMA 平滑系数本身，避免掌宽抖动导致灵敏度逐帧跳变。
+        """
+        r = max(0.0, min(1.0, float(r)))
+        self._motion_resp = 0.8 * self._motion_resp + 0.2 * r
+
     def _push_undo_snapshot(self):
         if self.canvas is None:
             return
@@ -185,14 +240,19 @@ class DrawingOverlay(QWidget):
     def _speed_alpha(self, raw):
         if self.raw_point is None:
             self.raw_point = raw
-            return self.SMOOTH_ALPHA_SLOW
-        dx = raw.x() - self.raw_point.x()
-        dy = raw.y() - self.raw_point.y()
-        speed = math.sqrt(dx * dx + dy * dy)
-        self.raw_point = raw
-        t = (speed - self.SPEED_LOW_THRESHOLD) / (self.SPEED_HIGH_THRESHOLD - self.SPEED_LOW_THRESHOLD)
-        t = max(0.0, min(1.0, t))
-        return self.SMOOTH_ALPHA_SLOW + (self.SMOOTH_ALPHA_FAST - self.SMOOTH_ALPHA_SLOW) * t
+            base = self.SMOOTH_ALPHA_SLOW
+        else:
+            dx = raw.x() - self.raw_point.x()
+            dy = raw.y() - self.raw_point.y()
+            speed = math.sqrt(dx * dx + dy * dy)
+            self.raw_point = raw
+            t = (speed - self.SPEED_LOW_THRESHOLD) / (self.SPEED_HIGH_THRESHOLD - self.SPEED_LOW_THRESHOLD)
+            t = max(0.0, min(1.0, t))
+            base = self.SMOOTH_ALPHA_SLOW + (self.SMOOTH_ALPHA_FAST - self.SMOOTH_ALPHA_SLOW) * t
+        # 在速度自适应基础上叠加"手大小→灵敏度"换算：手大（近）→ damp 偏小 →
+        # 更强平滑（迟钝、稳）；手小（远）→ damp≈1 → 保留响应（敏感）。
+        damp = self.MOTION_DAMP_MIN + (1.0 - self.MOTION_DAMP_MIN) * self._motion_resp
+        return base * damp
 
     def _smooth(self, raw):
         if self.smooth_point is None:
@@ -246,6 +306,8 @@ class DrawingOverlay(QWidget):
 
         raw = QPoint(int(x), int(y))
         point = self._smooth(raw)
+        # 书写光标要贴在"笔尖"（平滑后的 point）上，而不是原始映射点 raw。
+        # 否则强平滑时光标会领先墨迹一截（近距离尤其明显），体感"不跟手"。
 
         if self.last_point is None:
             self._push_undo_snapshot()
@@ -253,7 +315,7 @@ class DrawingOverlay(QWidget):
             self._recent_points.clear()
             self._recent_points.append(point)
             self._current_stroke = [(point.x(), point.y())]
-            self.update_cursor(x, y)
+            self.update_cursor(point.x(), point.y())
             return
 
         if self._bridge_too_far(self.last_point, point):
@@ -262,7 +324,7 @@ class DrawingOverlay(QWidget):
             self._recent_points.clear()
             self._recent_points.append(point)
             self._current_stroke = [(point.x(), point.y())]
-            self.update_cursor(x, y)
+            self.update_cursor(point.x(), point.y())
             return
 
         painter = QPainter(self.canvas)

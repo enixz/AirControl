@@ -1,3 +1,4 @@
+import math
 import time
 
 from .base import ModeBase, ModeResult
@@ -58,7 +59,7 @@ class PresentationMode(ModeBase):
         candidates = []
         for idx, landmarks in enumerate(hands_landmarks):
             features = all_features[idx] if all_features and idx < len(all_features) else self.recognizer.get_hand_features(landmarks)
-            hand_width = abs(landmarks[5][1] - landmarks[17][1])
+            hand_width = math.hypot(landmarks[5][1] - landmarks[17][1], landmarks[5][2] - landmarks[17][2])
             candidates.append((features, hand_width, landmarks, idx))
 
         non_fists = [item for item in candidates if not item[0]["is_fist"]]

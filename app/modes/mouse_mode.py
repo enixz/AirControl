@@ -1,14 +1,32 @@
 import logging
 import threading
 import time
+import math
 
 from .base import ModeBase, ModeResult
+from services.mouse_controller import ActiveRegionMapper, interp_tiers
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("gesture")
 
 
 class MouseMode(ModeBase):
     """鼠标模式：中指控制光标，拇指-食指捏合左键，拇指-中指捏合右键，剪刀手滚动。"""
+
+    # 鼠标距离分段「活动区 span_floor」：远→小(放大够到全屏)，近→大(趋近直接映射、不过敏)。
+    # span_floor 方案不牺牲触达——近距离手充满画面，直接绝对映射即可覆盖全屏四角。
+    SPAN_FLOOR_TIERS = [
+        (0.45, 0.22),  # 很远：放大够到全屏
+        (0.90, 0.50),  # 中偏远
+        (1.30, 0.85),  # 近
+        (1.90, 1.00),  # 很近：直接映射、不再过敏
+    ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 自适应活动区映射（与板书一致）：离得越远，手扫过的一小块也能映射到全屏，
+        # 不必大幅度挥手才能让光标跨屏；近距离 ≈ 直接映射，保留触达。
+        # margin 取小（0.04）：减少活动区相对旧"直接映射"带来的整体灵敏度抬升。
+        self._region_mapper = ActiveRegionMapper(margin=0.04)
 
     # 守护线程：handle() 静默超过该秒数且 _is_left_holding=True，认为主线程被
     # DefWindowProc 模态循环堵住（典型场景：手势 LEFTDOWN 落在某对话框标题栏触发
@@ -23,6 +41,7 @@ class MouseMode(ModeBase):
         self.overlay.hide_cursor()
         self.toolbar.hide()
         self.mouse.reset()  # 重置鼠标状态，防止从其他模式切回时 last_pos 残留
+        self._region_mapper.reset()  # 重置活动区，避免沿用上次会话的标定
         self.cursor_overlay.show_fullscreen()
         # 新增：状态机初始化
         self._is_left_holding = False
@@ -95,6 +114,24 @@ class MouseMode(ModeBase):
         self._last_handle_time = time.time()
         self._sync_frame_size(frame_w, frame_h)
         # 除零保护：异常帧（摄像头初始化/重连）时 frame_w/h 可能为 0
+
+        # Rate-limited pinch telemetry logging (once every 15 frames) to gesture.log
+        if hands_landmarks:
+            self._frame_count = getattr(self, "_frame_count", 0) + 1
+            if self._frame_count % 15 == 0:
+                landmarks = hands_landmarks[0]
+                features = self.recognizer.get_hand_features(landmarks)
+                thumb_index = math.hypot(landmarks[4][1] - landmarks[8][1], landmarks[4][2] - landmarks[8][2])
+                thumb_middle = math.hypot(landmarks[4][1] - landmarks[12][1], landmarks[4][2] - landmarks[12][2])
+                hand_width = features.get("hand_width", 40.0)
+                pinch_threshold = hand_width * 0.35
+                logger.info(
+                    "[MouseMode] pinch telemetry: thumb_idx=%.1f, thumb_mid=%.1f, hand_w=%.1f, thresh=%.1f, "
+                    "left_pinch=%s, mid_pinch=%s, hold=%s, blocked=%s",
+                    thumb_index, thumb_middle, hand_width, pinch_threshold,
+                    features.get("thumb_index_pinch"), features.get("thumb_middle_pinch"),
+                    self._is_left_holding, self._left_hold_blocked_until_release
+                )
         if frame_w <= 0 or frame_h <= 0:
             return ModeResult(gesture="NONE")
         # 1. 手丢失：释放左键 + 重置
@@ -116,9 +153,15 @@ class MouseMode(ModeBase):
 
         landmarks = hands_landmarks[0]
         features = self.recognizer.get_hand_features(landmarks)
+        # 先把中指尖归一化坐标经活动区映射拉伸到全屏（远距离也能轻松跨屏），
+        # 再交给 move_to_normalized（跳过边缘加速，避免双重拉伸）做灵敏度平滑+落点。
+        # span_floor 按距离分段：近→趋近直接映射（不过敏），远→放大够到全屏。
+        ratio = features["hand_width"] / self.recognizer.REFERENCE_HAND_WIDTH
+        span_floor = interp_tiers(ratio, self.SPAN_FLOOR_TIERS)
         x_norm = landmarks[12][1] / frame_w
         y_norm = landmarks[12][2] / frame_h
-        screen_x, screen_y = self.mouse.move_to_normalized(x_norm, y_norm)
+        nx, ny = self._region_mapper.map(x_norm, y_norm, span_floor=span_floor)
+        screen_x, screen_y = self.mouse.move_to_normalized(nx, ny, apply_accel=False)
         self.cursor_overlay.update_cursor(screen_x, screen_y)
 
         # 2. 滚轮检测（持续滚动：保持剪刀手则持续输出）
