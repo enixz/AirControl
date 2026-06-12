@@ -1,7 +1,7 @@
 {
     "target_app": "WPS",
     "model_type": "Heavy",
-    "interaction_mode": "presentation",
+    "interaction_mode": "draw",
     "camera_index": 1,
     "cooldown": 1.0,
     "swipe_threshold": 60,
@@ -34,6 +34,7 @@
     "mode_switch_hold_sec": 1.0,
     "mode_switch_vote_ratio": 0.6,
     "draw_frontality_gate": 0.55,
+    "draw_record_trace": true,
     "detection_engine": "mediapipe",
     "camera_width": null,
     "camera_height": null,

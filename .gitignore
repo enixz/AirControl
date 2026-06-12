@@ -59,3 +59,6 @@ FSRCNN_x2.pb
 Real-ESRGAN_x2plus.onnx
 comparison_result.png
 hand_test.jpg
+
+# 板书关键点轨迹录制（simulate_draw.py --replay 用）
+draw_trace.jsonl

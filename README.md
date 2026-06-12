@@ -291,6 +291,7 @@ AirControl 集成双引擎语音系统：
 | `mode_switch_hold_sec` | 🤟 切模式手势需保持的时长（秒） | 1.0 |
 | `mode_switch_vote_ratio` | 保持窗口内 🤟 标签帧占比阈值，远距离误检多可适当调低 | 0.6 |
 | `draw_frontality_gate` | 板书拇指可观测性门限（掌宽/食指长）。低于此值视为手侧对相机、拇指不可信，书写状态冻结；横扫时笔画总断可调低，抬笔不灵敏可调高 | 0.55 |
+| `draw_record_trace` | 板书时逐帧录制关键点到 `draw_trace.jsonl`，供 `simulate_draw.py --replay` 离线回放排查断触 | true |
 | `dictation_enabled` | 启用 SenseVoice 离线语音听写（draw 模式说"开始板书"） | true |
 | `dictation_language` | 听写语种：`auto`/`zh`/`en`/`ja`/`ko`/`yue` | `auto` |
 | `wps_exe_path` | 手动覆盖 WPS 路径，自动定位失败时用 | （无） |

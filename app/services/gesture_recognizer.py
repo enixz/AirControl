@@ -107,10 +107,14 @@ class GestureRecognizer:
             and scissor_spread_ok
         )
 
-        # 中指伸直用距离判定（与 index_extended 同理），不用 y 坐标比较——
-        # 抗偏航且对"指向斜上方"也成立
+        # 中指是否与食指一样伸出：用"中指长/食指长"判定。两指同手同投影，
+        # 该比值不随偏航/距离变化。实测标定（2026-06-12 gesture.log）：
+        # 单指书写时弯曲中指 mi 中位数 0.36、最大 0.81；真双指 ≥1.15。
+        # 0.95 取分离带中点。此前用"中指长>掌宽×0.6"：弯曲中指的 2D 投影
+        # 经常超过该值（偏航时掌宽塌缩进一步加剧），16/24 次断笔由此而来。
         middle_len = math.hypot(landmarks[12][1] - landmarks[9][1], landmarks[12][2] - landmarks[9][2])
-        middle_extended = middle_len > hand_width * 0.6
+        middle_index_ratio = middle_len / max(index_len, 1e-6)
+        middle_extended = middle_index_ratio > 0.95
 
         # 双指悬停（板书抬笔）：食指+中指伸出即可，**不要求张开**（贴紧也算，
         # 区别于 is_scissor 的 spread 要求）。伸出的手指在轮廓上凸出，
@@ -143,6 +147,7 @@ class GestureRecognizer:
             "hand_frontality": hand_frontality,
             "thumb_ratio": thumb_tip_to_index_mcp / hand_width,
             "middle_ratio": middle_len / hand_width,
+            "middle_index_ratio": middle_index_ratio,
             "fingers_close": fingers_close,
             "hand_width": hand_width,
             "index_middle_up": is_scissor,

@@ -1,5 +1,7 @@
+import json
 import logging
 import math
+import os
 import time
 import winsound
 
@@ -44,8 +46,9 @@ class DrawMode(ModeBase):
         self._double_fist_cooldown = 0.0
         # 自适应活动区映射：远距离也能写满全屏（替代固定的绝对映射）
         self._region_mapper = ActiveRegionMapper(margin=0.05)
-        # 双指悬停 / 拇指分开的连续帧计数（去抖）
+        # 双指悬停 / 拇指分开的连续帧计数（去抖）与滞后状态
         self._two_finger_frames = 0
+        self._two_finger_hovering = False
         self._thumb_apart_frames = 0
         # 标定遥测节流
         self._last_telemetry = 0.0
@@ -53,6 +56,17 @@ class DrawMode(ModeBase):
         self._frontality_gate = (
             float(self.config.get("draw_frontality_gate", 0.55)) if self.config else 0.55
         )
+        # 全帧率关键点轨迹录制（draw_trace.jsonl，项目根目录，会话开始时清空）：
+        # 供 simulate_draw.py --replay 离线回放，用真实数据对比判定逻辑变体
+        self._trace_file = None
+        if self.config is None or self.config.get("draw_record_trace", True):
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            try:
+                self._trace_file = open(
+                    os.path.join(root, "draw_trace.jsonl"), "w", encoding="utf-8", buffering=1
+                )
+            except OSError:
+                self._trace_file = None
 
     def on_enter(self):
         self.overlay.show_fullscreen()
@@ -68,6 +82,7 @@ class DrawMode(ModeBase):
         self._fist_tap_times.clear()
         self._double_fist_cooldown = 0.0
         self._two_finger_frames = 0
+        self._two_finger_hovering = False
         self._thumb_apart_frames = 0
         self._region_mapper.reset()
 
@@ -85,6 +100,7 @@ class DrawMode(ModeBase):
         self._fist_tap_times.clear()
         self._double_fist_cooldown = 0.0
         self._two_finger_frames = 0
+        self._two_finger_hovering = False
         self._thumb_apart_frames = 0
 
     def _position_toolbar(self):
@@ -101,9 +117,9 @@ class DrawMode(ModeBase):
     def _log_pen(self, event, cause, features, label):
         """笔起落事件：记录触发原因和当时的关键比值，用于实机标定。"""
         logger.info(
-            "[DRAW] pen_%s cause=%s label=%s frontality=%.2f thumb_ratio=%.2f middle_ratio=%.2f",
+            "[DRAW] pen_%s cause=%s label=%s frontality=%.2f thumb_ratio=%.2f mi=%.2f",
             event, cause, label, features["hand_frontality"],
-            features["thumb_ratio"], features["middle_ratio"],
+            features["thumb_ratio"], features["middle_index_ratio"],
         )
 
     def _telemetry(self, features, label, state):
@@ -114,10 +130,23 @@ class DrawMode(ModeBase):
             return
         self._last_telemetry = now
         logger.info(
-            "[DRAW] state=%s label=%s frontality=%.2f thumb_ratio=%.2f middle_ratio=%.2f tucked=%s",
+            "[DRAW] state=%s label=%s frontality=%.2f thumb_ratio=%.2f mi=%.2f tucked=%s",
             state, label, features["hand_frontality"], features["thumb_ratio"],
-            features["middle_ratio"], features["thumb_tucked"],
+            features["middle_index_ratio"], features["thumb_tucked"],
         )
+
+    def _record_trace(self, landmarks, label):
+        """逐帧记录关键点到 draw_trace.jsonl（lm=None 表示该帧未检出手）。"""
+        if not self._trace_file:
+            return
+        try:
+            self._trace_file.write(json.dumps({
+                "t": round(time.time(), 3),
+                "label": label,
+                "lm": [[round(p[1], 1), round(p[2], 1)] for p in landmarks] if landmarks else None,
+            }, separators=(",", ":")) + "\n")
+        except OSError:
+            self._trace_file = None
 
     def handle(self, hands_landmarks, hands_gestures, frame_w, frame_h) -> ModeResult:
         self._sync_frame_size(frame_w, frame_h)
@@ -128,9 +157,10 @@ class DrawMode(ModeBase):
             self.overlay.show_fullscreen()
 
         if not hands_landmarks:
+            self._record_trace(None, "NONE")
             self.fist_hold_frames = 0
             self.open_palm_frames = 0
-            
+
             # 手部跟丢缓冲：如果之前正在书写，允许短暂跟丢而不中断笔画
             if self._was_writing:
                 self._writing_lost_frames += 1
@@ -193,15 +223,32 @@ class DrawMode(ModeBase):
 
         is_explicit_stop = features["is_fist"] or features["is_open_palm"]
         label = hands_gestures[0].get("label", "OTHER") if hands_gestures else "OTHER"
+        self._record_trace(landmarks, label)
 
-        # ✌️ 双指 = 抬笔悬停：食指+中指伸出即可（贴紧也算，不要求张开），
-        # VICTORY 标签兜底。伸出手指的剪影在手侧对相机时依然可辨——
-        # 拇指被遮挡时的可靠抬笔手段。连续 2 帧去抖。
-        if features["two_finger_hover"] or label == "VICTORY":
+        # ✌️ 双指 = 抬笔悬停：中指与食指等长伸出即可（贴紧也算，不要求张开）。
+        # ML 标签拥有否决/确认权——实测（2026-06-12 gesture.log）几何误判的
+        # 断笔中 37/47 帧分类器明确报 POINTING_UP：
+        #   VICTORY → 直接确认双指；POINTING_UP / FIST → 几何被否决；
+        #   其余标签由几何决定（进入 0.95，已在悬停中维持放宽到 0.85 防回跳）。
+        mi_gate = 0.85 if self._two_finger_hovering else 0.95
+        if label == "VICTORY":
+            two_finger_now = True
+        elif label in ("POINTING_UP", "FIST"):
+            two_finger_now = False
+        else:
+            two_finger_now = (
+                features["index_extended"]
+                and features["middle_index_ratio"] > mi_gate
+                and not features["ring_up"]
+                and not features["pinky_up"]
+            )
+        if two_finger_now:
             self._two_finger_frames += 1
         else:
             self._two_finger_frames = 0
-        if self._two_finger_frames >= 2:
+            self._two_finger_hovering = False
+        if self._two_finger_frames >= 3:
+            self._two_finger_hovering = True
             if self._was_writing:
                 self._log_pen("lift", "two_finger", features, label)
                 self.overlay.force_lift_pen()

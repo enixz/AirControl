@@ -26,20 +26,29 @@ class FakeConfig:
         return self.data.get(key, default)
 
 
-def make_hand(thumb_apart=False, two_finger=False, yaw=1.0):
+def make_hand(thumb_apart=False, two_finger=False, half_curl=False, yaw=1.0):
     """合成 21 点手部关键点（[id, x, y] 像素坐标，y 向下）。
 
     基准为正面书写姿势：食指竖直伸出，中指/无名指/小指弯曲，拇指并拢。
+    two_finger: 中指与食指等长伸出且贴紧（mi≈0.99）。
+    half_curl: 中指半弯，2D 投影偏长（mi≈0.82）——实测单指书写时 mi 最大
+    到 0.81，正是旧"中指长>掌宽×0.6"判定大量误判断笔的形态。
     yaw<1 模拟偏航：所有 x 坐标绕 x=300 按 cos 因子压缩（掌宽塌缩，
     竖直方向的食指长度不变）。
     """
+    if two_finger:
+        middle_tip = (264, 198)   # mi≈0.99，与食指尖间距 14px < 张开要求
+    elif half_curl:
+        middle_tip = (205, 275)   # mi≈0.82，且指尖低于 PIP（不破坏书写姿势）
+    else:
+        middle_tip = (284, 300)   # 正常弯曲
     pts = {
         0: (300, 400),                      # 腕
         2: (240, 360), 3: (235, 340),       # 拇指 MCP/IP
         4: (180, 330) if thumb_apart else (250, 320),  # 拇指尖
         5: (260, 300), 6: (255, 260), 8: (250, 200),   # 食指 MCP/PIP/TIP（伸直）
         9: (285, 295), 10: (282, 265),                 # 中指 MCP/PIP
-        12: (262, 205) if two_finger else (284, 300),  # 中指尖：伸直(贴紧食指)或弯曲
+        12: middle_tip,
         14: (310, 270), 16: (312, 305),     # 无名指 PIP/TIP（弯曲）
         17: (340, 310), 18: (335, 280), 20: (336, 315),  # 小指 MCP/PIP/TIP（弯曲）
     }
@@ -58,7 +67,7 @@ def make_draw_mode():
     mouse = mock.MagicMock()
     mouse.to_screen.return_value = (500, 500)
     dm = DrawMode(
-        FakeConfig(),
+        FakeConfig({"draw_record_trace": False}),
         GestureRecognizer(),
         mouse,
         overlay,
@@ -133,12 +142,12 @@ class DrawStateMachineTest(unittest.TestCase):
         overlay.force_lift_pen.assert_called()
 
     def test_two_finger_lifts_even_sideways(self):
-        """侧偏中伸出中指（与食指贴紧）：2 帧内抬笔——治本路径。"""
+        """侧偏中伸出中指（与食指贴紧）：3 帧内抬笔——治本路径。"""
         dm, overlay = make_draw_mode()
         for _ in range(3):
             step(dm, make_hand())
         overlay.force_lift_pen.reset_mock()
-        results = [step(dm, make_hand(two_finger=True, yaw=0.45)) for _ in range(2)]
+        results = [step(dm, make_hand(two_finger=True, yaw=0.45)) for _ in range(3)]
         self.assertEqual(results[-1].gesture, "DRAW_HOVER")
         overlay.force_lift_pen.assert_called()
 
@@ -147,8 +156,32 @@ class DrawStateMachineTest(unittest.TestCase):
         dm, overlay = make_draw_mode()
         for _ in range(3):
             step(dm, make_hand())
-        results = [step(dm, make_hand(), label="VICTORY") for _ in range(2)]
+        results = [step(dm, make_hand(), label="VICTORY") for _ in range(3)]
         self.assertEqual(results[-1].gesture, "DRAW_HOVER")
+
+    def test_half_curled_middle_does_not_lift(self):
+        """实测回归：书写中中指半弯（mi≈0.82，旧判定误判为双指导致 16/24 次
+        断笔）——新判定下笔画必须不断。"""
+        dm, overlay = make_draw_mode()
+        for _ in range(3):
+            self.assertEqual(step(dm, make_hand()).gesture, "DRAW")
+        overlay.force_lift_pen.reset_mock()
+        for _ in range(15):
+            result = step(dm, make_hand(half_curl=True))
+            self.assertEqual(result.gesture, "DRAW")
+        overlay.force_lift_pen.assert_not_called()
+
+    def test_pointing_up_label_vetoes_two_finger_geometry(self):
+        """分类器明确报 POINTING_UP 时，即使几何满足双指也不得抬笔——
+        ML 标签是更可靠的信号，拥有否决权。"""
+        dm, overlay = make_draw_mode()
+        for _ in range(3):
+            step(dm, make_hand())
+        overlay.force_lift_pen.reset_mock()
+        for _ in range(5):
+            result = step(dm, make_hand(two_finger=True), label="POINTING_UP")
+            self.assertEqual(result.gesture, "DRAW")
+        overlay.force_lift_pen.assert_not_called()
 
     def test_pointing_up_label_starts_writing_sideways(self):
         """侧偏下拇指不可读时，POINTING_UP 标签可判定落笔意图。"""
