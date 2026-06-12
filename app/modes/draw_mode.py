@@ -1,3 +1,4 @@
+import logging
 import math
 import time
 import winsound
@@ -5,9 +6,13 @@ import winsound
 from .base import ModeBase, ModeResult
 from services.mouse_controller import ActiveRegionMapper, interp_tiers
 
+logger = logging.getLogger("gesture")
+
 
 class DrawMode(ModeBase):
-    """板书模式：拇指并拢开始书写，拇指分开停止书写。张掌清屏，握拳就绪。"""
+    """板书模式：拇指并拢落笔、分开抬笔（仅手正对相机时拇指可信）；
+    ✌️ 食指+中指伸出（贴紧也算）随时抬笔——侧面剪影可辨，不依赖拇指。
+    手侧偏时拇指被遮挡，冻结笔状态防误抬。张掌清屏，握拳就绪。"""
 
     # 移动灵敏度随"手在画面中的大小"换算的标定区间（相对参考掌宽的比值）。
     # 我们无法感知真实距离，只能用掌宽作为手在画面里大小的度量：
@@ -39,6 +44,15 @@ class DrawMode(ModeBase):
         self._double_fist_cooldown = 0.0
         # 自适应活动区映射：远距离也能写满全屏（替代固定的绝对映射）
         self._region_mapper = ActiveRegionMapper(margin=0.05)
+        # 双指悬停 / 拇指分开的连续帧计数（去抖）
+        self._two_finger_frames = 0
+        self._thumb_apart_frames = 0
+        # 标定遥测节流
+        self._last_telemetry = 0.0
+        # 正面度低于此值视为拇指不可观测（侧对相机），冻结笔状态
+        self._frontality_gate = (
+            float(self.config.get("draw_frontality_gate", 0.55)) if self.config else 0.55
+        )
 
     def on_enter(self):
         self.overlay.show_fullscreen()
@@ -53,6 +67,8 @@ class DrawMode(ModeBase):
         self._was_fist = False
         self._fist_tap_times.clear()
         self._double_fist_cooldown = 0.0
+        self._two_finger_frames = 0
+        self._thumb_apart_frames = 0
         self._region_mapper.reset()
 
     def on_exit(self):
@@ -68,6 +84,8 @@ class DrawMode(ModeBase):
         self._was_fist = False
         self._fist_tap_times.clear()
         self._double_fist_cooldown = 0.0
+        self._two_finger_frames = 0
+        self._thumb_apart_frames = 0
 
     def _position_toolbar(self):
         sw = self.overlay.width()
@@ -79,6 +97,27 @@ class DrawMode(ModeBase):
             return False
         self._last_special_action_time = time.time()
         return True
+
+    def _log_pen(self, event, cause, features, label):
+        """笔起落事件：记录触发原因和当时的关键比值，用于实机标定。"""
+        logger.info(
+            "[DRAW] pen_%s cause=%s label=%s frontality=%.2f thumb_ratio=%.2f middle_ratio=%.2f",
+            event, cause, label, features["hand_frontality"],
+            features["thumb_ratio"], features["middle_ratio"],
+        )
+
+    def _telemetry(self, features, label, state):
+        """书写/悬停期间每 0.5s 记录一次比值流，便于在 gesture.log 标定
+        draw_frontality_gate 与双指/拇指阈值。"""
+        now = time.time()
+        if now - self._last_telemetry < 0.5:
+            return
+        self._last_telemetry = now
+        logger.info(
+            "[DRAW] state=%s label=%s frontality=%.2f thumb_ratio=%.2f middle_ratio=%.2f tucked=%s",
+            state, label, features["hand_frontality"], features["thumb_ratio"],
+            features["middle_ratio"], features["thumb_tucked"],
+        )
 
     def handle(self, hands_landmarks, hands_gestures, frame_w, frame_h) -> ModeResult:
         self._sync_frame_size(frame_w, frame_h)
@@ -153,45 +192,95 @@ class DrawMode(ModeBase):
                 self.overlay.set_pen_scale(scale)
 
         is_explicit_stop = features["is_fist"] or features["is_open_palm"]
+        label = hands_gestures[0].get("label", "OTHER") if hands_gestures else "OTHER"
 
-        # 书写手势：食指伸直 + 其余三指弯曲（拇指状态决定启停）
-        if features["index_drawing_pose"]:
+        # ✌️ 双指 = 抬笔悬停：食指+中指伸出即可（贴紧也算，不要求张开），
+        # VICTORY 标签兜底。伸出手指的剪影在手侧对相机时依然可辨——
+        # 拇指被遮挡时的可靠抬笔手段。连续 2 帧去抖。
+        if features["two_finger_hover"] or label == "VICTORY":
+            self._two_finger_frames += 1
+        else:
+            self._two_finger_frames = 0
+        if self._two_finger_frames >= 2:
+            if self._was_writing:
+                self._log_pen("lift", "two_finger", features, label)
+                self.overlay.force_lift_pen()
+            self._was_writing = False
+            self._writing_lost_frames = 0
+            self._thumb_apart_frames = 0
             self.fist_hold_frames = 0
             self.open_palm_frames = 0
+            self._telemetry(features, label, "hover_two_finger")
+            return ModeResult(
+                gesture="DRAW_HOVER",
+                status_text="悬停（双指）",
+                status_color=(180, 180, 180),
+            )
 
-            # 拇指并拢（收拢/靠近手掌）→ 落笔书写
-            # 拇指分开（展开/远离手掌）→ 抬笔停止
-            if features["thumb_tucked"]:
+        # 拇指可观测性门控：手侧对相机（正面度低）时拇指常被整只手遮挡，
+        # 关键点是模型脑补的，不允许它改变笔的起落
+        thumb_readable = features["hand_frontality"] >= self._frontality_gate
+
+        # 书写中：用宽松条件维持（食指仍伸直即可——距离判定抗偏航）；
+        # 严格的 index_drawing_pose 只把守进入书写的门
+        if self._was_writing and features["index_extended"] and not is_explicit_stop:
+            self.fist_hold_frames = 0
+            self.open_palm_frames = 0
+            # 抬笔要求拇指可读且连续 3 帧分开：侧偏时冻结书写状态，
+            # 故意抬笔发生在笔画末端、手偏正面的时刻，不受影响
+            if thumb_readable and not features["thumb_tucked"]:
+                self._thumb_apart_frames += 1
+            else:
+                self._thumb_apart_frames = 0
+            if self._thumb_apart_frames >= 3:
+                self._thumb_apart_frames = 0
+                self._was_writing = False
+                self._writing_lost_frames = 0
+                self._log_pen("lift", "thumb_apart", features, label)
+                self.overlay.force_lift_pen()
+                return ModeResult(
+                    gesture="DRAW_HOVER",
+                    status_text="悬停（拇指分开）",
+                    status_color=(180, 180, 180),
+                )
+            self._writing_lost_frames = 0
+            self.overlay.draw_to(x_screen, y_screen)
+            self._telemetry(features, label, "writing")
+            return ModeResult(
+                gesture="DRAW",
+                status_text="正在书写",
+                status_color=(0, 255, 255),
+            )
+
+        # 未在书写、摆出单指书写姿势：决定是否落笔
+        if not self._was_writing and features["index_drawing_pose"]:
+            self.fist_hold_frames = 0
+            self.open_palm_frames = 0
+            self._thumb_apart_frames = 0
+            # 正面：拇指并拢落笔（习惯不变）；侧面拇指不可读时，
+            # 由 ML 标签 Pointing_Up（单指姿势）判定书写意图
+            if (thumb_readable and features["thumb_tucked"]) or (
+                not thumb_readable and label == "POINTING_UP"
+            ):
                 self._was_writing = True
                 self._writing_lost_frames = 0
+                self._log_pen(
+                    "down",
+                    "thumb_tucked" if thumb_readable else "ml_pointing_up",
+                    features, label,
+                )
                 self.overlay.draw_to(x_screen, y_screen)
                 return ModeResult(
                     gesture="DRAW",
                     status_text="正在书写",
                     status_color=(0, 255, 255),
                 )
-            else:
-                # 拇指分开缓动：如果之前在书写，允许 5 帧的姿势抖动缓冲
-                if self._was_writing:
-                    self._writing_lost_frames += 1
-                    if self._writing_lost_frames < 5:
-                        self.overlay.draw_to(x_screen, y_screen)
-                        return ModeResult(
-                            gesture="DRAW",
-                            status_text="正在书写",
-                            status_color=(0, 255, 255),
-                        )
-                    else:
-                        self.overlay.force_lift_pen()
-                        self._was_writing = False
-                        self._writing_lost_frames = 0
-                
-                self.overlay.update_cursor(x_screen, y_screen)
-                return ModeResult(
-                    gesture="DRAW_HOVER",
-                    status_text="悬停（拇指分开）",
-                    status_color=(180, 180, 180),
-                )
+            self._telemetry(features, label, "hover")
+            return ModeResult(
+                gesture="DRAW_HOVER",
+                status_text="悬停（拇指分开）",
+                status_color=(180, 180, 180),
+            )
 
         # 书写丢失缓冲（姿势短暂偏离时保持书写）
         if self._was_writing and not is_explicit_stop:
@@ -203,9 +292,12 @@ class DrawMode(ModeBase):
                     status_text="正在书写",
                     status_color=(0, 255, 255),
                 )
+            self._log_pen("lift", "pose_lost", features, label)
             self._was_writing = False
             self._writing_lost_frames = 0
 
+        if self._was_writing and is_explicit_stop:
+            self._log_pen("lift", "explicit_stop", features, label)
         self._was_writing = False
         self._writing_lost_frames = 0
 

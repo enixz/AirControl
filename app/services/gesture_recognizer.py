@@ -67,12 +67,13 @@ class GestureRecognizer:
 
         thumb_up = landmarks[4][2] < landmarks[3][2] and landmarks[4][2] < landmarks[2][2]
         thumb_tip_to_index_mcp = math.hypot(landmarks[4][1] - landmarks[5][1], landmarks[4][2] - landmarks[5][2])
-        # 滞后阈值：进入 tucked 需要更近（0.65），退出 tucked 需要更远（0.78）
-        # 避免拇指在边界距离时书写/悬停状态来回抖动
+        # 滞后阈值：进入 tucked 需要更近（0.62），退出 tucked 需要更远（0.75）。
+        # 与 v1.1.0 的 0.65/0.78（按 |Δx| 掌宽）等效——掌宽改为欧氏距离时
+        # 阈值被过度压缩到 0.5/0.6，导致书写中拇指频繁被误判为分开。
         if self._was_tucked:
-            thumb_tucked = thumb_tip_to_index_mcp < hand_width * 0.6
+            thumb_tucked = thumb_tip_to_index_mcp < hand_width * 0.75
         else:
-            thumb_tucked = thumb_tip_to_index_mcp < hand_width * 0.5
+            thumb_tucked = thumb_tip_to_index_mcp < hand_width * 0.62
         self._was_tucked = thumb_tucked
         thumb_extended = thumb_tip_to_index_mcp > hand_width * 0.9
 
@@ -106,6 +107,21 @@ class GestureRecognizer:
             and scissor_spread_ok
         )
 
+        # 中指伸直用距离判定（与 index_extended 同理），不用 y 坐标比较——
+        # 抗偏航且对"指向斜上方"也成立
+        middle_len = math.hypot(landmarks[12][1] - landmarks[9][1], landmarks[12][2] - landmarks[9][2])
+        middle_extended = middle_len > hand_width * 0.6
+
+        # 双指悬停（板书抬笔）：食指+中指伸出即可，**不要求张开**（贴紧也算，
+        # 区别于 is_scissor 的 spread 要求）。伸出的手指在轮廓上凸出，
+        # 手侧对相机时剪影依然可辨，是偏航下最可靠的抬笔信号。
+        two_finger_hover = index_extended and middle_extended and not ring_up and not pinky_up
+
+        # 正面度代理：掌宽（食指根↔小指根）随偏航按 cos 塌缩，而书写姿势下
+        # 竖直伸出的食指长度几乎不变。正对相机 ≈0.8，侧到 60° ≈0.4。
+        # 仅在食指伸出的姿势下有意义（拳头时食指短，比值无效）。
+        hand_frontality = hand_width / max(index_len, 1e-6)
+
         return {
             "index_up": index_up,
             "middle_up": middle_up,
@@ -121,6 +137,12 @@ class GestureRecognizer:
             "thumb_extended": thumb_extended,
             "thumb_writing": index_extended and not middle_up and not ring_up and not pinky_up and not thumb_extended,
             "index_drawing_pose": index_extended and not middle_up and not ring_up and not pinky_up,
+            "index_extended": index_extended,
+            "middle_extended": middle_extended,
+            "two_finger_hover": two_finger_hover,
+            "hand_frontality": hand_frontality,
+            "thumb_ratio": thumb_tip_to_index_mcp / hand_width,
+            "middle_ratio": middle_len / hand_width,
             "fingers_close": fingers_close,
             "hand_width": hand_width,
             "index_middle_up": is_scissor,
