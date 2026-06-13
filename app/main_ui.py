@@ -859,6 +859,10 @@ def main():
         except Exception as e:
             logger.warning("提权请求被拒绝或失败: %s，将以普通权限启动。", e)
 
+    # 崩溃捕获：原生段错误 / 主线程 / 工作线程 / Qt 致命消息 → crash.log
+    from crash_handler import install as install_crash_handler
+    install_crash_handler()
+
     app = QApplication(sys.argv)
     window = FloatingWindow()
     window.show()

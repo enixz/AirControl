@@ -12,6 +12,9 @@ from services.gesture_recognizer import GestureRecognizer
 from services.ppt_controller import PptController
 
 def main():
+    from crash_handler import install as install_crash_handler
+    install_crash_handler()
+
     print("===============================")
     print(" AirControl - PPT手势控制系统")
     print("===============================")
