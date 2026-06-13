@@ -34,6 +34,10 @@ class DrawMode(ModeBase):
         (1.90, 1.00),  # 很近
     ]
 
+    # 中央投票笔状态机：决定起落前，时间窗内至少要有 VOTE_MIN 帧证据，
+    # 防止窗口刚填充时凭 1-2 帧的比例噪声误触（低帧率下尤甚）。
+    VOTE_MIN = 3
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._was_writing = False
@@ -55,6 +59,17 @@ class DrawMode(ModeBase):
         # 正面度低于此值视为拇指不可观测（侧对相机），冻结笔状态
         self._frontality_gate = (
             float(self.config.get("draw_frontality_gate", 0.55)) if self.config else 0.55
+        )
+        # 中央投票笔状态机状态：滑动时间窗内的 (时间戳, 帧分类) 与对应屏幕坐标。
+        # 与 🤟 切模式同构——单帧只投票、不直接决定笔的起落。窗口与多数票
+        # 比例可由 config 调（默认 0.3s/0.6，对应实录回放验证的 ~7 帧/0.71）。
+        self._vote: list[tuple[float, str]] = []
+        self._recent_points: list[tuple[float, float, float]] = []
+        self._vote_window = (
+            float(self.config.get("draw_vote_window_sec", 0.30)) if self.config else 0.30
+        )
+        self._vote_ratio = (
+            float(self.config.get("draw_vote_ratio", 0.60)) if self.config else 0.60
         )
         # 全帧率关键点轨迹录制（draw_trace.jsonl，项目根目录，会话开始时清空）：
         # 供 simulate_draw.py --replay 离线回放，用真实数据对比判定逻辑变体
@@ -84,6 +99,8 @@ class DrawMode(ModeBase):
         self._two_finger_frames = 0
         self._two_finger_hovering = False
         self._thumb_apart_frames = 0
+        self._vote.clear()
+        self._recent_points.clear()
         self._region_mapper.reset()
 
     def on_exit(self):
@@ -134,6 +151,42 @@ class DrawMode(ModeBase):
             state, label, features["hand_frontality"], features["thumb_ratio"],
             features["middle_index_ratio"], features["thumb_tucked"],
         )
+
+    def _classify_frame(self, features, label):
+        """把单帧分类成一票证据：write / hover / stop / other。
+
+        单帧不直接决定笔状态，只投一票，由 handle() 的时间窗多数表决决定
+        起落（与 🤟 切模式同构）。判定照搬 analyze_trace.py 中经 draw_trace
+        实录回放验证过的 VotedGate.classify（误断 57→2）：
+          - 握拳 / 张掌 → stop（就绪 / 清屏）；
+          - ✌️ 双指 → hover：VICTORY 标签直接确认；POINTING_UP / FIST 标签
+            否决几何；其余靠几何（中指≈食指等长伸出、无名指小指未伸）；
+          - 单指伸出 → 拇指可观测性门控：手正对相机且拇指分开 → hover（抬笔），
+            否则（贴紧 / 侧偏拇指不可读）→ write（落笔）；
+          - 其余 → other。
+        features 在此处永不为 None（丢手在 handle() 上游已返回）。
+        """
+        if features["is_fist"] or features["is_open_palm"]:
+            return "stop"
+        if label == "VICTORY":
+            two_finger = True
+        elif label in ("POINTING_UP", "FIST"):
+            two_finger = False
+        else:
+            two_finger = (
+                features["index_extended"]
+                and features["middle_index_ratio"] > 0.95
+                and not features["ring_up"]
+                and not features["pinky_up"]
+            )
+        if two_finger:
+            return "hover"
+        if features["index_extended"]:
+            readable = features["hand_frontality"] >= self._frontality_gate
+            if readable and not features["thumb_tucked"]:
+                return "hover"
+            return "write"
+        return "other"
 
     def _record_trace(self, landmarks, label):
         """逐帧记录关键点到 draw_trace.jsonl（lm=None 表示该帧未检出手）。"""
@@ -221,132 +274,75 @@ class DrawMode(ModeBase):
                 scale = hand_size / self.overlay.REFERENCE_HAND_SIZE
                 self.overlay.set_pen_scale(scale)
 
-        is_explicit_stop = features["is_fist"] or features["is_open_palm"]
         label = hands_gestures[0].get("label", "OTHER") if hands_gestures else "OTHER"
         self._record_trace(landmarks, label)
+        now = time.time()
 
-        # ✌️ 双指 = 抬笔悬停：中指与食指等长伸出即可（贴紧也算，不要求张开）。
-        # ML 标签拥有否决/确认权——实测（2026-06-12 gesture.log）几何误判的
-        # 断笔中 37/47 帧分类器明确报 POINTING_UP：
-        #   VICTORY → 直接确认双指；POINTING_UP / FIST → 几何被否决；
-        #   其余标签由几何决定（进入 0.95，已在悬停中维持放宽到 0.85 防回跳）。
-        mi_gate = 0.85 if self._two_finger_hovering else 0.95
-        if label == "VICTORY":
-            two_finger_now = True
-        elif label in ("POINTING_UP", "FIST"):
-            two_finger_now = False
-        else:
-            two_finger_now = (
-                features["index_extended"]
-                and features["middle_index_ratio"] > mi_gate
-                and not features["ring_up"]
-                and not features["pinky_up"]
-            )
-        if two_finger_now:
-            self._two_finger_frames += 1
-        else:
-            self._two_finger_frames = 0
-            self._two_finger_hovering = False
-        if self._two_finger_frames >= 3:
-            self._two_finger_hovering = True
-            if self._was_writing:
-                self._log_pen("lift", "two_finger", features, label)
-                self.overlay.force_lift_pen()
-            self._was_writing = False
-            self._writing_lost_frames = 0
-            self._thumb_apart_frames = 0
-            self.fist_hold_frames = 0
-            self.open_palm_frames = 0
-            self._telemetry(features, label, "hover_two_finger")
-            return ModeResult(
-                gesture="DRAW_HOVER",
-                status_text="悬停（双指）",
-                status_color=(180, 180, 180),
-            )
+        # === 中央投票笔状态机 ===
+        # 实测教训（2026-06-13 draw_trace 回放，185s/3823 帧）：所有单帧布尔
+        # 信号在 1-2 帧尺度上都会闪烁——握拳 87 段中 52 段 ≤2 帧、拇指比值
+        # 每分钟穿越阈值 53 次。逐路径加去抖是打地鼠：堵上 two_finger
+        # （52→7 次）churn 就流向 explicit_stop（23→68 次），总断笔量不降。
+        # 唯一有效的形状：笔状态的每次转换都需要时间窗内多数帧的持续证据，
+        # 单帧布尔值只产生证据、没有直接决定权（与 🤟 切模式同构）。
+        # 实录回放对比：误断 57 次 → 2 次（见 analyze_trace.py / simulate_draw.py）。
+        cls = self._classify_frame(features, label)
+        self._vote.append((now, cls))
+        self._recent_points.append((now, x_screen, y_screen))
+        horizon = now - self._vote_window
+        while self._vote and self._vote[0][0] < horizon:
+            self._vote.pop(0)
+        while self._recent_points and self._recent_points[0][0] < horizon:
+            self._recent_points.pop(0)
+        total = len(self._vote)
+        n_write = sum(1 for _, c in self._vote if c == "write")
+        n_stop = sum(1 for _, c in self._vote if c == "stop")
+        n_up = n_stop + sum(1 for _, c in self._vote if c == "hover")
 
-        # 拇指可观测性门控：手侧对相机（正面度低）时拇指常被整只手遮挡，
-        # 关键点是模型脑补的，不允许它改变笔的起落
-        thumb_readable = features["hand_frontality"] >= self._frontality_gate
-
-        # 书写中：用宽松条件维持（食指仍伸直即可——距离判定抗偏航）；
-        # 严格的 index_drawing_pose 只把守进入书写的门
-        if self._was_writing and features["index_extended"] and not is_explicit_stop:
-            self.fist_hold_frames = 0
-            self.open_palm_frames = 0
-            # 抬笔要求拇指可读且连续 3 帧分开：侧偏时冻结书写状态，
-            # 故意抬笔发生在笔画末端、手偏正面的时刻，不受影响
-            if thumb_readable and not features["thumb_tucked"]:
-                self._thumb_apart_frames += 1
-            else:
-                self._thumb_apart_frames = 0
-            if self._thumb_apart_frames >= 3:
-                self._thumb_apart_frames = 0
-                self._was_writing = False
-                self._writing_lost_frames = 0
-                self._log_pen("lift", "thumb_apart", features, label)
-                self.overlay.force_lift_pen()
-                return ModeResult(
-                    gesture="DRAW_HOVER",
-                    status_text="悬停（拇指分开）",
-                    status_color=(180, 180, 180),
-                )
-            self._writing_lost_frames = 0
-            self.overlay.draw_to(x_screen, y_screen)
-            self._telemetry(features, label, "writing")
-            return ModeResult(
-                gesture="DRAW",
-                status_text="正在书写",
-                status_color=(0, 255, 255),
-            )
-
-        # 未在书写、摆出单指书写姿势：决定是否落笔
-        if not self._was_writing and features["index_drawing_pose"]:
-            self.fist_hold_frames = 0
-            self.open_palm_frames = 0
-            self._thumb_apart_frames = 0
-            # 正面：拇指并拢落笔（习惯不变）；侧面拇指不可读时，
-            # 由 ML 标签 Pointing_Up（单指姿势）判定书写意图
-            if (thumb_readable and features["thumb_tucked"]) or (
-                not thumb_readable and label == "POINTING_UP"
-            ):
+        if not self._was_writing:
+            if total >= self.VOTE_MIN and n_write >= total * self._vote_ratio:
                 self._was_writing = True
                 self._writing_lost_frames = 0
-                self._log_pen(
-                    "down",
-                    "thumb_tucked" if thumb_readable else "ml_pointing_up",
-                    features, label,
-                )
-                self.overlay.draw_to(x_screen, y_screen)
+                self._log_pen("down", "vote", features, label)
+                # 落笔回填：把确认期间积累的轨迹补画上，消除投票窗带来的起笔断头
+                for _, px, py in self._recent_points:
+                    self.overlay.draw_to(px, py)
+                self._telemetry(features, label, "writing")
                 return ModeResult(
                     gesture="DRAW",
                     status_text="正在书写",
                     status_color=(0, 255, 255),
                 )
+        else:
+            if total >= self.VOTE_MIN and n_up >= total * self._vote_ratio:
+                cause = "vote_stop" if n_stop * 2 >= n_up else "vote_hover"
+                self._was_writing = False
+                self._writing_lost_frames = 0
+                self._log_pen("lift", cause, features, label)
+                self.overlay.force_lift_pen()
+                # 不返回：显式停止（拳/掌）继续流向下方分支（清屏/就绪）
+            else:
+                self._writing_lost_frames = 0
+                self.fist_hold_frames = 0
+                self.open_palm_frames = 0
+                self.overlay.draw_to(x_screen, y_screen)
+                self._telemetry(features, label, "writing")
+                return ModeResult(
+                    gesture="DRAW",
+                    status_text="正在书写",
+                    status_color=(0, 255, 255),
+                )
+
+        # 未在书写：write/hover 候选帧显示悬停光标，其余流向握拳/张掌分支
+        if cls in ("write", "hover"):
+            self.fist_hold_frames = 0
+            self.open_palm_frames = 0
             self._telemetry(features, label, "hover")
             return ModeResult(
                 gesture="DRAW_HOVER",
-                status_text="悬停（拇指分开）",
+                status_text="悬停",
                 status_color=(180, 180, 180),
             )
-
-        # 书写丢失缓冲（姿势短暂偏离时保持书写）
-        if self._was_writing and not is_explicit_stop:
-            self._writing_lost_frames += 1
-            if self._writing_lost_frames < 10:
-                self.overlay.draw_to(x_screen, y_screen)
-                return ModeResult(
-                    gesture="DRAW",
-                    status_text="正在书写",
-                    status_color=(0, 255, 255),
-                )
-            self._log_pen("lift", "pose_lost", features, label)
-            self._was_writing = False
-            self._writing_lost_frames = 0
-
-        if self._was_writing and is_explicit_stop:
-            self._log_pen("lift", "explicit_stop", features, label)
-        self._was_writing = False
-        self._writing_lost_frames = 0
 
         is_fist = features["is_fist"]
         now = time.time()
