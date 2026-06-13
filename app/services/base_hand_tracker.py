@@ -425,12 +425,8 @@ class BaseHandTracker(ABC):
                 if acq is not None:
                     hands_landmarks, hands_gestures, raw = acq
 
-        # === 更新 zoom 模式 + hint ===
+        # === 更新 zoom 模式 ===
         self._update_zoom_mode(hands_landmarks, hands_gestures, w_frame, h_frame)
-
-        hint = self._compute_hint_from_landmarks(hands_landmarks)
-        if hint[0] is not None:
-            self._last_hint_center, self._last_hint_size = hint
 
         # === 有手检出：排序 + 平滑 + 幽灵手 ===
         if hands_landmarks:
@@ -450,6 +446,13 @@ class BaseHandTracker(ABC):
             )
             hands_landmarks = [hands_landmarks[i] for i in order]
             hands_gestures = [hands_gestures[i] for i in order]
+
+            # zoom 视口只锁优先级最高的那只手（_priority_score 选出的"举得最高"者）。
+            # 此前 hint 取所有手的并集包围盒：两只手并存时裁剪框在"单手↔双手跨度"间
+            # 跳变，既锁不住上边的手、又使视口一缩一放（拉风箱）。排序后取 [:1] 即锁定手。
+            hint = self._compute_hint_from_landmarks(hands_landmarks[:1])
+            if hint[0] is not None:
+                self._last_hint_center, self._last_hint_size = hint
 
             smoothed_all = []
             gesture_all = []
@@ -578,6 +581,12 @@ class BaseHandTracker(ABC):
             if not self._crop_zoom_mode and self._far_streak >= self._zoom_switch_streak:
                 self._crop_zoom_mode = True
                 self._far_streak = 0
+                # 进入 ZOOM 时让视口一步落到手上，不再从整屏 EMA 慢慢缩进。
+                # 否则每次 ZOOM ON 都先显示整屏、再花约 0.5s 爬回手部——zoom 反复
+                # 进入时这段来回缩放正是"拉风箱"的元凶。置空后下一帧 find_hands 顶部
+                # 会用当前 hint 直接初始化视口（_current_crop_center is None 分支）。
+                self._current_crop_center = None
+                self._current_crop_size = None
                 _zoom_logger.info(
                     "=> ZOOM ON (%s bbox=%.2f%% < %.2f%% far_threshold)",
                     self.engine_name, ratio * 100, self._zoom_far_threshold * 100,
