@@ -61,14 +61,17 @@ def make_hand(thumb_apart=False, two_finger=False, half_curl=False, yaw=1.0):
     return lm
 
 
-def make_draw_mode():
+def make_draw_mode(extra_config=None):
     overlay = mock.MagicMock()
     overlay.REFERENCE_HAND_SIZE = 100.0
     overlay.isVisible.return_value = True
     mouse = mock.MagicMock()
     mouse.to_screen.return_value = (500, 500)
+    cfg = {"draw_record_trace": False}
+    if extra_config:
+        cfg.update(extra_config)
     dm = DrawMode(
-        FakeConfig({"draw_record_trace": False}),
+        FakeConfig(cfg),
         GestureRecognizer(),
         mouse,
         overlay,
@@ -130,9 +133,11 @@ class DrawStateMachineTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.dm, self.overlay = make_draw_mode()
 
-    def step(self, landmarks, label="OTHER"):
+    def step(self, landmarks, label="OTHER", dm=None):
         self._now[0] += DT
-        return self.dm.handle([landmarks], [{"label": label, "bbox_area": 0.0}], 640, 480)
+        return (dm or self.dm).handle(
+            [landmarks], [{"label": label, "bbox_area": 0.0}], 640, 480
+        )
 
     def warm_writing(self, n=6):
         """步进 n 帧正面书写姿势，累积证据确认落笔。"""
@@ -157,21 +162,47 @@ class DrawStateMachineTest(unittest.TestCase):
             )
         self.overlay.force_lift_pen.assert_not_called()
 
-    def test_frontal_thumb_apart_lifts_pen(self):
-        """正面故意分开拇指：每帧投 hover，多数后抬笔——习惯交互保留。"""
+    def test_frontal_thumb_apart_does_not_lift_by_default(self):
+        """默认 draw_thumb_lift=False：拇指分开不再抬笔——消除近距正面书写时
+        拇指间歇被读成"分开"的笔画中途误断（实测一次会话 23 次）。单指姿势
+        维持落笔，抬笔交给 ✌️ / 握拳 / 张掌。"""
         self.warm_writing()
         self.overlay.force_lift_pen.reset_mock()
-        results = [self.step(make_hand(thumb_apart=True)) for _ in range(15)]
-        self.assertEqual(results[-1].gesture, "DRAW_HOVER")
-        self.overlay.force_lift_pen.assert_called()
+        for _ in range(15):
+            self.assertEqual(self.step(make_hand(thumb_apart=True)).gesture, "DRAW")
+        self.overlay.force_lift_pen.assert_not_called()
 
-    def test_two_finger_lifts_even_sideways(self):
-        """侧偏中伸出中指（与食指贴紧）：投 hover，多数后抬笔——治本路径。"""
+    def test_frontal_thumb_apart_lifts_when_enabled(self):
+        """draw_thumb_lift=True 恢复旧习惯：正面分开拇指 → 投 hover，多数后抬笔。"""
+        dm, overlay = make_draw_mode({"draw_thumb_lift": True})
+        for _ in range(6):
+            self.step(make_hand(), dm=dm)
+        results = [self.step(make_hand(thumb_apart=True), dm=dm) for _ in range(15)]
+        self.assertEqual(results[-1].gesture, "DRAW_HOVER")
+        overlay.force_lift_pen.assert_called()
+
+    def test_geom_two_finger_does_not_lift_by_default(self):
+        """默认 draw_two_finger_geom=False：几何双指（label 非 VICTORY）不再抬笔——
+        消除侧视下中指 2D 投影 mi>0.95 把单指误判成双指的断笔。抬笔改走
+        VICTORY 标签 / 握拳 / 张掌。"""
         self.warm_writing()
         self.overlay.force_lift_pen.reset_mock()
-        results = [self.step(make_hand(two_finger=True, yaw=0.45)) for _ in range(15)]
+        for _ in range(15):
+            self.assertEqual(
+                self.step(make_hand(two_finger=True, yaw=0.45)).gesture, "DRAW"
+            )
+        self.overlay.force_lift_pen.assert_not_called()
+
+    def test_two_finger_geom_lifts_when_enabled(self):
+        """draw_two_finger_geom=True 恢复几何兜底：侧偏双指 → 投 hover，多数后抬笔。"""
+        dm, overlay = make_draw_mode({"draw_two_finger_geom": True})
+        for _ in range(6):
+            self.step(make_hand(), dm=dm)
+        results = [
+            self.step(make_hand(two_finger=True, yaw=0.45), dm=dm) for _ in range(15)
+        ]
         self.assertEqual(results[-1].gesture, "DRAW_HOVER")
-        self.overlay.force_lift_pen.assert_called()
+        overlay.force_lift_pen.assert_called()
 
     def test_victory_label_lifts_without_geometry(self):
         """几何仍是单指书写姿势但 ML 标签报 VICTORY：标签把该帧投成 hover，
@@ -192,16 +223,18 @@ class DrawStateMachineTest(unittest.TestCase):
         self.overlay.force_lift_pen.assert_not_called()
 
     def test_pointing_up_label_vetoes_two_finger_geometry(self):
-        """分类器明确报 POINTING_UP 时，即使几何满足双指也投 write——
-        ML 标签是更可靠的信号，拥有否决权，笔画不断。"""
-        self.warm_writing()
-        self.overlay.force_lift_pen.reset_mock()
+        """即使开启几何兜底（draw_two_finger_geom=True）且几何满足双指，分类器报
+        POINTING_UP 也投 write——ML 标签否决几何，笔画不断。"""
+        dm, overlay = make_draw_mode({"draw_two_finger_geom": True})
+        for _ in range(6):
+            self.step(make_hand(), dm=dm)
+        overlay.force_lift_pen.reset_mock()
         for _ in range(10):
             self.assertEqual(
-                self.step(make_hand(two_finger=True), label="POINTING_UP").gesture,
+                self.step(make_hand(two_finger=True), label="POINTING_UP", dm=dm).gesture,
                 "DRAW",
             )
-        self.overlay.force_lift_pen.assert_not_called()
+        overlay.force_lift_pen.assert_not_called()
 
     def test_pointing_up_label_starts_writing_sideways(self):
         """侧偏下拇指不可读时，POINTING_UP 单指姿势累积证据后落笔。"""

@@ -60,6 +60,20 @@ class DrawMode(ModeBase):
         self._frontality_gate = (
             float(self.config.get("draw_frontality_gate", 0.55)) if self.config else 0.55
         )
+        # 拇指分开抬笔：默认关闭。实测（2026-06-13）近距正面书写时拇指间歇被
+        # 读成"分开"，造成单指（POINTING_UP）笔画中途误抬（一次会话 14 次）。
+        # 关闭后单指姿势一律落笔，抬笔只认可靠信号——✌️双指 / 握拳 / 张掌。
+        # 设 True 可恢复旧的"正面拇指并拢落笔、分开抬笔"习惯。
+        self._thumb_lift = (
+            bool(self.config.get("draw_thumb_lift", False)) if self.config else False
+        )
+        # ✌️ 双指抬笔的几何兜底：默认关闭。实测（2026-06-13）侧视书写时中指 2D
+        # 投影使 mi 频繁 >0.95，单指被误判成双指而中途断笔（一会话 12 次误判
+        # vs 1 次真几何双指）。关闭后双指抬笔只认可靠的 VICTORY ML 标签；
+        # 设 True 恢复几何兜底（仅在正对相机、几何可信时建议开）。
+        self._two_finger_geom = (
+            bool(self.config.get("draw_two_finger_geom", False)) if self.config else False
+        )
         # 中央投票笔状态机状态：滑动时间窗内的 (时间戳, 帧分类) 与对应屏幕坐标。
         # 与 🤟 切模式同构——单帧只投票、不直接决定笔的起落。窗口与多数票
         # 比例可由 config 调（默认 0.3s/0.6，对应实录回放验证的 ~7 帧/0.71）。
@@ -168,23 +182,29 @@ class DrawMode(ModeBase):
         """
         if features["is_fist"] or features["is_open_palm"]:
             return "stop"
-        if label == "VICTORY":
-            two_finger = True
-        elif label in ("POINTING_UP", "FIST"):
-            two_finger = False
-        else:
+        if label in ("POINTING_UP", "FIST"):
+            two_finger = False            # ML 标签否决几何（单指/握拳姿势）
+        elif label == "VICTORY":
+            two_finger = True             # ML 标签确认 ✌️——侧视剪影仍可辨
+        elif self._two_finger_geom:
+            # 几何兜底（默认关闭）：侧视下 mi 不可信，详见 __init__ 注释
             two_finger = (
                 features["index_extended"]
                 and features["middle_index_ratio"] > 0.95
                 and not features["ring_up"]
                 and not features["pinky_up"]
             )
+        else:
+            two_finger = False
         if two_finger:
             return "hover"
         if features["index_extended"]:
-            readable = features["hand_frontality"] >= self._frontality_gate
-            if readable and not features["thumb_tucked"]:
-                return "hover"
+            # 默认不让拇指改变笔状态（噪声大、近距正面误抬）；单指即落笔。
+            # draw_thumb_lift=True 时恢复"手正对相机且拇指分开 → 抬笔"。
+            if self._thumb_lift:
+                readable = features["hand_frontality"] >= self._frontality_gate
+                if readable and not features["thumb_tucked"]:
+                    return "hover"
             return "write"
         return "other"
 
