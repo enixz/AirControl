@@ -17,10 +17,12 @@ class InferenceWorker(QThread):
     error_occurred = pyqtSignal(str)
     fps_updated = pyqtSignal(float)
 
-    def __init__(self, camera, tracker, max_fps=30, parent=None, debug_overlay=False):
+    def __init__(self, camera, tracker, max_fps=30, parent=None, debug_overlay=False,
+                 frame_recorder=None):
         super().__init__(parent)
         self.camera = camera
         self.tracker = tracker
+        self.frame_recorder = frame_recorder  # 可选：原始帧无损录制（默认 None）
         self.running = False
         self.lock = threading.Lock()
         self._frame_count = 0
@@ -58,6 +60,10 @@ class InferenceWorker(QThread):
 
         # 水平翻转（镜像）
         frame = cv2.flip(frame, 1)
+
+        # 原始帧录制：必须在 find_hands(draw=True) 绘制叠层之前，录的是干净输入。
+        if self.frame_recorder is not None:
+            self.frame_recorder.write(frame)
 
         # 获取当前tracker（线程安全）
         with self.lock:

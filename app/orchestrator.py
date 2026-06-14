@@ -144,10 +144,15 @@ class AirControlOrchestrator(QObject):
         # Self startup diagnostic check
         self._run_startup_check()
 
+        # 原始帧录制器（默认关；config record_raw_video=true 时录到 raw_capture/，
+        # 供 replay_video.py 离线回放、用同一段真实画面客观对比检测质量）
+        self.frame_recorder = self._make_frame_recorder()
+
         # Start Inference thread worker
         self.inference_worker = InferenceWorker(
             self.camera, self.tracker, max_fps=30,
             debug_overlay=bool(self.config.get("debug_overlay")),
+            frame_recorder=self.frame_recorder,
         )
         self.inference_worker.frame_ready.connect(self._on_frame_ready)
         self.inference_worker.error_occurred.connect(self._on_inference_error)
@@ -280,10 +285,25 @@ class AirControlOrchestrator(QObject):
         logger.info("摄像头已切换到 %d (%dx%d)", new_index, new_cam.width or 0, new_cam.height or 0)
         return True
 
+    def _make_frame_recorder(self):
+        """按 config 创建原始帧录制器；默认关闭、失败返回 None（绝不影响主流程）。"""
+        if not self.config.get("record_raw_video"):
+            return None
+        try:
+            from services.frame_recorder import FrameRecorder
+            return FrameRecorder(
+                max_frames=int(self.config.get("record_raw_max_frames") or 2000),
+                max_seconds=float(self.config.get("record_raw_max_seconds") or 120.0),
+            )
+        except Exception as e:
+            logger.warning("原始帧录制初始化失败: %s", e)
+            return None
+
     def _restart_inference_worker(self):
         new_worker = InferenceWorker(
             self.camera, self.tracker, max_fps=30,
             debug_overlay=bool(self.config.get("debug_overlay")),
+            frame_recorder=getattr(self, "frame_recorder", None),
         )
         new_worker.frame_ready.connect(self._on_frame_ready)
         new_worker.error_occurred.connect(self._on_inference_error)
