@@ -90,7 +90,6 @@ _UNINSTALL_KEYS = [
 
 def _find_exe_from_registry(profile):
     keywords = profile.get("registry_keywords", [])
-    exe_names = {n.lower() for n in profile["exe_names"]}
     for hive, sub_path in _UNINSTALL_KEYS:
         try:
             with winreg.OpenKey(hive, sub_path) as key:

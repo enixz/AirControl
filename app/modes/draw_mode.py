@@ -1,14 +1,66 @@
 import json
 import logging
 import math
-import os
+import queue
+import threading
 import time
 import winsound
 
 from .base import ModeBase, ModeResult
+from runtime_paths import data_path
 from services.mouse_controller import ActiveRegionMapper, interp_tiers
 
 logger = logging.getLogger("gesture")
+
+
+class _TraceWriter:
+    """Small bounded writer so debug tracing never blocks the Qt thread."""
+
+    def __init__(self, path):
+        self._queue = queue.Queue(maxsize=512)
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(path,),
+            name="DrawTraceWriter",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def write(self, line):
+        if self._closed:
+            return
+        try:
+            self._queue.put_nowait(line)
+        except queue.Full:
+            # Debug tracing is best-effort. Keeping UI latency stable matters
+            # more than retaining every sample during disk stalls.
+            pass
+
+    def _run(self, path):
+        try:
+            with open(path, "w", encoding="utf-8", buffering=1) as stream:
+                while True:
+                    line = self._queue.get()
+                    if line is None:
+                        return
+                    stream.write(line)
+        except OSError:
+            logger.exception("无法写入板书轨迹: %s", path)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._queue.put(None, timeout=0.5)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+                self._queue.put_nowait(None)
+            except (queue.Empty, queue.Full):
+                return
+        self._thread.join(timeout=1.0)
 
 
 class DrawMode(ModeBase):
@@ -30,8 +82,8 @@ class DrawMode(ModeBase):
         (0.45, 0.22),  # 很远：小动作放大、写满全屏
         (0.70, 0.45),  # 远
         (1.00, 0.90),  # 中（舒适书写距离）：接近直接映射
-        (1.30, 1.00),  # 近及以内：直接绝对映射、gain≈1、轻松画圆
-        (1.90, 1.00),  # 很近
+        (1.30, 1.08),  # 近：抵消 5% margin 的额外放大
+        (1.90, 1.15),  # 很近：略降增益，增强小范围移动精度
     ]
 
     # 中央投票笔状态机：决定起落前，时间窗内至少要有 VOTE_MIN 帧证据，
@@ -87,17 +139,15 @@ class DrawMode(ModeBase):
         )
         # 全帧率关键点轨迹录制（draw_trace.jsonl，项目根目录，会话开始时清空）：
         # 供 simulate_draw.py --replay 离线回放，用真实数据对比判定逻辑变体
-        self._trace_file = None
-        if self.config is None or self.config.get("draw_record_trace", True):
-            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            try:
-                self._trace_file = open(
-                    os.path.join(root, "draw_trace.jsonl"), "w", encoding="utf-8", buffering=1
-                )
-            except OSError:
-                self._trace_file = None
+        self._trace_writer = None
 
     def on_enter(self):
+        if (
+            self._trace_writer is None
+            and self.config is not None
+            and self.config.get("draw_record_trace", False)
+        ):
+            self._trace_writer = _TraceWriter(data_path("draw_trace.jsonl"))
         self.overlay.show_fullscreen()
         self.toolbar.show()
         self._position_toolbar()
@@ -118,6 +168,9 @@ class DrawMode(ModeBase):
         self._region_mapper.reset()
 
     def on_exit(self):
+        if self._trace_writer is not None:
+            self._trace_writer.close()
+            self._trace_writer = None
         self.overlay.hide()
         self.overlay.setGeometry(-100, -100, 0, 0)
         self.overlay.force_lift_pen()
@@ -210,16 +263,13 @@ class DrawMode(ModeBase):
 
     def _record_trace(self, landmarks, label):
         """逐帧记录关键点到 draw_trace.jsonl（lm=None 表示该帧未检出手）。"""
-        if not self._trace_file:
+        if not self._trace_writer:
             return
-        try:
-            self._trace_file.write(json.dumps({
-                "t": round(time.time(), 3),
-                "label": label,
-                "lm": [[round(p[1], 1), round(p[2], 1)] for p in landmarks] if landmarks else None,
-            }, separators=(",", ":")) + "\n")
-        except OSError:
-            self._trace_file = None
+        self._trace_writer.write(json.dumps({
+            "t": round(time.time(), 3),
+            "label": label,
+            "lm": [[round(p[1], 1), round(p[2], 1)] for p in landmarks] if landmarks else None,
+        }, separators=(",", ":")) + "\n")
 
     def handle(self, hands_landmarks, hands_gestures, frame_w, frame_h) -> ModeResult:
         self._sync_frame_size(frame_w, frame_h)

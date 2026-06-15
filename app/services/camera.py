@@ -18,8 +18,6 @@ logger = logging.getLogger(__name__)
 
 # 候选分辨率（高 → 低）
 _RESOLUTION_CANDIDATES = [
-    (3840, 2160),   # 4K
-    (2560, 1440),   # 2K
     (1920, 1080),
     (1280, 720),
     (960, 540),

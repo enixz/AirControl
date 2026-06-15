@@ -6,7 +6,6 @@ import os
 import sys
 import types
 import unittest
-from unittest.mock import patch
 
 # Mock ctypes / Windows API before importing mouse_controller
 mock_ctypes = types.ModuleType('ctypes')
@@ -38,7 +37,7 @@ import mouse_controller as _mc_module
 # 强制替换已加载模块中的 user32 引用，防止模块缓存导致 mock 不生效
 _mc_module.user32 = mock_user32
 
-from mouse_controller import MouseController, _edge_map
+from mouse_controller import MouseController
 
 
 class TestMouseControllerEdge(unittest.TestCase):

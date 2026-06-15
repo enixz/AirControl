@@ -79,12 +79,16 @@ class IlyHoldTest(unittest.TestCase):
 
     def test_flicker_70_percent_still_switches(self):
         """30% 帧漏检（标签抖动为 OTHER）仍应触发——投票容错的核心收益。"""
-        flicker = lambda i: "I_LOVE_YOU" if i % 10 < 7 else "OTHER"
+        def flicker(i):
+            return "I_LOVE_YOU" if i % 10 < 7 else "OTHER"
+
         self.assertTrue(self.feed(1.5, label_for_frame=flicker))
 
     def test_half_ratio_rejected(self):
         """占比 50% 低于 0.6 阈值：不触发。"""
-        half = lambda i: "I_LOVE_YOU" if i % 2 == 0 else "OTHER"
+        def half(i):
+            return "I_LOVE_YOU" if i % 2 == 0 else "OTHER"
+
         self.assertFalse(self.feed(1.5, label_for_frame=half))
         self.assertEqual(self.mm.current_mode_name, "presentation")
 
@@ -104,6 +108,20 @@ class IlyHoldTest(unittest.TestCase):
         self.assertFalse(self.feed(1.2, label_for_frame=lambda i: "OTHER"))
         self.assertTrue(self.feed(1.2))
         self.assertEqual(self.mm.current_mode_name, "draw")
+
+    def test_missing_frames_after_switch_do_not_rearm(self):
+        """保护窗口或丢手不是明确放下，不得让持续手势再次触发。"""
+        self.assertTrue(self.feed(1.2))
+        self.assertEqual(self.mm.current_mode_name, "mouse")
+        self.assertFalse(self.feed(1.2, hand=False))
+        self.assertFalse(self.feed(1.2))
+        self.assertEqual(self.mm.current_mode_name, "mouse")
+
+    def test_candidate_flag_tracks_real_ily_only(self):
+        self.feed(0.1)
+        self.assertTrue(self.mm.is_switch_candidate)
+        self.feed(0.1, label_for_frame=lambda i: "OTHER")
+        self.assertFalse(self.mm.is_switch_candidate)
 
     def test_brief_hand_loss_tolerated(self):
         """保持中途丢手 0.2s（小于半个时间窗）：不清空采样，仍可触发。"""
@@ -135,7 +153,9 @@ class IlyHoldTest(unittest.TestCase):
 
     def test_old_grab_release_sequence_no_longer_switches(self):
         """旧版"握拳-张开-握拳-张开"序列不再触发切换。"""
-        seq = lambda i: ("FIST", "OPEN")[(i // 8) % 2]
+        def seq(i):
+            return ("FIST", "OPEN")[(i // 8) % 2]
+
         self.assertFalse(self.feed(2.5, label_for_frame=seq))
         self.assertEqual(self.mm.current_mode_name, "presentation")
 

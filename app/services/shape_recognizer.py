@@ -221,7 +221,6 @@ def _detect_rectangle(points):
     rect_points = []
     for i in range(4):
         p1 = corners[i]
-        p2 = corners[(i + 1) % 4]
         rect_points.append(p1)
     rect_points.append(corners[0])
 

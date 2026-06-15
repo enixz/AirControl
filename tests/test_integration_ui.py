@@ -6,7 +6,6 @@ import ast
 import hashlib
 import os
 import py_compile
-import sys
 import unittest
 
 

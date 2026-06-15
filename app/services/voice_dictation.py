@@ -12,6 +12,8 @@ import threading
 
 import numpy as np
 
+from runtime_paths import resource_path
+
 try:
     import sherpa_onnx
 except ImportError:
@@ -40,14 +42,11 @@ class VoiceDictationService:
         # 同一 recognizer 上的潜在线程不安全
         self._dictate_lock = threading.Lock()
 
-        base_dir = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
         model_subdir = config.get("dictation_model_dir") or "models/sense-voice"
         self._model_dir = (
             model_subdir
             if os.path.isabs(model_subdir)
-            else os.path.join(base_dir, model_subdir)
+            else resource_path(model_subdir)
         )
         self._language = config.get("dictation_language") or "auto"
         self._use_itn = config.get("dictation_use_itn") is not False

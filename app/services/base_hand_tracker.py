@@ -19,6 +19,8 @@ from abc import ABC, abstractmethod
 import cv2
 import numpy as np
 
+from runtime_paths import resource_path
+
 _zoom_logger = logging.getLogger("gesture")
 
 
@@ -83,7 +85,7 @@ class KalmanSmoother:
 
         self.lost_frames = 0
         return [
-            [lm[0], int(round(self.ema[i, 0])), int(round(self.ema[i, 1]))]
+            [lm[0], float(self.ema[i, 0]), float(self.ema[i, 1])]
             for i, lm in enumerate(landmarks)
         ]
 
@@ -96,7 +98,7 @@ class KalmanSmoother:
             p = kf.predict()
             pred[i] = [p[0, 0], p[1, 0]]
         return [
-            [i, int(round(pred[i, 0])), int(round(pred[i, 1]))]
+            [i, float(pred[i, 0]), float(pred[i, 1])]
             for i in range(self.num_kp)
         ]
 
@@ -122,6 +124,7 @@ class OneEuroFilter:
         self.beta = float(beta)
         self.d_cutoff = float(d_cutoff)
         self.x_prev = float(x0)
+        self.x_raw_prev = float(x0)
         self.dx_prev = 0.0
         self.t_prev = float(t0)
 
@@ -133,7 +136,10 @@ class OneEuroFilter:
             return self.x_prev
 
         # 1. 计算一阶导数（速度）并应用低通滤波
-        dx = (x - self.x_prev) / dt
+        # Derivative must use consecutive raw samples. Using the previously
+        # filtered value feeds filter lag back into the speed estimate and can
+        # make a nearly stationary fingertip look faster than it really is.
+        dx = (x - self.x_raw_prev) / dt
         r_d = 2.0 * math.pi * self.d_cutoff * dt
         a_d = r_d / (r_d + 1.0)
         dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
@@ -148,6 +154,7 @@ class OneEuroFilter:
 
         # 4. 保存状态
         self.x_prev = x_hat
+        self.x_raw_prev = x
         self.dx_prev = dx_hat
         self.t_prev = t
         return x_hat
@@ -179,7 +186,7 @@ class OneEuroSmoother:
         self.last_landmarks = None
 
     def update(self, landmarks):
-        t = time.time()
+        t = time.perf_counter()
         raw = np.array([[lm[1], lm[2]] for lm in landmarks], dtype=np.float32)
 
         if not self.initialized:
@@ -201,7 +208,7 @@ class OneEuroSmoother:
 
         self.lost_frames = 0
         self.last_landmarks = [
-            [lm[0], int(round(smoothed[i, 0])), int(round(smoothed[i, 1]))]
+            [lm[0], float(smoothed[i, 0]), float(smoothed[i, 1])]
             for i, lm in enumerate(landmarks)
         ]
         return self.last_landmarks
@@ -266,6 +273,7 @@ class BaseHandTracker(ABC):
         # crop-zoom 实际生效的放大档位日志去重：仅在档位变化时打印；ZOOM OFF 复位，
         # 使每段 ZOOM 重新记录一次，便于与 ZOOM ON/OFF 日志对照。
         self._last_sr_tier = None
+        self._auto_sr_enabled = None
         self._crop_padding_ratio = 2.5
         self._crop_target_size = 384
         # 裁剪框机械下限（仅防止把极少像素的退化裁剪喂进 resize/超分）。
@@ -403,9 +411,20 @@ class BaseHandTracker(ABC):
             )
             if not hands_landmarks:
                 self._zoom_miss_streak += 1
+                # A hand can leave the predicted crop after a quick movement.
+                # Retry the full frame periodically instead of waiting for the
+                # whole zoom miss window to expire before reacquiring it.
+                if self._zoom_miss_streak % 3 == 0:
+                    full_landmarks, full_gestures, full_raw = self._detect(frame)
+                    if full_landmarks:
+                        hands_landmarks = full_landmarks
+                        hands_gestures = full_gestures
+                        raw = full_raw
+                        self._zoom_miss_streak = 0
                 if self._zoom_miss_streak >= self._zoom_miss_threshold:
                     self._crop_zoom_mode = False
                     self._last_sr_tier = None
+                    self._auto_sr_enabled = None
                     self._zoom_miss_streak = 0
                     self._far_streak = 0
                     # 强行复位裁剪窗口到全屏，防止跟丢后延迟拉回
@@ -534,6 +553,7 @@ class BaseHandTracker(ABC):
             self._active_handedness.clear()
             self._crop_zoom_mode = False
             self._last_sr_tier = None
+            self._auto_sr_enabled = None
             self._last_hint_center = None
             self._last_hint_size = 0
             self._far_streak = 0
@@ -597,6 +617,7 @@ class BaseHandTracker(ABC):
             if self._crop_zoom_mode and self._near_streak >= self._zoom_switch_streak:
                 self._crop_zoom_mode = False
                 self._last_sr_tier = None
+                self._auto_sr_enabled = None
                 self._near_streak = 0
                 _zoom_logger.info(
                     "=> ZOOM OFF (%s bbox=%.2f%% > %.2f%% near_threshold)",
@@ -678,7 +699,8 @@ class BaseHandTracker(ABC):
 
     def _draw_points_only(self, frame, landmarks, color):
         for point in landmarks:
-            cv2.circle(frame, (point[1], point[2]), 4, color, cv2.FILLED)
+            center = (int(round(point[1])), int(round(point[2])))
+            cv2.circle(frame, center, 4, color, cv2.FILLED)
 
     def _draw_zoom_badge(self, frame, hands_gestures, frame_w, frame_h, used_zoom):
         try:
@@ -756,9 +778,8 @@ class BaseHandTracker(ABC):
         self._realesrgan_input_name = None
         self._realesrgan_gpu_available = None  # None=未探测, True/False=已探测
 
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        self._espcn_path = os.path.join(project_root, "ESPCN_x2.pb")
-        self._realesrgan_path = os.path.join(project_root, "Real-ESRGAN_x2plus.onnx")
+        self._espcn_path = resource_path("ESPCN_x2.pb")
+        self._realesrgan_path = resource_path("Real-ESRGAN_x2plus.onnx")
 
     def _ensure_espcn(self):
         """按需加载 ESPCN（OpenCV dnn_superres，CPU）。返回引擎或 None。"""
@@ -844,9 +865,16 @@ class BaseHandTracker(ABC):
         需要上采样放大小手）才用 ESPCN。
         """
         if sr_engine == "auto":
-            if crop_size >= target:
-                return "none"
-            return "espcn"
+            # Initial decision preserves the intuitive target boundary. Once a
+            # tier is selected, use a 10% hysteresis band so crop-size jitter
+            # around 384px cannot switch ESPCN on/off every few frames.
+            if self._auto_sr_enabled is None:
+                self._auto_sr_enabled = crop_size < target
+            elif self._auto_sr_enabled and crop_size >= target * 1.10:
+                self._auto_sr_enabled = False
+            elif not self._auto_sr_enabled and crop_size <= target * 0.90:
+                self._auto_sr_enabled = True
+            return "espcn" if self._auto_sr_enabled else "none"
         return sr_engine
 
     def _log_sr_tier(self, tier, crop_size, target):

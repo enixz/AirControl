@@ -4,7 +4,11 @@ import time
 import math
 
 from .base import ModeBase, ModeResult
-from services.mouse_controller import ActiveRegionMapper, interp_tiers
+from services.mouse_controller import (
+    ActiveRegionMapper,
+    blended_landmark_point,
+    interp_tiers,
+)
 
 logger = logging.getLogger("gesture")
 
@@ -17,9 +21,12 @@ class MouseMode(ModeBase):
     SPAN_FLOOR_TIERS = [
         (0.45, 0.22),  # 很远：放大够到全屏
         (0.90, 0.50),  # 中偏远
-        (1.30, 0.85),  # 近
-        (1.90, 1.00),  # 很近：直接映射、不再过敏
+        (1.30, 0.95),  # 近
+        (1.90, 1.10),  # 很近：抵消 margin 拉伸，接近真正 1:1
     ]
+    # 中指末端骨节加权。实录中单独使用 TIP(12) 的静态相对抖动约为
+    # 掌根控制点的 2 倍；保留一半 TIP 权重可兼顾指向感和稳定性。
+    POINTER_WEIGHTS = ((12, 0.50), (11, 0.25), (10, 0.15), (9, 0.10))
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -158,8 +165,11 @@ class MouseMode(ModeBase):
         # span_floor 按距离分段：近→趋近直接映射（不过敏），远→放大够到全屏。
         ratio = features["hand_width"] / self.recognizer.REFERENCE_HAND_WIDTH
         span_floor = interp_tiers(ratio, self.SPAN_FLOOR_TIERS)
-        x_norm = landmarks[12][1] / frame_w
-        y_norm = landmarks[12][2] / frame_h
+        pointer_x, pointer_y = blended_landmark_point(
+            landmarks, self.POINTER_WEIGHTS
+        )
+        x_norm = pointer_x / frame_w
+        y_norm = pointer_y / frame_h
         nx, ny = self._region_mapper.map(x_norm, y_norm, span_floor=span_floor)
         screen_x, screen_y = self.mouse.move_to_normalized(nx, ny, apply_accel=False)
         self.cursor_overlay.update_cursor(screen_x, screen_y)

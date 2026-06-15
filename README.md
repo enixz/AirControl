@@ -2,8 +2,9 @@
 
 <div align="center">
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078d4?logo=windows&logoColor=white)
+![Release](https://img.shields.io/badge/Release-v1.3.0-6f42c1)
 ![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)
 ![Stars](https://img.shields.io/github/stars/enixz/AirControl?style=social)
 
@@ -281,17 +282,17 @@ AirControl 集成双引擎语音系统：
 | 字段 | 说明 | 默认 |
 |------|------|------|
 | `camera_width` / `camera_height` | 摄像头分辨率，`null` 时自动探测最高 ≥ min_fps 的模式 | `null` |
-| `camera_min_fps` | 自动探测时帧率下限，达不到的分辨率会被跳过 | 20 |
+| `camera_min_fps` | 自动探测时帧率下限，达不到的分辨率会被跳过 | 10 |
 | `camera_force_mjpeg` | 强制 MJPEG 编码（老摄像头 720p 上 30fps 必需） | true |
 | `dominant_hand` | 惯用手偏好：`Auto` / `Left` / `Right`，Auto 时纯靠运动+高度+近远自动选 | `Auto` |
-| `hand_detection_confidence` | 手部检测阈值，远距离调低（0.4-0.6） | 0.6 |
+| `hand_detection_confidence` | 手部检测阈值，远距离调低（0.4-0.6） | 0.4 |
 | `hand_presence_confidence` | 手在画面中的判定阈值 | 0.5 |
 | `hand_tracking_confidence` | 帧间跟踪阈值 | 0.5 |
 | `pen_width_auto_scale` | 笔触粗细随手距自动缩放（关闭则始终同一粗细，光标灵敏度仍随手大小自适应） | false |
 | `mode_switch_hold_sec` | 🤟 切模式手势需保持的时长（秒） | 1.0 |
 | `mode_switch_vote_ratio` | 保持窗口内 🤟 标签帧占比阈值，远距离误检多可适当调低 | 0.6 |
 | `draw_frontality_gate` | 板书拇指可观测性门限（掌宽/食指长）。低于此值视为手侧对相机、拇指不可信，书写状态冻结；横扫时笔画总断可调低，抬笔不灵敏可调高 | 0.55 |
-| `draw_record_trace` | 板书时逐帧录制关键点到 `draw_trace.jsonl`，供 `simulate_draw.py --replay` 离线回放排查断触 | true |
+| `draw_record_trace` | 板书时逐帧录制关键点到 `draw_trace.jsonl`，供 `simulate_draw.py --replay` 离线回放排查断触 | false |
 | `dictation_enabled` | 启用 SenseVoice 离线语音听写（draw 模式说"开始板书"） | true |
 | `dictation_language` | 听写语种：`auto`/`zh`/`en`/`ja`/`ko`/`yue` | `auto` |
 | `wps_exe_path` | 手动覆盖 WPS 路径，自动定位失败时用 | （无） |
@@ -379,6 +380,12 @@ python build.py
 ```
 
 打包后的文件将输出到 `dist/` 目录，包含所有依赖和模型文件。
+发布前可运行无摄像头/麦克风自检，退出码 `0` 表示模型与原生运行库加载成功：
+
+```powershell
+$p = Start-Process .\dist\AirControl\AirControl.exe -ArgumentList "--self-test" -Wait -PassThru
+$p.ExitCode
+```
 
 ---
 

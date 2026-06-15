@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 import threading
 import time
 import cv2
@@ -10,7 +9,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from config_manager import ConfigManager
 from mode_manager import ModeManager
 from modes import DrawMode, MouseMode, PresentationMode
-from services.camera import CameraService, list_available_cameras
+from services.camera import CameraService
 from services.gesture_recognizer import GestureRecognizer
 from services.hand_tracker_factory import create_hand_tracker
 from services.inference_worker import InferenceWorker
@@ -44,15 +43,18 @@ class AirControlOrchestrator(QObject):
     _dictation_status_signal = pyqtSignal(str, object)   # phase, payload
     _dictation_text_signal = pyqtSignal(str, object)     # text, anchor_pos
     _dictation_partial_signal = pyqtSignal(str)          # partial transcription
+    _tracker_ready_signal = pyqtSignal(object, object, int, str)
 
-    def __init__(self, overlay, cursor_overlay, toolbar, hwnd=None, parent=None):
+    def __init__(
+        self, overlay, cursor_overlay, toolbar, hwnd=None, parent=None, config=None
+    ):
         super().__init__(parent)
         self.overlay = overlay
         self.cursor_overlay = cursor_overlay
         self.toolbar = toolbar
         self.aircontrol_hwnd = hwnd
 
-        self.config = ConfigManager()
+        self.config = config or ConfigManager()
         if parent is not None and hasattr(parent, 'mouse'):
             self.mouse = parent.mouse
         else:
@@ -70,6 +72,9 @@ class AirControlOrchestrator(QObject):
         self._dictation_status_signal.connect(self._on_dictation_status)
         self._dictation_text_signal.connect(self._on_dictation_text)
         self._dictation_partial_signal.connect(self._on_dictation_partial)
+        self._tracker_ready_signal.connect(self._on_tracker_ready)
+        self._tracker_request_id = 0
+        self._closing = False
 
         self.status_text = "Ready"
         self.status_color = (0, 255, 0)
@@ -99,17 +104,8 @@ class AirControlOrchestrator(QObject):
         )
         self.camera.start()
 
-        engine = os.environ.get("AIRCONTROL_ENGINE") or self.config.get("detection_engine", "mediapipe")
-        self.tracker = create_hand_tracker(
-            engine=engine,
-            max_num_hands=2,
-            min_detection_confidence=self.config.get("hand_detection_confidence") or 0.6,
-            min_presence_confidence=self.config.get("hand_presence_confidence") or 0.5,
-            min_tracking_confidence=self.config.get("hand_tracking_confidence") or 0.5,
-            preferred_model_type=self.config.get("model_type"),
-            dominant_hand=self.config.get("dominant_hand") or "Right",
-            config=self.config,
-        )
+        self._tracker_config_signature = self._tracker_signature()
+        self.tracker = self._create_tracker()
 
         self.recognizer = GestureRecognizer(
             cooldown=self.config.get("cooldown"),
@@ -140,6 +136,7 @@ class AirControlOrchestrator(QObject):
                 self.voice_command.start()
             except Exception as e:
                 logger.warning("语音指令服务启动失败: %s", e)
+        self._voice_kws_signature = self._current_voice_kws_signature()
 
         # Self startup diagnostic check
         self._run_startup_check()
@@ -157,7 +154,39 @@ class AirControlOrchestrator(QObject):
         self.inference_worker.frame_ready.connect(self._on_frame_ready)
         self.inference_worker.error_occurred.connect(self._on_inference_error)
         self.inference_worker.fps_updated.connect(self._on_fps_updated)
+        self.inference_worker.performance_updated.connect(
+            self._on_performance_updated
+        )
         self.inference_worker.start()
+
+    def _tracker_signature(self):
+        return (
+            os.environ.get("AIRCONTROL_ENGINE")
+            or self.config.get("detection_engine", "mediapipe"),
+            self.config.get("model_type"),
+            self.config.get("dominant_hand", "Right"),
+            self.config.get("hand_detection_confidence", 0.6),
+            self.config.get("hand_presence_confidence", 0.5),
+            self.config.get("hand_tracking_confidence", 0.5),
+            self.config.get("hand_smoothing_min_cutoff", 0.5),
+            self.config.get("hand_smoothing_beta", 0.015),
+        )
+
+    def _create_tracker(self, signature=None):
+        signature = signature or self._tracker_signature()
+        return create_hand_tracker(
+            engine=signature[0],
+            max_num_hands=2,
+            min_detection_confidence=signature[3],
+            min_presence_confidence=signature[4],
+            min_tracking_confidence=signature[5],
+            preferred_model_type=signature[1],
+            dominant_hand=signature[2],
+            config=self.config,
+        )
+
+    def _current_voice_kws_signature(self):
+        return (self.config.get("voice_command_threshold", 0.25),)
 
     def _run_startup_check(self):
         """Startup diagnostic checks logic."""
@@ -211,7 +240,7 @@ class AirControlOrchestrator(QObject):
 
         # Voice command
         try:
-            if getattr(self.voice_command, "is_running", lambda: False)():
+            if bool(getattr(self.voice_command, "is_running", False)):
                 lines.append("[OK]   语音指令 KWS 已启动")
             elif self.config.get("voice_command_enabled") is False:
                 lines.append("[--]   语音指令已在 config 中关闭")
@@ -308,6 +337,7 @@ class AirControlOrchestrator(QObject):
         new_worker.frame_ready.connect(self._on_frame_ready)
         new_worker.error_occurred.connect(self._on_inference_error)
         new_worker.fps_updated.connect(self._on_fps_updated)
+        new_worker.performance_updated.connect(self._on_performance_updated)
         new_worker.start()
         self.inference_worker = new_worker
 
@@ -323,28 +353,71 @@ class AirControlOrchestrator(QObject):
             y_dz_top=self.config.get("edge_y_canvas_deadzone_top"),
         )
         self.overlay.set_pen_width(self.config.get("pen_width"))
-        self.voice_assistant.set_assistant(self.config.get("voice_assistant"))
-        
-        # Thread-safe tracker update
-        engine = os.environ.get("AIRCONTROL_ENGINE") or self.config.get("detection_engine", "mediapipe")
-        new_tracker = create_hand_tracker(
-            engine=engine,
-            max_num_hands=2,
-            min_detection_confidence=self.config.get("hand_detection_confidence") or 0.6,
-            min_presence_confidence=self.config.get("hand_presence_confidence") or 0.5,
-            min_tracking_confidence=self.config.get("hand_tracking_confidence") or 0.5,
-            preferred_model_type=self.config.get("model_type"),
-            dominant_hand=self.config.get("dominant_hand") or "Right",
-            config=self.config,
+        self.overlay.set_pen_auto_scale(
+            self.config.get("pen_width_auto_scale") is not False
         )
-        self.tracker = new_tracker
-        if hasattr(self, 'inference_worker'):
-            self.inference_worker.update_tracker(new_tracker)
+        self.voice_assistant.set_assistant(self.config.get("voice_assistant"))
+        if hasattr(self, "inference_worker"):
+            self.inference_worker.set_debug_overlay(
+                bool(self.config.get("debug_overlay"))
+            )
+
+        signature = self._tracker_signature()
+        if signature != self._tracker_config_signature:
+            self._request_tracker_rebuild(signature)
+
+        voice_signature = self._current_voice_kws_signature()
+        if voice_signature != self._voice_kws_signature:
+            self._voice_kws_signature = voice_signature
+            self.voice_command.request_reload()
         
         new_mode = self.config.get("interaction_mode")
         if new_mode != self.mode_manager.current_mode_name:
             self._set_mode(new_mode)
         logger.info("配置已更新: 模式 -> %s / 目标软件 -> %s", new_mode, self.ppt.target_app)
+
+    def _request_tracker_rebuild(self, signature):
+        self._tracker_request_id += 1
+        request_id = self._tracker_request_id
+
+        def build():
+            tracker = None
+            error = ""
+            try:
+                tracker = self._create_tracker(signature)
+            except Exception as exc:
+                logger.exception("后台重建 tracker 失败")
+                error = str(exc)
+            if self._closing and tracker is not None:
+                close = getattr(tracker, "close", None)
+                if callable(close):
+                    close()
+                return
+            self._tracker_ready_signal.emit(
+                tracker, signature, request_id, error
+            )
+
+        threading.Thread(
+            target=build,
+            name="TrackerBuildWorker",
+            daemon=True,
+        ).start()
+
+    def _on_tracker_ready(self, tracker, signature, request_id, error):
+        if self._closing or request_id != self._tracker_request_id:
+            close = getattr(tracker, "close", None)
+            if callable(close):
+                close()
+            return
+        if tracker is None:
+            self.status_text = f"模型更新失败: {error}"
+            self.status_color = (255, 0, 0)
+            self.status_updated.emit(self.status_text, self.status_color)
+            return
+        self.tracker = tracker
+        self._tracker_config_signature = signature
+        self.inference_worker.update_tracker(tracker)
+        logger.info("tracker 已在后台完成更新")
 
     # ------------------------------------------------------------------
     # Modes System
@@ -396,6 +469,7 @@ class AirControlOrchestrator(QObject):
     # ------------------------------------------------------------------
 
     def _on_frame_ready(self, frame, hands_landmarks, hands_gestures):
+        worker = self.sender()
         try:
             self._process_frame_results(frame, hands_landmarks, hands_gestures)
         except Exception as e:
@@ -404,6 +478,12 @@ class AirControlOrchestrator(QObject):
             self.status_color = (255, 0, 0)
             self.status_timer = time.time()
             self.status_updated.emit(self.status_text, self.status_color)
+        finally:
+            if worker is None:
+                worker = getattr(self, "inference_worker", None)
+            mark_consumed = getattr(worker, "mark_result_consumed", None)
+            if callable(mark_consumed):
+                mark_consumed()
 
     def _on_inference_error(self, error_msg):
         logger.error("推理错误: %s", error_msg)
@@ -424,22 +504,45 @@ class AirControlOrchestrator(QObject):
                 self.mode_manager.current_mode_name,
             )
 
+    def _on_performance_updated(self, metrics):
+        logging.getLogger("gesture").info(
+            "[PERF] capture p50/p95=%.1f/%.1fms | queue=%.1f/%.1fms | "
+            "inference=%.1f/%.1fms | total=%.1f/%.1fms",
+            metrics.get("capture_p50_ms", 0.0),
+            metrics.get("capture_p95_ms", 0.0),
+            metrics.get("queue_p50_ms", 0.0),
+            metrics.get("queue_p95_ms", 0.0),
+            metrics.get("inference_p50_ms", 0.0),
+            metrics.get("inference_p95_ms", 0.0),
+            metrics.get("total_p50_ms", 0.0),
+            metrics.get("total_p95_ms", 0.0),
+        )
+
     def _process_frame_results(self, frame, hands_landmarks, hands_gestures):
         frame_h, frame_w = frame.shape[:2]
 
-        # Ignore gestures for 1s after switching mode
-        if time.time() - self.mode_manager.last_mode_switch_time < 1.0:
-            hands_landmarks = []
-            hands_gestures = []
-
+        # The global switch recognizer must always observe real frames. Clearing
+        # them first made the post-switch protection window look like a release
+        # and allowed one continuous hold to switch through multiple modes.
         switched = self.mode_manager.maybe_switch_by_gesture(hands_landmarks, hands_gestures, frame_w)
 
         gesture = "NONE"
         if switched:
             self._set_mode(self.mode_manager.current_mode_name)
             gesture = "MODE_SWITCH"
+        elif self.mode_manager.is_switch_candidate:
+            # Do not let a global ILY hold become a mode-specific action. This
+            # also prevents an accidental pen-down while switching from draw.
+            gesture = "MODE_SWITCH_HOLD"
         else:
-            result = self.mode_manager.handle(hands_landmarks, hands_gestures, frame_w, frame_h)
+            mode_landmarks = hands_landmarks
+            mode_gestures = hands_gestures
+            if time.time() - self.mode_manager.last_mode_switch_time < 1.0:
+                mode_landmarks = []
+                mode_gestures = []
+            result = self.mode_manager.handle(
+                mode_landmarks, mode_gestures, frame_w, frame_h
+            )
             gesture = result.gesture
             if result.status_text:
                 self.status_text = result.status_text
@@ -629,6 +732,8 @@ class AirControlOrchestrator(QObject):
 
     def close(self):
         """Resource release when window is closed."""
+        self._closing = True
+        self._tracker_request_id += 1
         if self.mode_manager.current_mode:
             self.mode_manager.current_mode.on_exit()
 
@@ -643,3 +748,11 @@ class AirControlOrchestrator(QObject):
             self.voice_command.stop()
 
         self.camera.release()
+        close_tracker = getattr(self.tracker, "close", None)
+        if callable(close_tracker):
+            try:
+                close_tracker()
+            except Exception:
+                logger.exception("关闭 tracker 失败")
+        if getattr(self, "frame_recorder", None) is not None:
+            self.frame_recorder.close()

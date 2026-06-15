@@ -12,7 +12,6 @@ import time
 
 import cv2
 import mediapipe as mp
-import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
@@ -216,7 +215,10 @@ class HandTracker(BaseHandTracker):
 
             landmarks = []
             for idx, (cx, cy) in enumerate(pixel_coords):
-                landmarks.append([idx, int(round(cx)), int(round(cy))])
+                # Keep MediaPipe's sub-pixel coordinates through the smoothing
+                # and screen-mapping pipeline. Rounding here creates visible
+                # multi-pixel cursor steps on high-resolution displays.
+                landmarks.append([idx, float(cx), float(cy)])
             hands_landmarks.append(landmarks)
             raw_hand_lists.append(hand_landmarks_list)
 
@@ -269,3 +271,11 @@ class HandTracker(BaseHandTracker):
             )
         else:
             self._draw_points_only(frame, landmarks, (255, 0, 255))
+
+    def close(self):
+        """Release the native MediaPipe task runner deterministically."""
+        detector = getattr(self, "detector", None)
+        self.detector = None
+        close = getattr(detector, "close", None)
+        if callable(close):
+            close()

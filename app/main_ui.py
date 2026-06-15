@@ -2,12 +2,10 @@ import logging
 import os
 import sys
 import threading
-import time
 import winsound
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-import cv2
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -32,6 +30,7 @@ from mouse_cursor_overlay import MouseCursorOverlay
 from services.camera import list_available_cameras
 from services.mouse_controller import MouseController
 from orchestrator import AirControlOrchestrator
+from runtime_paths import resource_path
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +306,7 @@ class FloatingWindow(QMainWindow):
         # 3. 实例化 Orchestrator (编排控制器) 处理所有的后台服务和业务逻辑
         self.orchestrator = AirControlOrchestrator(
             self.overlay, self.cursor_overlay, self.toolbar,
-            hwnd=int(self.winId()), parent=self
+            hwnd=int(self.winId()), parent=self, config=self.config
         )
         # 单一配置数据源引用
         self.config = self.orchestrator.config
@@ -450,6 +449,23 @@ class FloatingWindow(QMainWindow):
         """)
         main_layout.addWidget(self.hint_label)
 
+        # 角落显示当前摄像头分辨率：浮层徽标（不进布局），左上角紧贴顶栏下方。
+        # 文字由 _on_frame_processed 按实际帧尺寸刷新，故反映真实生效分辨率而非 config。
+        self.res_label = QLabel(self.video_label)
+        self.res_label.setStyleSheet(f"""
+            QLabel {{
+                color: rgba(255, 255, 255, 210);
+                background-color: rgba(0, 0, 0, 120);
+                border-radius: 4px;
+                font-size: {s(8)}px;
+                padding: 0px 4px;
+            }}
+        """)
+        self.res_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.res_label.move(s(12), s(10) + s(30) + s(6))
+        self.res_label.hide()  # 收到第一帧后再显示
+        self._res_text = ""
+
         screen = QApplication.primaryScreen().geometry()
         self._default_x = screen.left() + 10
         self._default_y = screen.bottom() - self.height() - 10
@@ -512,12 +528,12 @@ class FloatingWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_frame_processed(self, frame, hands_landmarks, hands_gestures, current_gesture):
-        # OpenCV BGR -> QImage -> QPixmap
-        rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_image.shape
+        # Qt can consume OpenCV's BGR layout directly; avoid a full-frame
+        # BGR->RGB conversion on every UI update.
+        h, w, ch = frame.shape
         bytes_per_line = ch * w
         qt_image = QImage(
-            rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
+            frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888
         ).copy()
         
         self.video_label.setPixmap(
@@ -530,6 +546,15 @@ class FloatingWindow(QMainWindow):
         # 模式标签上直接显示实时帧率（_current_fps 由 fps_updated 每秒刷新），便于现场观察卡顿
         self.mode_label.setText(f"{self._mode_name_zh()}　{self._current_fps:.0f} FPS")
         self.hint_label.setText(self._mode_hint_zh())
+
+        # 角落分辨率徽标：仅在尺寸变化时刷新（避免每帧 adjustSize/raise_）
+        res_text = f"{w}×{h}"
+        if res_text != self._res_text:
+            self._res_text = res_text
+            self.res_label.setText(res_text)
+            self.res_label.adjustSize()
+            self.res_label.show()
+            self.res_label.raise_()
 
     def _on_voice_status_updated(self, text):
         if not hasattr(self, "voice_label") or self.voice_label is None:
@@ -596,11 +621,11 @@ class FloatingWindow(QMainWindow):
     def _mode_hint_zh(self):
         mode = self.orchestrator.mode_manager.current_mode_name
         if mode == "mouse":
-            return "单手抓握两次切模式 | 中指移动 | 捏拇指左键 | 捏食指右键 | 剪刀手滚动"
+            return "🤟保持切模式 | 中指移光标 | 捏食指=左键 | 捏中指=右键 | 剪刀手滚动"
         elif mode == "draw":
-            return "单手抓握两次切模式 | 拇指并拢书写/分开停笔 | 张掌清屏"
+            return "🤟保持切模式 | 食指书写 | ✌️抬笔 | 握拳就绪 | 张掌清屏"
         else:
-            return "单手抓握两次切模式 | 剪刀手唤醒AI | 拇指向下挂断 | 并掌翻页 | 点赞切WPS"
+            return "🤟保持切模式 | 剪刀手唤醒AI | 拇指向下挂断 | 并掌翻页 | 点赞切WPS"
 
     # ------------------------------------------------------------------
     # 语音指令帮助提示 (Dialog & Tooltip)
@@ -840,6 +865,45 @@ def is_admin():
 
 
 def main():
+    if "--self-test" in sys.argv:
+        required_files = [
+            resource_path("config.json"),
+            resource_path("models", "hand_landmarker.task"),
+            resource_path(
+                "models", "kws-zh-wenetspeech",
+                "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+            ),
+            resource_path(
+                "models", "kws-zh-wenetspeech",
+                "decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+            ),
+            resource_path(
+                "models", "kws-zh-wenetspeech",
+                "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
+            ),
+            resource_path("models", "kws-zh-wenetspeech", "tokens.txt"),
+            resource_path("app", "voice_keywords", "keywords.txt"),
+        ]
+        missing = [path for path in required_files if not os.path.isfile(path)]
+        if missing:
+            return 2
+        try:
+            from services.hand_tracker import HandTracker
+            from services.voice_command import VoiceCommandService
+
+            config = ConfigManager()
+            tracker = HandTracker(static_image_mode=True, config=config)
+            tracker.close()
+
+            voice = VoiceCommandService(config)
+            voice._current_mode = config.get("interaction_mode", "mouse")
+            voice._init_kws()
+            voice.stop()
+        except Exception:
+            logger.exception("发布自检失败")
+            return 3
+        return 0
+
     if not is_admin():
         import ctypes
         script_args = sys.argv
@@ -855,7 +919,7 @@ def main():
                 None,
                 1,
             )
-            sys.exit(0)
+            return 0
         except Exception as e:
             logger.warning("提权请求被拒绝或失败: %s，将以普通权限启动。", e)
 
@@ -866,8 +930,13 @@ def main():
     app = QApplication(sys.argv)
     window = FloatingWindow()
     window.show()
-    sys.exit(app.exec())
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    exit_code = main()
+    if "--self-test" in sys.argv:
+        # Some native inference runtimes retain worker threads in frozen apps.
+        # The diagnostic has already closed its engines, so exit deterministically.
+        os._exit(exit_code)
+    sys.exit(exit_code)

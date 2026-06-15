@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app'))
 
@@ -127,8 +127,11 @@ class TestZoomSR(unittest.TestCase):
         # 下采样（手较近）→ 关闭超分
         self.assertEqual(tracker._resolve_sr_engine("auto", target, target), "none")
         self.assertEqual(tracker._resolve_sr_engine("auto", target + 200, target), "none")
-        # 上采样（手小/远）→ 仍用 ESPCN
-        self.assertEqual(tracker._resolve_sr_engine("auto", target - 1, target), "espcn")
+        # 从关闭状态重新进入需要越过滞回下沿，避免在 target 附近抖动。
+        self.assertEqual(
+            tracker._resolve_sr_engine("auto", int(target * 0.89), target),
+            "espcn",
+        )
 
     def test_explicit_engine_is_respected(self):
         """显式选择的引擎不被 auto 逻辑改写（无论放大还是缩小）。"""
@@ -138,6 +141,29 @@ class TestZoomSR(unittest.TestCase):
         for eng in ("espcn", "realesrgan_cpu", "realesrgan_gpu", "none"):
             self.assertEqual(tracker._resolve_sr_engine(eng, 240, target), eng)
             self.assertEqual(tracker._resolve_sr_engine(eng, target + 100, target), eng)
+
+    def test_auto_uses_hysteresis_near_target(self):
+        cm = ConfigManager(config_file=self.config_path)
+        tracker = DummyHandTracker(config=cm)
+        target = tracker._crop_target_size
+
+        self.assertEqual(
+            tracker._resolve_sr_engine("auto", target - 1, target), "espcn"
+        )
+        self.assertEqual(
+            tracker._resolve_sr_engine("auto", target + 1, target), "espcn"
+        )
+        self.assertEqual(
+            tracker._resolve_sr_engine("auto", int(target * 1.11), target),
+            "none",
+        )
+        self.assertEqual(
+            tracker._resolve_sr_engine("auto", target - 1, target), "none"
+        )
+        self.assertEqual(
+            tracker._resolve_sr_engine("auto", int(target * 0.89), target),
+            "espcn",
+        )
 
     @patch('os.path.exists')
     def test_sr_helpers_fallback_gracefully_when_models_missing(self, mock_exists):

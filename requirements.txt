@@ -1,14 +1,9 @@
-opencv-python
-mediapipe
-pywin32
-PyQt6
-numpy
-psutil
-sherpa-onnx
-sounddevice
-ultralytics>=8.3.0
-# GPU 推理（CUDA 11.8+ / 12.x）
-# 安装命令: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-# 或者: pip install torch torchvision（自动检测 CUDA 版本）
-torch>=2.1.0
-torchvision>=0.16.0
+numpy>=1.26,<3
+opencv-contrib-python>=4.10,<5
+mediapipe>=0.10.20,<0.11
+PyQt6>=6.6,<7
+pywin32>=306; platform_system == "Windows"
+psutil>=5.9,<8
+sherpa-onnx>=1.10,<2
+sounddevice>=0.4.6,<1
+onnxruntime-directml>=1.20,<2; platform_system == "Windows"

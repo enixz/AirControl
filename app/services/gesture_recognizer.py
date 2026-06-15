@@ -1,15 +1,12 @@
 import time
 import logging
 import os
-import sys
 import math
 from logging.handlers import RotatingFileHandler
 
-if getattr(sys, 'frozen', False):
-    base_dir = os.path.dirname(sys.executable)
-else:
-    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from runtime_paths import writable_data_dir
 
+base_dir = writable_data_dir()
 log_file = os.path.join(base_dir, 'gesture.log')
 logger = logging.getLogger('gesture')
 if not logger.handlers:

@@ -73,6 +73,21 @@ def _canvas_map(t, deadzone_top, deadzone_bottom):
     return (t - low) / (high - low)
 
 
+def blended_landmark_point(landmarks, weighted_indices):
+    """Return a weighted 2D control point from a landmark chain.
+
+    Fingertips are the noisiest MediaPipe landmarks. Blending the last few
+    joints keeps the cursor aligned with the finger while suppressing isolated
+    tip jumps. Weights are normalized so callers can tune them conveniently.
+    """
+    total = sum(float(weight) for _, weight in weighted_indices)
+    if total <= 0:
+        raise ValueError("weighted_indices must contain a positive weight")
+    x = sum(float(landmarks[index][1]) * weight for index, weight in weighted_indices)
+    y = sum(float(landmarks[index][2]) * weight for index, weight in weighted_indices)
+    return x / total, y / total
+
+
 class ActiveRegionMapper:
     """自适应活动区映射器（用于远距离全屏书写/指向）。
 

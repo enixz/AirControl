@@ -27,9 +27,19 @@ class ModeManager:
         # 🤟 保持切模式：滑动时间窗内的 (时间戳, 该帧是否为 I_LOVE_YOU) 采样
         self._ily_samples = deque()
         self._ily_armed = True
+        self._ily_release_since = None
+        self._ily_candidate = False
         self._ily_last_log = 0.0
         self._ily_hold_sec = float(config.get("mode_switch_hold_sec", 1.0)) if config else 1.0
         self._ily_vote_ratio = float(config.get("mode_switch_vote_ratio", 0.6)) if config else 0.6
+        self._ily_release_sec = float(
+            config.get("mode_switch_release_sec", 0.25)
+        ) if config else 0.25
+
+    @property
+    def is_switch_candidate(self):
+        """Return True while a real ILY gesture currently owns the frame."""
+        return self._ily_candidate
 
     def switch_to(self, mode_name: str):
         if mode_name not in self.modes:
@@ -75,8 +85,25 @@ class ModeManager:
         has_ily = bool(hands_gestures) and any(
             g.get("label") == "I_LOVE_YOU" for g in hands_gestures if g
         )
+        has_real_hand = bool(hands_landmarks)
+        self._ily_candidate = has_real_hand and has_ily
 
-        if hands_landmarks:
+        # Missing or deliberately suppressed frames are not evidence that the
+        # gesture was released. Require a positively observed non-ILY pose for
+        # a short period before another switch can be armed.
+        if not self._ily_armed:
+            if has_real_hand and not has_ily:
+                if self._ily_release_since is None:
+                    self._ily_release_since = now
+                elif now - self._ily_release_since >= self._ily_release_sec:
+                    self._ily_armed = True
+                    self._ily_release_since = None
+                    self._ily_samples.clear()
+            else:
+                self._ily_release_since = None
+            return False
+
+        if has_real_hand:
             self._ily_samples.append((now, has_ily))
         elif self._ily_samples and now - self._ily_samples[-1][0] > self._ily_hold_sec * 0.5:
             # 手消失超过半个时间窗：清空重来，避免陈旧样本拼出虚假保持
@@ -90,7 +117,6 @@ class ModeManager:
         total = len(self._ily_samples)
 
         if ily_count == 0:
-            self._ily_armed = True
             return False
 
         ratio = ily_count / total
@@ -107,8 +133,6 @@ class ModeManager:
                 ratio, ily_count, total, span, self._ily_armed,
             )
 
-        if not self._ily_armed:
-            return False
         # 最新样本须新鲜：手刚丢失的瞬间不允许触发
         if now - self._ily_samples[-1][0] > 0.3:
             return False
@@ -126,6 +150,7 @@ class ModeManager:
         )
         self._ily_samples.clear()
         self._ily_armed = False
+        self._ily_release_since = None
         self.cycle_mode()
         return True
 

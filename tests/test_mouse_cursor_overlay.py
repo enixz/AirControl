@@ -8,7 +8,7 @@ them as unbound functions and calling them on a manually constructed object that
 has all required attributes.
 """
 import unittest
-from unittest.mock import patch, MagicMock, PropertyMock, call
+from unittest.mock import MagicMock
 import sys
 import os
 import types
@@ -37,10 +37,8 @@ sys.modules['ctypes.wintypes'] = mock_ctypes.wintypes
 
 # Now we need to import the module in a way that QWidget can be mocked
 # We'll patch at the module level
-from unittest.mock import patch as _patch
 
 # Import just the module, not the class, so we can access individual methods
-import importlib
 
 # Patch QWidget base class to be a regular class (not a real Qt widget)
 class FakeQWidget:
@@ -106,8 +104,6 @@ class TestShowFullscreenResetFlag(unittest.TestCase):
         # Track the value of _system_cursor_hidden at the time _hide_system_cursor is called
         flag_at_hide_call = []
 
-        original_hide = MouseCursorOverlay._hide_system_cursor
-
         def spy_hide_system_cursor(self_obj):
             flag_at_hide_call.append(self_obj._system_cursor_hidden)
             # Don't actually call the real method to avoid ctypes calls
@@ -140,7 +136,6 @@ class TestShowFullscreenResetFlag(unittest.TestCase):
         overlay = _make_overlay()
 
         call_order = []
-        original_show = overlay.show
         overlay.show = MagicMock(side_effect=lambda: call_order.append('show'))
         overlay.raise_ = MagicMock(side_effect=lambda: call_order.append('raise_'))
         overlay._make_click_through = MagicMock(side_effect=lambda: call_order.append('click_through'))

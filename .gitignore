@@ -13,6 +13,9 @@ build/
 venv/
 ENV/
 
+# JavaScript dependencies
+node_modules/
+
 # IDE
 .vscode/
 .idea/
@@ -39,6 +42,10 @@ Thumbs.db
 
 # Internal deliverables (not for public release)
 deliverables/
+creai_ppt/
+frontend/
+docs/
+_hf.json
 
 # PyInstaller spec backup
 *.spec.bak

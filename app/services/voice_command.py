@@ -12,10 +12,12 @@ import logging
 import os
 import queue
 import re
+import tempfile
 import threading
 import time
 
 import numpy as np
+from runtime_paths import resource_path
 
 try:
     import sounddevice as sd
@@ -123,12 +125,17 @@ class VoiceCommandService:
         # 线程安全：保护 _kws 和 _kws_stream 的并发访问
         # _detection_loop（工作线程）和 on_mode_changed（主线程）共享这些对象
         self._kws_lock = threading.Lock()
+        self._reload_lock = threading.Lock()
+        self._reload_thread = None
+        self._pending_reload_mode = None
 
         # 模型路径 — 基于 AirControl 项目根目录
         # 本文件位于 app/services/voice_command.py，向上两层即为项目根目录
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        self._model_dir = os.path.join(base_dir, "models", "kws-zh-wenetspeech")
-        self._keywords_dir = os.path.join(base_dir, "app", "voice_keywords")
+        self._model_dir = resource_path("models", "kws-zh-wenetspeech")
+        self._keywords_dir = resource_path("app", "voice_keywords")
+        cache_root = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+        self._keywords_cache_dir = os.path.join(cache_root, "AirControl", "kws")
+        os.makedirs(self._keywords_cache_dir, exist_ok=True)
 
         # 状态通知（供 UI 绑定）
         self._status_text = ""
@@ -171,8 +178,13 @@ class VoiceCommandService:
     def stop(self):
         """停止语音指令检测"""
         self._running = False
+        with self._reload_lock:
+            self._pending_reload_mode = None
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=3.0)
+        reload_thread = self._reload_thread
+        if reload_thread and reload_thread.is_alive():
+            reload_thread.join(timeout=3.0)
         self._cleanup_audio()
         self._kws = None
         self._kws_stream = None
@@ -186,35 +198,59 @@ class VoiceCommandService:
 
         若加载期间用户又切了模式，旧的加载结果会被丢弃（_current_mode 比对）。
         """
+        if self._current_mode == mode_name:
+            return
         self._current_mode = mode_name
         if self._kws is None:
             return  # 服务尚未启动，start() 时会按当前模式构建
-        threading.Thread(
-            target=self._reload_keywords_async,
-            args=(mode_name,),
-            daemon=True,
-        ).start()
+        self._schedule_reload(mode_name)
 
-    def _reload_keywords_async(self, mode_name):
-        """后台线程：构建新 KWS 实例，加载完成后原子替换。"""
-        try:
-            new_kws, new_stream = self._build_kws_for_mode(mode_name)
-        except Exception:
-            logger.exception("KWS 异步重建失败 (mode=%s)", mode_name)
-            return
+    def request_reload(self):
+        """Reload the current mode after a KWS configuration change."""
+        mode = self._current_mode or self.config.get("interaction_mode") or "mouse"
+        self._current_mode = mode
+        if self._kws is not None:
+            self._schedule_reload(mode)
 
-        with self._kws_lock:
-            if not self._running:
+    def _schedule_reload(self, mode_name):
+        with self._reload_lock:
+            self._pending_reload_mode = mode_name
+            if self._reload_thread and self._reload_thread.is_alive():
                 return
-            if self._current_mode != mode_name:
-                logger.info(
-                    "KWS 重建完成但模式已变更 (%s -> %s)，丢弃本次结果",
-                    mode_name, self._current_mode,
-                )
+            self._reload_thread = threading.Thread(
+                target=self._reload_worker,
+                name="KwsReloadWorker",
+                daemon=True,
+            )
+            self._reload_thread.start()
+
+    def _reload_worker(self):
+        """Build one KWS instance at a time and coalesce rapid mode changes."""
+        while self._running:
+            with self._reload_lock:
+                mode_name = self._pending_reload_mode
+                self._pending_reload_mode = None
+            if mode_name is None:
                 return
-            self._kws = new_kws
-            self._kws_stream = new_stream
-        logger.info("KWS 关键词已异步更新为模式: %s", mode_name)
+
+            try:
+                new_kws, new_stream = self._build_kws_for_mode(mode_name)
+            except Exception:
+                logger.exception("KWS 异步重建失败 (mode=%s)", mode_name)
+                continue
+
+            with self._kws_lock:
+                if not self._running:
+                    return
+                if self._current_mode == mode_name:
+                    self._kws = new_kws
+                    self._kws_stream = new_stream
+                    logger.info("KWS 关键词已异步更新为模式: %s", mode_name)
+                else:
+                    logger.info(
+                        "KWS 重建完成但模式已变更 (%s -> %s)，丢弃本次结果",
+                        mode_name, self._current_mode,
+                    )
 
     def set_status_callback(self, callback):
         """设置状态回调（用于 UI 更新）"""
@@ -319,9 +355,7 @@ class VoiceCommandService:
 
         # 先生成当前模式的关键词文件
         mode = self._current_mode or self.config.get("interaction_mode") or "mouse"
-        self._generate_mode_keywords(mode)
-
-        keywords_file = os.path.join(self._keywords_dir, "keywords_active.txt")
+        keywords_file = self._generate_mode_keywords(mode)
         if not os.path.isfile(keywords_file):
             raise FileNotFoundError(f"关键词文件不存在: {keywords_file}")
 
@@ -374,9 +408,12 @@ class VoiceCommandService:
     # ------------------------------------------------------------------
 
     def _generate_mode_keywords(self, mode_name):
-        """根据当前模式生成激活的关键词文件"""
+        """Generate a mode-specific keyword file outside the repository."""
         raw_file = os.path.join(self._keywords_dir, "keywords.txt")
-        active_file = os.path.join(self._keywords_dir, "keywords_active.txt")
+        safe_mode = mode_name if mode_name in MODE_KEYWORDS else "all"
+        active_file = os.path.join(
+            self._keywords_cache_dir, f"keywords_{safe_mode}.txt"
+        )
 
         # 读取完整关键词文件
         with open(raw_file, "r", encoding="utf-8") as f:
@@ -398,11 +435,14 @@ class VoiceCommandService:
                 if display in allowed:
                     filtered_lines.append(line)
 
-        with open(active_file, "w", encoding="utf-8") as f:
+        temp_file = active_file + ".tmp"
+        with open(temp_file, "w", encoding="utf-8") as f:
             for line in filtered_lines:
                 f.write(line + "\n")
+        os.replace(temp_file, active_file)
 
         logger.info("模式 %s 激活 %d 个关键词", mode_name, len(filtered_lines))
+        return active_file
 
     def _build_kws_for_mode(self, mode_name):
         """生成关键词文件并构建一个新的 KeywordSpotter + stream。
@@ -410,8 +450,7 @@ class VoiceCommandService:
         纯构建，不修改 self 上的任何引用 — 调用方负责在锁内做原子替换。
         sherpa-onnx KWS 不支持运行时更换关键词文件，必须重建实例。
         """
-        self._generate_mode_keywords(mode_name)
-        keywords_file = os.path.join(self._keywords_dir, "keywords_active.txt")
+        keywords_file = self._generate_mode_keywords(mode_name)
 
         int8_encoder = os.path.join(
             self._model_dir,
@@ -547,7 +586,11 @@ class VoiceCommandService:
 
         self._last_partial_time = now
         self._partial_busy = True
-        snapshot = bytes(self._dictation_buffer)
+        max_window_sec = float(
+            self.config.get("dictation_partial_window_sec", 12.0) or 12.0
+        )
+        max_bytes = int(max_window_sec * self.SAMPLE_RATE) * 2
+        snapshot = bytes(self._dictation_buffer[-max_bytes:])
         session_id = self._dictation_session_id
         callback = self._dictation_partial_callback
         threading.Thread(

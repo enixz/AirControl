@@ -1,5 +1,4 @@
 import math
-import time
 
 from .base import ModeBase, ModeResult
 

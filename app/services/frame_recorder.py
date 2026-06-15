@@ -15,21 +15,29 @@ import atexit
 import json
 import logging
 import os
+import queue
+import threading
 import time
 
 import cv2
+
+from runtime_paths import data_path
 
 logger = logging.getLogger(__name__)
 
 
 class FrameRecorder:
     def __init__(self, out_root="raw_capture", max_frames=2000, max_seconds=120.0):
+        if not os.path.isabs(out_root):
+            out_root = data_path(out_root)
         ts = time.strftime("%Y%m%d_%H%M%S")
         self.dir = os.path.join(out_root, ts)
         os.makedirs(self.dir, exist_ok=True)
         self.max_frames = int(max_frames)
         self.max_seconds = float(max_seconds)
         self._count = 0
+        self._submitted = 0
+        self._dropped = 0
         self._start = None
         self._writer = None        # cv2.VideoWriter(FFV1) 或 None→PNG 回退
         self._use_png = False
@@ -37,6 +45,13 @@ class FrameRecorder:
             os.path.join(self.dir, "meta.jsonl"), "w", encoding="utf-8", buffering=1
         )
         self._closed = False
+        self._queue = queue.Queue(maxsize=8)
+        self._thread = threading.Thread(
+            target=self._writer_loop,
+            name="FrameRecorderWriter",
+            daemon=True,
+        )
+        self._thread.start()
         atexit.register(self.close)
         logger.info(
             "原始帧录制 -> %s (上限 %d 帧 / %.0fs)",
@@ -61,40 +76,69 @@ class FrameRecorder:
         logger.warning("FFV1 不可用，回退 PNG 帧序列（体积更大）")
 
     def write(self, frame):
-        """录一帧。永不向调用方抛异常（推理线程不能被录制拖垮）。"""
+        """Queue a clean frame without blocking the inference thread."""
         if self._closed or frame is None:
             return
         try:
             now = time.time()
             if self._start is None:
                 self._start = now
-            if self._count >= self.max_frames or (now - self._start) >= self.max_seconds:
-                self.close()
+            if (
+                self._submitted >= self.max_frames
+                or (now - self._start) >= self.max_seconds
+            ):
                 return
-            h, w = frame.shape[:2]
-            self._ensure_writer(w, h)
-            if self._use_png:
-                cv2.imwrite(
-                    os.path.join(self.dir, "frames", f"{self._count:06d}.png"), frame
+            item = (self._submitted, now, frame.copy())
+            self._submitted += 1
+            try:
+                self._queue.put_nowait(item)
+            except queue.Full:
+                self._dropped += 1
+        except Exception:
+            logger.exception("录帧入队失败")
+
+    def _writer_loop(self):
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            index, now, frame = item
+            try:
+                h, w = frame.shape[:2]
+                self._ensure_writer(w, h)
+                if self._use_png:
+                    cv2.imwrite(
+                        os.path.join(self.dir, "frames", f"{index:06d}.png"),
+                        frame,
+                    )
+                else:
+                    self._writer.write(frame)
+                self._meta.write(
+                    json.dumps(
+                        {"i": index, "t": round(now, 4), "w": int(w), "h": int(h)},
+                        separators=(",", ":"),
+                    )
+                    + "\n"
                 )
-            else:
-                self._writer.write(frame)
-            self._meta.write(
-                json.dumps(
-                    {"i": self._count, "t": round(now, 4), "w": int(w), "h": int(h)},
-                    separators=(",", ":"),
-                )
-                + "\n"
-            )
-            self._count += 1
-        except Exception as e:
-            logger.error("录帧失败，停止录制: %s", e)
-            self.close()
+                self._count += 1
+            except Exception:
+                logger.exception("录帧失败")
+                return
 
     def close(self):
         if self._closed:
             return
         self._closed = True
+        try:
+            self._queue.put(None, timeout=1.0)
+        except queue.Full:
+            try:
+                self._queue.get_nowait()
+                self._queue.put_nowait(None)
+            except (queue.Empty, queue.Full):
+                pass
+        if self._thread.is_alive():
+            self._thread.join(timeout=3.0)
         try:
             if self._writer is not None:
                 self._writer.release()
@@ -104,4 +148,9 @@ class FrameRecorder:
             self._meta.close()
         except Exception:
             pass
-        logger.info("原始帧录制结束：%d 帧 -> %s", self._count, self.dir)
+        logger.info(
+            "原始帧录制结束：%d 帧（丢弃 %d）-> %s",
+            self._count,
+            self._dropped,
+            self.dir,
+        )

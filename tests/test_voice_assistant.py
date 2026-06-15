@@ -3,7 +3,7 @@ Unit tests for VoiceAssistantService focusing on the focus restoration bug fix.
 Tests the _restore_aircontrol_focus method and the try/finally patterns in activate() and hang_up().
 """
 import unittest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 import sys
 import os
 

@@ -21,6 +21,8 @@ import sys
 import threading
 import traceback
 
+from runtime_paths import writable_data_dir
+
 logger = logging.getLogger("gesture")
 
 _installed = False
@@ -43,10 +45,7 @@ def _record(path, header, text):
 
 
 def _default_base_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    # crash_handler.py 在 app/ 下，向上两级 = 项目根（与 gesture.log 同目录）
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return writable_data_dir()
 
 
 def _excepthook(exc_type, exc_value, exc_tb):
