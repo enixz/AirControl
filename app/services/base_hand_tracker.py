@@ -11,220 +11,30 @@
 """
 
 import logging
-import math
 import os
 import time
 from abc import ABC, abstractmethod
 
 import cv2
 import numpy as np
-
 from runtime_paths import resource_path
 
+# 平滑器与几何约束已拆到独立模块；此处 re-export 保持
+# `from services.base_hand_tracker import KalmanSmoother/OneEuroSmoother/...`
+# 等历史 import 路径可用（hand_tracker.py 与多个测试依赖此路径）。
+from .smoothers import (  # noqa: F401
+    _BONE_CONNECTIONS,
+    _pack_landmarks,
+    GeometricConstraintFilter,
+    KalmanSmoother,
+    OneEuroFilter,
+    OneEuroSmoother,
+)
+from .sr_engine import SREngine
+from .face_guide import FaceGuide
+from .renderer import HandTrackerRenderer
+
 _zoom_logger = logging.getLogger("gesture")
-
-
-# ---------------------------------------------------------------------------
-# KalmanSmoother — 卡尔曼滤波 + EMA 双重平滑器
-# ---------------------------------------------------------------------------
-
-class KalmanSmoother:
-    """为 21 个关键点各自维护 [x,y,vx,vy] 状态的卡尔曼 + EMA 平滑器。"""
-
-    def __init__(
-        self,
-        num_keypoints=21,
-        process_noise=0.5,
-        measurement_noise=3.0,
-        ema_alpha=0.4,
-        max_lost_frames=8,
-    ):
-        self.num_kp = num_keypoints
-        self.ema_alpha = ema_alpha
-        self.max_lost_frames = max_lost_frames
-
-        self.filters = []
-        for _ in range(num_keypoints):
-            kf = cv2.KalmanFilter(4, 2)
-            kf.measurementMatrix = np.eye(2, 4, dtype=np.float32)
-            kf.transitionMatrix = np.array(
-                [[1, 0, 1, 0],
-                 [0, 1, 0, 1],
-                 [0, 0, 1, 0],
-                 [0, 0, 0, 1]], dtype=np.float32,
-            )
-            kf.processNoiseCov = np.array(
-                [[0.25, 0, 0.5, 0],
-                 [0, 0.25, 0, 0.5],
-                 [0.5, 0, 1, 0],
-                 [0, 0.5, 0, 1]], dtype=np.float32,
-            ) * process_noise
-            kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * measurement_noise
-            kf.errorCovPost = np.eye(4, dtype=np.float32) * 10.0
-            self.filters.append(kf)
-
-        self.ema = None
-        self.lost_frames = 0
-        self.initialized = False
-
-    def update(self, landmarks):
-        raw = np.array([[lm[1], lm[2]] for lm in landmarks], dtype=np.float32)
-
-        if not self.initialized:
-            self.ema = raw.copy()
-            for i, kf in enumerate(self.filters):
-                kf.statePost = np.array(
-                    [[raw[i, 0]], [raw[i, 1]], [0], [0]], dtype=np.float32,
-                )
-            self.initialized = True
-        else:
-            self.ema = self.ema_alpha * raw + (1 - self.ema_alpha) * self.ema
-            for i, kf in enumerate(self.filters):
-                kf.predict()
-                kf.correct(self.ema[i].reshape(2, 1))
-
-        self.lost_frames = 0
-        return [
-            [lm[0], float(self.ema[i, 0]), float(self.ema[i, 1])]
-            for i, lm in enumerate(landmarks)
-        ]
-
-    def predict(self):
-        if not self.initialized or self.lost_frames >= self.max_lost_frames:
-            return None
-        self.lost_frames += 1
-        pred = np.zeros((self.num_kp, 2), dtype=np.float32)
-        for i, kf in enumerate(self.filters):
-            p = kf.predict()
-            pred[i] = [p[0, 0], p[1, 0]]
-        return [
-            [i, float(pred[i, 0]), float(pred[i, 1])]
-            for i in range(self.num_kp)
-        ]
-
-    def reset(self):
-        self.ema = None
-        self.lost_frames = 0
-        self.initialized = False
-
-
-# ---------------------------------------------------------------------------
-# OneEuroFilter & OneEuroSmoother — 自适应低通平滑滤波器
-# ---------------------------------------------------------------------------
-
-class OneEuroFilter:
-    """一欧元自适应低通滤波器。
-
-    能够根据信号的变化速度自动调整截止频率：
-      - 慢速时降低截止频率以消除抖动；
-      - 快速时提高截止频率以消除延迟。
-    """
-    def __init__(self, t0, x0, min_cutoff=1.0, beta=0.007, d_cutoff=1.0):
-        self.min_cutoff = float(min_cutoff)
-        self.beta = float(beta)
-        self.d_cutoff = float(d_cutoff)
-        self.x_prev = float(x0)
-        self.x_raw_prev = float(x0)
-        self.dx_prev = 0.0
-        self.t_prev = float(t0)
-
-    def __call__(self, t, x):
-        t = float(t)
-        x = float(x)
-        dt = t - self.t_prev
-        if dt <= 0.0:
-            return self.x_prev
-
-        # 1. 计算一阶导数（速度）并应用低通滤波
-        # Derivative must use consecutive raw samples. Using the previously
-        # filtered value feeds filter lag back into the speed estimate and can
-        # make a nearly stationary fingertip look faster than it really is.
-        dx = (x - self.x_raw_prev) / dt
-        r_d = 2.0 * math.pi * self.d_cutoff * dt
-        a_d = r_d / (r_d + 1.0)
-        dx_hat = a_d * dx + (1.0 - a_d) * self.dx_prev
-
-        # 2. 根据运动速度自适应计算截止频率
-        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
-
-        # 3. 对位置进行低通滤波
-        r_x = 2.0 * math.pi * cutoff * dt
-        a_x = r_x / (r_x + 1.0)
-        x_hat = a_x * x + (1.0 - a_x) * self.x_prev
-
-        # 4. 保存状态
-        self.x_prev = x_hat
-        self.x_raw_prev = x
-        self.dx_prev = dx_hat
-        self.t_prev = t
-        return x_hat
-
-
-class OneEuroSmoother:
-    """为手部 21 个关键点各自维护 X 和 Y 轴一欧元滤波器的平滑器。
-
-    接口设计与原 KalmanSmoother 完全一致，实现无缝替换。
-    """
-    def __init__(
-        self,
-        num_keypoints=21,
-        min_cutoff=1.5,     # 手部微抖动截止频率（静态时）
-        beta=0.01,          # 速度响应系数（运动时防延迟）
-        d_cutoff=1.0,       # 速度低通滤波截止频率
-        max_lost_frames=8,
-    ):
-        self.num_kp = num_keypoints
-        self.min_cutoff = min_cutoff
-        self.beta = beta
-        self.d_cutoff = d_cutoff
-        self.max_lost_frames = max_lost_frames
-
-        self.filters_x = []
-        self.filters_y = []
-        self.initialized = False
-        self.lost_frames = 0
-        self.last_landmarks = None
-
-    def update(self, landmarks):
-        t = time.perf_counter()
-        raw = np.array([[lm[1], lm[2]] for lm in landmarks], dtype=np.float32)
-
-        if not self.initialized:
-            self.filters_x = [
-                OneEuroFilter(t, raw[i, 0], min_cutoff=self.min_cutoff, beta=self.beta, d_cutoff=self.d_cutoff)
-                for i in range(self.num_kp)
-            ]
-            self.filters_y = [
-                OneEuroFilter(t, raw[i, 1], min_cutoff=self.min_cutoff, beta=self.beta, d_cutoff=self.d_cutoff)
-                for i in range(self.num_kp)
-            ]
-            self.initialized = True
-            smoothed = raw.copy()
-        else:
-            smoothed = np.zeros((self.num_kp, 2), dtype=np.float32)
-            for i in range(self.num_kp):
-                smoothed[i, 0] = self.filters_x[i](t, raw[i, 0])
-                smoothed[i, 1] = self.filters_y[i](t, raw[i, 1])
-
-        self.lost_frames = 0
-        self.last_landmarks = [
-            [lm[0], float(smoothed[i, 0]), float(smoothed[i, 1])]
-            for i, lm in enumerate(landmarks)
-        ]
-        return self.last_landmarks
-
-    def predict(self):
-        if not self.initialized or self.lost_frames >= self.max_lost_frames:
-            return None
-        self.lost_frames += 1
-        return self.last_landmarks
-
-    def reset(self):
-        self.initialized = False
-        self.lost_frames = 0
-        self.last_landmarks = None
-        self.filters_x.clear()
-        self.filters_y.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -249,14 +59,40 @@ class BaseHandTracker(ABC):
         self.dominant_hand = dominant_hand
         self._config = config
 
-        # 平滑器（使用 OneEuroSmoother 替换 KalmanSmoother 以实现自适应降噪与零延迟跟手）
-        # min_cutoff 决定"静止时"的抖动抑制：越小越稳（手指不动不抖），代价是起步略滞后；
-        # beta 决定"运动时"的跟手：越大移动越跟手、但慢速时易漏抖。两者均可在 config 调。
-        # 默认 min_cutoff 由原来的 1.5 降到 0.5，主治"手指不动也抖"。
+        # === 投机式增强层总开关（阶段1：默认关闭，详见 docs/修复记录_阶段0-1.md）===
+        # 这些层是后期"全面强化"叠加的，互相打架反而产生闪烁/断笔/不跟手并降低识别率。
+        # 默认关闭 = 回到接近原版的直管线；需要远距板书等场景时再单独打开做 A/B。
+        self._long_range_enabled = bool(
+            config.get("long_range_enabled", True)) if config else True
+        self._geometric_constraint_enabled = bool(
+            config.get("geometric_constraint_enabled", False)) if config else False
+        # 幽灵手预测补帧：默认开启（与 D:\airControl 老版一致）。
+        # 丢手时用 smoother 预测下一帧位置，避免检测抖动导致的瞬间丢帧。
+        self._hand_prediction_enabled = bool(
+            config.get("hand_prediction_enabled", True)) if config else True
+
+        # 推理降采样宽度：MediaPipe 返回的是归一化坐标，与输入分辨率无关，故可把高分辨率
+        # 帧先缩到这个宽度再喂给模型，用原始 w/h 反算像素即可（坐标系不变、无需补偿）。
+        # 实测：1080p 整帧推理 ~42ms，降到 ~640-720px 后 ~15ms——直接决定"快速移动跟不跟手"。
+        # 0 或负 = 不降采样（喂原帧）。子类 _detect 读取本属性。
+        self._inference_max_width = int(
+            config.get("inference_max_width", 720)) if config else 720
+
+        # 平滑器（OneEuroSmoother 自适应低通滤波器）
+        # 阶段 2.10（2026-07-05）：回到 D:\airControl 的 handedness-keyed 设计——
+        # 每只手用 MediaPipe 的 handedness 标签（Left/Right/Unknown）作为 smoother key，
+        # 每只手独立跟踪、永不跨手插值。此前按排序索引分配 Primary/Secondary 槽位，
+        # 主手切换时 Primary smoother 跨手插值 → 识别点"飞在两手中间"拉扯。
+        # min_cutoff/beta 回到 0.5/0.015（D:\airControl 实测不拉扯的参数）。
         _sm_min_cutoff = float(config.get("hand_smoothing_min_cutoff", 0.5)) if config else 0.5
         _sm_beta = float(config.get("hand_smoothing_beta", 0.015)) if config else 0.015
         self.smoothers = {
             k: OneEuroSmoother(min_cutoff=_sm_min_cutoff, beta=_sm_beta)
+            for k in self.HAND_KEYS
+        }
+        # 几何约束后处理：在 smoother 输出后应用，抑制"手指乱飞"
+        self._geo_filters = {
+            k: GeometricConstraintFilter()
             for k in self.HAND_KEYS
         }
         self.last_gestures = []
@@ -270,10 +106,10 @@ class BaseHandTracker(ABC):
 
         # === Crop-zoom 远距离增强 ===
         self._crop_zoom_mode = False
-        # crop-zoom 实际生效的放大档位日志去重：仅在档位变化时打印；ZOOM OFF 复位，
-        # 使每段 ZOOM 重新记录一次，便于与 ZOOM ON/OFF 日志对照。
-        self._last_sr_tier = None
-        self._auto_sr_enabled = None
+        # SR 引擎调度（ESPCN/Real-ESRGAN/GPU 自适应）已拆为独立 SREngine；
+        # 档位日志去重与 auto 滞回状态封装在 self._sr 内，find_hands 在
+        # ZOOM OFF/丢手时调 self._sr.reset_tier() 清空。
+        self._sr = SREngine(logger=_zoom_logger)
         self._crop_padding_ratio = 2.5
         self._crop_target_size = 384
         # 裁剪框机械下限（仅防止把极少像素的退化裁剪喂进 resize/超分）。
@@ -309,18 +145,19 @@ class BaseHandTracker(ABC):
         # === 人脸引导的远距离手部捕获 ===
         # 远处人脸比小手好检测得多：丢手时用人脸位置+大小预测手的搜索区，
         # 再对该区域 crop-zoom 放大检测，解决"手在画面角落、居中扫描抓不到"。
-        self._face_acquire_enabled = True
-        self._face_scan_interval = 4          # 每 N 帧（且仅在丢手时）尝试一次人脸扫描
-        self._face_scan_counter = 0
-        self._face_hand_region_scale = 7.0    # 搜索区边长 = 人脸高 × 该系数
-        self._face_hand_down_bias = 1.0       # 搜索区中心相对人脸中心下移 = 人脸高 × 该系数
-        # 人脸检测时把帧缩到该短边再跑 Haar。原来 240 太小——3 米外人脸只剩 ~13px，
-        # 低于 minSize 检不到 → 丢手后找不回。提高到 400 让 ~3-4 米的人脸仍可检出。
-        # 越大越能识别更远的脸（恢复能力更强），但人脸扫描更慢。可在 config 调。
-        self._face_detect_short = int(
-            self._config.get("face_detect_short", 400) if self._config else 400)
-        self._face_detector_init = False
-        self._face_cascade = None
+        # 人脸引导三方法已拆为独立 FaceGuide；视口状态（_crop_zoom_mode 等）
+        # 由 tracker 在 acquire() 返回后自己写入。
+        self._face_guide = FaceGuide(self._config, logger=_zoom_logger)
+        self._renderer = HandTrackerRenderer(crop_min_size=self._crop_min_size)
+
+        # === 自适应推理频率（跳帧优化）===
+        # 静态手势时跳帧推理，中间帧用 smoother 预测补帧，提升 FPS。
+        # 动态手势时全速推理，保证响应。
+        self._skip_enabled = bool(self._config.get("adaptive_skip_enabled", False)) if self._config else False
+        self._skip_motion_threshold = float(self._config.get("skip_motion_threshold", 0.15)) if self._config else 0.15
+        self._skip_max_interval = int(self._config.get("skip_max_interval", 2)) if self._config else 2
+        self._skip_counter = 0
+        self._skip_current_interval = 1  # 当前跳帧间隔（1=不跳，2=每2帧推理1次）
 
     # ------------------------------------------------------------------
     # 抽象接口 — 子类必须实现
@@ -372,11 +209,128 @@ class BaseHandTracker(ABC):
         self.dominant_hand = dominant_hand
         logging.info("%s dominant_hand 切换为 %s", self.engine_name, dominant_hand)
 
-    def find_hands(self, frame, draw=True):
-        """统一入口 — 检测 + crop-zoom 调度 + 平滑 + 排序 + 预测。"""
-        h_frame, w_frame, _ = frame.shape
+    def migrate_state_from(self, old_tracker):
+        """从旧 tracker 迁移关键追踪状态（RCU 风格：创建新实例后复制状态）。
 
-        # 1. 确定当前帧的缩放视口目标 (Target)
+        配置变更触发 tracker 重建时，新 tracker 默认从零开始，导致：
+        - 平滑器重置 → 光标跳变
+        - crop-zoom 退出 → 远距离突然丢失放大
+        - 活动手标识丢失 → 幽灵手预测失效
+
+        本方法将旧 tracker 的运行时状态迁移到新实例，保证用户体验连续性。
+        """
+        if old_tracker is None:
+            return
+        # crop-zoom 视口状态：保持远距离放大连续
+        self._crop_zoom_mode = old_tracker._crop_zoom_mode
+        self._current_crop_center = old_tracker._current_crop_center
+        self._current_crop_size = old_tracker._current_crop_size
+        self._last_hint_center = old_tracker._last_hint_center
+        self._last_hint_size = old_tracker._last_hint_size
+        # 活动手标识：保持幽灵手预测连续
+        self._active_handedness = set(old_tracker._active_handedness)
+        # 平滑器：保持光标位置连续（OneEuroSmoother 是纯 Python 对象，
+        # close() 不影响它们，直接复制引用即可）
+        self.smoothers = dict(old_tracker.smoothers)
+        # 运动追踪：保持运动 EMA 连续
+        self._motion_ema = dict(old_tracker._motion_ema)
+        self._last_wrist_pos = dict(old_tracker._last_wrist_pos)
+        logging.info("%s tracker 状态已从旧实例迁移", self.engine_name)
+
+    def _should_skip_frame(self):
+        """判断当前帧是否应该跳过推理（自适应推理频率）。
+
+        静态手势（motion_ema 低）时跳帧，提升 FPS。
+        动态手势（motion_ema 高）时全速推理，保证响应。
+
+        Returns:
+            True 表示跳过本帧推理，用 smoother 预测补帧
+        """
+        if not self._skip_enabled:
+            return False
+
+        # 没有初始化的 smoother → 不能跳帧（没有预测数据）
+        if not any(sm.initialized for sm in self.smoothers.values()):
+            return False
+
+        # 计算主控手的运动 EMA
+        max_motion = 0.0
+        for key in self.HAND_KEYS:
+            motion = self._motion_ema.get(key, 0.0)
+            max_motion = max(max_motion, motion)
+
+        # 动态调整跳帧间隔
+        if max_motion < self._skip_motion_threshold:
+            # 静态：跳帧
+            self._skip_current_interval = self._skip_max_interval
+        else:
+            # 动态：不跳帧
+            self._skip_current_interval = 1
+            self._skip_counter = 0
+            return False
+
+        # 计数器逻辑：每 interval 帧推理一次
+        self._skip_counter += 1
+        if self._skip_counter >= self._skip_current_interval:
+            self._skip_counter = 0
+            return False  # 本帧要推理
+        return True  # 本帧跳过
+
+    def _predict_skip_frame(self, frame, draw, w_frame, h_frame):
+        """跳帧时用 smoother 预测补帧，不调用 MediaPipe 推理。
+
+        画面上仍然绘制预测的关键点，保持视觉连续性。
+        """
+        predicted_all = []
+        gesture_all = []
+
+        for key in sorted(self._active_handedness):
+            smoother = self.smoothers.get(key)
+            if smoother is None:
+                continue
+            predicted = smoother.predict()
+            if predicted is not None:
+                predicted_all.append(predicted)
+                # 复用上一帧的手势标签，标记为 predicted
+                g = None
+                for gg in self.last_gestures:
+                    if gg.get("handedness", "Unknown") == key:
+                        g = dict(gg)
+                        break
+                if g is None:
+                    g = {"handedness": key, "label": "NONE", "ml_label": "None", "score": 0.0}
+                g["predicted"] = True
+                g["skipped"] = True
+                gesture_all.append(g)
+                if draw:
+                    # 统一用紫色：预测补帧与真实检测视觉一致，避免黄紫交替闪烁
+                    self._renderer.draw_points(frame, predicted, (255, 0, 255))
+
+        if predicted_all:
+            if draw:
+                self._renderer.draw_zoom_badge(frame, gesture_all, w_frame, h_frame, used_zoom=self._crop_zoom_mode)
+            return frame, predicted_all, gesture_all
+
+        # 没有预测数据 → 回退到正常推理
+        return None  # 调用方需要检查 None 并回退
+
+    def _handle_skip_frame(self, frame, draw, w_frame, h_frame):
+        """自适应跳帧：静态手势时用 smoother 预测补帧。
+
+        Returns:
+            预测结果 (frame, landmarks, gestures) 或 None（继续正常推理）
+        """
+        if not self._should_skip_frame():
+            return None
+        return self._predict_skip_frame(frame, draw, w_frame, h_frame)
+
+    def _compute_crop_viewport(self, w_frame, h_frame):
+        """计算当前帧的 crop 视口目标并应用 EMA 平滑。
+
+        基于 _last_hint_* 计算 target，再 EMA 平滑到 _current_crop_*。
+        _current_crop_center 为 None 时（ZOOM 刚进入）直接用 target 初始化，
+        实现一步落位、避免从整屏慢慢缩进（拉风箱元凶）。
+        """
         if self._crop_zoom_mode and self._last_hint_center is not None and self._last_hint_size > 0:
             target_center = self._last_hint_center
             target_size = int(self._last_hint_size * self._crop_padding_ratio)
@@ -387,7 +341,6 @@ class BaseHandTracker(ABC):
             target_center = (w_frame / 2.0, h_frame / 2.0)
             target_size = min(w_frame, h_frame)
 
-        # 2. 对缩放视口应用 EMA 渐进式平滑过渡
         if self._current_crop_center is None:
             self._current_crop_center = target_center
             self._current_crop_size = float(target_size)
@@ -401,10 +354,44 @@ class BaseHandTracker(ABC):
                 (1.0 - alpha) * self._current_crop_size + alpha * float(target_size)
             )
 
-        # 3. 决定是否使用 Crop-Zoom。若当前裁剪框接近全图大小（例如 >= 92%），直接使用 _detect 节省性能
-        use_crop_zoom = self._current_crop_size < min(w_frame, h_frame) * 0.92
+    def find_hands(self, frame, draw=True):
+        """统一入口 — 检测 + crop-zoom 调度 + 平滑 + 排序 + 预测。"""
+        h_frame, w_frame, _ = frame.shape
 
-        # === 检测 ===
+        # 自适应推理频率：静态手势时跳帧，用 smoother 预测补帧
+        skip_result = self._handle_skip_frame(frame, draw, w_frame, h_frame)
+        if skip_result is not None:
+            return skip_result
+
+        # 1. 确定当前帧的缩放视口目标并 EMA 平滑
+        self._compute_crop_viewport(w_frame, h_frame)
+
+        # 2. 检测分发（crop-zoom / 全帧 / 人脸引导 / 多尺度）+ zoom 模式更新
+        hands_landmarks, hands_gestures, use_crop_zoom = self._run_detection(
+            frame, w_frame, h_frame
+        )
+
+        # 3. 有手检出：排序 + 平滑 + 幽灵手；否则尝试预测补帧 / 复位
+        if hands_landmarks:
+            return self._handle_hands_present(
+                frame, hands_landmarks, hands_gestures,
+                use_crop_zoom, draw, w_frame, h_frame
+            )
+        return self._handle_all_lost(frame, use_crop_zoom, draw, w_frame, h_frame)
+
+    def _run_detection(self, frame, w_frame, h_frame):
+        """检测分发：crop-zoom / 全帧 / 人脸引导 / 多尺度 + zoom 模式更新。
+
+        Returns:
+            (hands_landmarks, hands_gestures, use_crop_zoom)
+        """
+        # 决定是否使用 Crop-Zoom。若当前裁剪框接近全图大小（例如 >= 92%），直接使用 _detect 节省性能
+        # 阶段1：long_range_enabled=False 时彻底关闭 crop-zoom（避免"拉风箱"坐标重映射跳变）。
+        use_crop_zoom = (
+            self._long_range_enabled
+            and self._current_crop_size < min(w_frame, h_frame) * 0.92
+        )
+
         if use_crop_zoom:
             hands_landmarks, hands_gestures, raw = self._detect_crop_zoom(
                 frame, self._current_crop_center, self._current_crop_size,
@@ -423,8 +410,7 @@ class BaseHandTracker(ABC):
                         self._zoom_miss_streak = 0
                 if self._zoom_miss_streak >= self._zoom_miss_threshold:
                     self._crop_zoom_mode = False
-                    self._last_sr_tier = None
-                    self._auto_sr_enabled = None
+                    self._sr.reset_tier()
                     self._zoom_miss_streak = 0
                     self._far_streak = 0
                     # 强行复位裁剪窗口到全屏，防止跟丢后延迟拉回
@@ -438,56 +424,92 @@ class BaseHandTracker(ABC):
                 self._zoom_miss_streak = 0
         else:
             hands_landmarks, hands_gestures, raw = self._detect(frame)
-            # 全帧没检到手 → 人脸引导捕获（解决远距离冷启动：手太小直接检不出）
-            if not hands_landmarks:
-                acq = self._try_face_guided_acquire(frame, w_frame, h_frame)
-                if acq is not None:
-                    hands_landmarks, hands_gestures, raw = acq
+            # 阶段1：远距增强（人脸引导 + 多尺度回退）仅在 long_range_enabled 时启用。
+            if self._long_range_enabled:
+                # 全帧没检到手 → 人脸引导捕获（解决远距离冷启动：手太小直接检不出）
+                if not hands_landmarks:
+                    acq = self._face_guide.acquire(
+                        frame, w_frame, h_frame, self._crop_min_size, self._detect_crop_zoom
+                    )
+                    if acq is not None:
+                        hands_landmarks, hands_gestures, raw, cx, cy, size = acq
+                        self._crop_zoom_mode = True
+                        self._zoom_miss_streak = 0
+                        self._current_crop_center = (cx, cy)
+                        self._current_crop_size = float(size)
+                # 仍未检到手 → 多尺度检测（缩小到0.5x，远距离小手相对变大）
+                if not hands_landmarks:
+                    ms_result = self._detect_multiscale(frame, w_frame, h_frame)
+                    if ms_result is not None:
+                        hands_landmarks, hands_gestures, raw = ms_result
 
         # === 更新 zoom 模式 ===
-        self._update_zoom_mode(hands_landmarks, hands_gestures, w_frame, h_frame)
+        # 阶段1：关闭远距增强时不再驱动 zoom 状态机（_crop_zoom_mode 恒为 False）。
+        if self._long_range_enabled:
+            self._update_zoom_mode(hands_landmarks, hands_gestures, w_frame, h_frame)
 
-        # === 有手检出：排序 + 平滑 + 幽灵手 ===
-        if hands_landmarks:
-            h, w, _ = frame.shape
+        return hands_landmarks, hands_gestures, use_crop_zoom
 
-            motion_map = self._update_motion(hands_landmarks, hands_gestures, w, h)
-            order = sorted(
-                range(len(hands_landmarks)),
-                key=lambda i: self._priority_score(
-                    hands_gestures[i], w, h,
-                    landmarks=hands_landmarks[i],
-                    motion=motion_map.get(
-                        hands_gestures[i].get("handedness", "Unknown"), 0.0
-                    ),
+    def _handle_hands_present(self, frame, hands_landmarks, hands_gestures,
+                              use_crop_zoom, draw, w_frame, h_frame):
+        """有手检出：运动→打分→排序→平滑→幽灵手→绘制。
+
+        阶段 2.10（2026-07-05）：回到 D:\airControl 的 handedness-keyed smoother
+        设计。每只手用 MediaPipe 的 handedness 标签（Left/Right/Unknown）作为
+        smoother key，每只手独立跟踪、永不跨手插值。排序只影响 zoom 视口 hint
+        和返回顺序（smoothed_all[0] 是分数最高的手），不影响 smoother 归属。
+        """
+        h, w, _ = frame.shape
+
+        motion_map = self._update_motion(hands_landmarks, hands_gestures, w, h)
+        scores = [
+            self._priority_score(
+                hands_gestures[i], w, h,
+                landmarks=hands_landmarks[i],
+                motion=motion_map.get(
+                    hands_gestures[i].get("handedness", "Unknown"), 0.0
                 ),
-                reverse=True,
             )
-            hands_landmarks = [hands_landmarks[i] for i in order]
-            hands_gestures = [hands_gestures[i] for i in order]
+            for i in range(len(hands_landmarks))
+        ]
 
-            # zoom 视口只锁优先级最高的那只手（_priority_score 选出的"举得最高"者）。
-            # 此前 hint 取所有手的并集包围盒：两只手并存时裁剪框在"单手↔双手跨度"间
-            # 跳变，既锁不住上边的手、又使视口一缩一放（拉风箱）。排序后取 [:1] 即锁定手。
-            hint = self._compute_hint_from_landmarks(hands_landmarks[:1])
-            if hint[0] is not None:
-                self._last_hint_center, self._last_hint_size = hint
+        # 按分数降序排列：分数最高的手排在 index 0（zoom 视口锁定 + 下游主光标）
+        order = sorted(
+            range(len(hands_landmarks)),
+            key=lambda i: scores[i],
+            reverse=True,
+        )
+        hands_landmarks = [hands_landmarks[i] for i in order]
+        hands_gestures = [hands_gestures[i] for i in order]
 
-            smoothed_all = []
-            gesture_all = []
-            seen_handedness = set()
-            for landmarks, gesture in zip(hands_landmarks, hands_gestures):
-                key = gesture.get("handedness", "Unknown")
-                if key not in self.smoothers:
-                    key = "Unknown"
-                smoothed = self.smoothers[key].update(landmarks)
-                seen_handedness.add(key)
-                smoothed_all.append(smoothed)
-                gesture_all.append(gesture)
-                if draw:
-                    self._draw_points_only(frame, smoothed, (255, 0, 255))
+        # zoom 视口只锁优先级最高的那只手（_priority_score 选出的"举得最高"者）。
+        hint = self._compute_hint_from_landmarks(hands_landmarks[:1])
+        if hint[0] is not None:
+            self._last_hint_center, self._last_hint_size = hint
 
-            # 幽灵手预测补帧
+        smoothed_all = []
+        gesture_all = []
+        seen_handedness = set()
+        for landmarks, gesture in zip(hands_landmarks, hands_gestures, strict=True):
+            # 按 MediaPipe handedness 分配 smoother：左手永远用 Left，右手永远用 Right。
+            # 每只手独立跟踪，主手切换（排序变化）不影响 smoother 内部状态 → 不跨手插值。
+            key = gesture.get("handedness", "Unknown")
+            if key not in self.smoothers:
+                key = "Unknown"
+            smoothed = self.smoothers[key].update(landmarks)
+            # 几何约束后处理：抑制"手指乱飞"。阶段1默认关闭。
+            if self._geometric_constraint_enabled:
+                geo_filter = self._geo_filters.get(key)
+                if geo_filter is not None:
+                    smoothed = geo_filter.apply(smoothed)
+            seen_handedness.add(key)
+            smoothed_all.append(smoothed)
+            gesture_all.append(gesture)
+            if draw:
+                self._renderer.draw_points(frame, smoothed, (255, 0, 255))
+
+        # 幽灵手预测补帧（gated by _hand_prediction_enabled，默认开启）
+        if self._hand_prediction_enabled:
             missing_keys = self._active_handedness - seen_handedness
             for key in missing_keys:
                 smoother = self.smoothers.get(key)
@@ -508,52 +530,56 @@ class BaseHandTracker(ABC):
                 })
                 seen_handedness.add(key)
                 if draw:
-                    self._draw_points_only(frame, ghost, (0, 255, 255))
+                    self._renderer.draw_points(frame, ghost, (255, 0, 255))
 
-            self._active_handedness = seen_handedness
-            self.last_gestures = gesture_all
+        self._active_handedness = seen_handedness
+        self.last_gestures = gesture_all
 
-            if use_crop_zoom and self._current_crop_center:
-                frame = self._apply_visual_zoom(frame, self._current_crop_center, self._current_crop_size)
-            if draw:
-                self._draw_zoom_badge(frame, gesture_all, w_frame, h_frame, used_zoom=use_crop_zoom)
+        if use_crop_zoom and self._current_crop_center:
+            frame = self._renderer.apply_visual_zoom(frame, self._current_crop_center, self._current_crop_size)
+        if draw:
+            self._renderer.draw_zoom_badge(frame, gesture_all, w_frame, h_frame, used_zoom=use_crop_zoom)
 
-            return frame, smoothed_all, gesture_all
+        return frame, smoothed_all, gesture_all
 
-        # === 全部丢失：预测 ===
+    def _handle_all_lost(self, frame, use_crop_zoom, draw, w_frame, h_frame):
+        """全部丢失：尝试预测补帧，否则复位状态并返回空。
+
+        阶段1默认关闭预测：丢手即如实报告无手，避免冻结的"幽灵光标/笔尖"产生闪烁。
+        上层（draw_mode 的跟丢缓冲、mouse_mode）自有短暂丢手的优雅降级。
+        """
         has_prediction = False
         predicted_all = []
-        for key in sorted(self._active_handedness):
-            smoother = self.smoothers.get(key)
-            if smoother is None:
-                continue
-            predicted = smoother.predict()
-            if predicted is not None:
-                predicted_all.append(predicted)
-                has_prediction = True
+        if self._hand_prediction_enabled:
+            for key in sorted(self._active_handedness):
+                smoother = self.smoothers.get(key)
+                if smoother is None:
+                    continue
+                predicted = smoother.predict()
+                if predicted is not None:
+                    predicted_all.append(predicted)
+                    has_prediction = True
 
         if has_prediction:
             if draw and predicted_all:
-                self._draw_points_only(frame, predicted_all[0], (0, 255, 255))
-                cv2.putText(
-                    frame, "Smoother Predict", (10, 110),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
-                )
+                # 统一用紫色：预测补帧与真实检测视觉一致，避免黄紫交替闪烁
+                self._renderer.draw_points(frame, predicted_all[0], (255, 0, 255))
             if use_crop_zoom and self._current_crop_center:
-                frame = self._apply_visual_zoom(frame, self._current_crop_center, self._current_crop_size)
+                frame = self._renderer.apply_visual_zoom(frame, self._current_crop_center, self._current_crop_size)
             if draw:
-                self._draw_zoom_badge(frame, self.last_gestures, w_frame, h_frame, used_zoom=use_crop_zoom)
+                self._renderer.draw_zoom_badge(frame, self.last_gestures, w_frame, h_frame, used_zoom=use_crop_zoom)
             return frame, predicted_all, list(self.last_gestures)
 
         if any(sm.initialized for sm in self.smoothers.values()):
             logging.info("Tracking fully lost. Resetting smoothers.")
             for sm in self.smoothers.values():
                 sm.reset()
+            for gf in self._geo_filters.values():
+                gf.reset()
             self.last_gestures = []
             self._active_handedness.clear()
             self._crop_zoom_mode = False
-            self._last_sr_tier = None
-            self._auto_sr_enabled = None
+            self._sr.reset_tier()
             self._last_hint_center = None
             self._last_hint_size = 0
             self._far_streak = 0
@@ -563,9 +589,9 @@ class BaseHandTracker(ABC):
             self._current_crop_size = None
 
         if use_crop_zoom and self._current_crop_center:
-            frame = self._apply_visual_zoom(frame, self._current_crop_center, self._current_crop_size)
+            frame = self._renderer.apply_visual_zoom(frame, self._current_crop_center, self._current_crop_size)
         if draw:
-            self._draw_zoom_badge(frame, [], w_frame, h_frame, used_zoom=use_crop_zoom)
+            self._renderer.draw_zoom_badge(frame, [], w_frame, h_frame, used_zoom=use_crop_zoom)
 
         return frame, [], []
 
@@ -574,6 +600,7 @@ class BaseHandTracker(ABC):
     # ------------------------------------------------------------------
 
     def _compute_hint_from_landmarks(self, all_hands_landmarks):
+        """计算 crop-zoom 视口的中心和大小的目标值。"""
         if not all_hands_landmarks:
             return None, 0
         xs, ys = [], []
@@ -616,8 +643,7 @@ class BaseHandTracker(ABC):
             self._far_streak = 0
             if self._crop_zoom_mode and self._near_streak >= self._zoom_switch_streak:
                 self._crop_zoom_mode = False
-                self._last_sr_tier = None
-                self._auto_sr_enabled = None
+                self._sr.reset_tier()
                 self._near_streak = 0
                 _zoom_logger.info(
                     "=> ZOOM OFF (%s bbox=%.2f%% > %.2f%% near_threshold)",
@@ -639,7 +665,7 @@ class BaseHandTracker(ABC):
         seen_keys = set()
         motion_map = {}
 
-        for landmarks, gesture in zip(landmarks_list, gestures_list):
+        for landmarks, gesture in zip(landmarks_list, gestures_list, strict=True):
             key = gesture.get("handedness", "Unknown")
             if key not in self._motion_ema:
                 key = "Unknown"
@@ -671,387 +697,75 @@ class BaseHandTracker(ABC):
         return motion_map
 
     def _priority_score(self, gesture_meta, frame_w, frame_h, landmarks=None, motion=0.0):
+        """多手并存时选"锁定/光标/放大"手的优先级分。
+
+        score 仅用于排序（决定 zoom 视口锁哪只手、smoothed_all[0] 是谁），
+        不影响 smoother 归属——smoother 按 handedness 独立跟踪，不会跨手插值。
+        """
         score = 0.0
         handedness = gesture_meta.get("handedness", "Unknown")
 
+        # 惯用手偏好：轻微 +1.0，让惯用手在等高时优先成为主控手
         if self.dominant_hand in ("Left", "Right"):
             if handedness == self.dominant_hand:
                 score += 1.0
 
+        # 手大小分：bbox 占比 × 8（近处的手略优先）
         if frame_w > 0 and frame_h > 0:
             bbox_ratio = gesture_meta.get("bbox_area", 0.0) / (frame_w * frame_h)
             score += bbox_ratio * 8.0
 
+        # handedness_score：MediaPipe 的左右手置信度
         score += float(gesture_meta.get("handedness_score", 0.0))
 
-        # 双手并存时以"谁抬得高"为主判据：wrist 的 y 越小（举得越高）分越高。
-        # 权重(25)显著高于运动/手型/手大小，确保举起来的手稳定地成为锁定/放大对象。
+        # 主判据：wrist 举得越高（y 越小）分越高。权重 25 显著高于其他项，
+        # 确保举起来的手稳定地成为锁定/放大对象。
         if landmarks and frame_h > 0:
             wrist_y_norm = max(0.0, min(1.0, float(landmarks[0][2]) / float(frame_h)))
             score += (1.0 - wrist_y_norm) * 25.0
 
+        # 运动分：运动大的手略优先（避免锁住静止手）
         score += float(motion) * 6.0
         return score
 
     # ------------------------------------------------------------------
-    # 绘图辅助
+    # 多尺度检测
     # ------------------------------------------------------------------
 
-    def _draw_points_only(self, frame, landmarks, color):
-        for point in landmarks:
-            center = (int(round(point[1])), int(round(point[2])))
-            cv2.circle(frame, center, 4, color, cv2.FILLED)
+    def _detect_multiscale(self, frame, w, h):
+        """多尺度检测：缩小到0.5x再检测，远距离小手相对变大。
 
-    def _draw_zoom_badge(self, frame, hands_gestures, frame_w, frame_h, used_zoom):
-        try:
-            if hands_gestures:
-                max_bbox = max(g.get("bbox_area", 0.0) for g in hands_gestures)
-                ratio_pct = (max_bbox / max(frame_w * frame_h, 1)) * 100
-            else:
-                ratio_pct = 0.0
+        原图检不到手时调用。缩小后检到的手坐标会映射回原图。
+        只尝试0.5x一个尺度，避免性能损失。
 
-            label = "ZOOM" if used_zoom else "FULL"
-            color = (0, 200, 255) if used_zoom else (200, 200, 200)
-            text = f"{label} {ratio_pct:.2f}%"
-
-            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
-            pad = 6
-            x1 = frame_w - tw - pad * 2 - 5
-            y1 = 5
-            x2 = frame_w - 5
-            y2 = th + pad * 2 + 5
-
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
-            cv2.putText(
-                frame, text, (x1 + pad, y2 - pad),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1,
-            )
-        except Exception:
-            pass
-
-    def _apply_visual_zoom(self, frame, crop_center, crop_size):
-        h, w, _ = frame.shape
-        cx, cy = crop_center
-
-        base_size = int(round(crop_size))
-        base_size = max(base_size, self._crop_min_size)
-        base_size = min(base_size, min(w, h))
-
-        if base_size >= int(min(w, h) * 0.95):
-            return frame
-
-        crop_h = base_size
-        crop_w = int(crop_h * (w / h))
-        if crop_w > w:
-            crop_w = w
-            crop_h = int(crop_w * (h / w))
-
-        x0 = int(round(cx - crop_w / 2))
-        y0 = int(round(cy - crop_h / 2))
-        x0 = max(0, min(x0, w - crop_w))
-        y0 = max(0, min(y0, h - crop_h))
-
-        crop_img = frame[y0:y0+crop_h, x0:x0+crop_w]
-        if crop_img.size > 0 and crop_h > 0 and crop_w > 0:
-            zoomed = cv2.resize(crop_img, (w, h), interpolation=cv2.INTER_LINEAR)
-            cv2.rectangle(zoomed, (0, 0), (w-1, h-1), (0, 200, 255), 6)
-            return zoomed
-        return frame
-
-    def _init_sr_engines(self):
-        """初始化超分辨率引擎状态（不在此处真正加载模型）。
-
-        仅准备模型路径与占位变量；具体引擎在首次被选中时由
-        _ensure_espcn() / _ensure_realesrgan() **按需加载**，避免一次性把
-        ESPCN + Real-ESRGAN(GPU) + Real-ESRGAN(CPU) 三份模型全部常驻内存，
-        同时支持运行时切换引擎时再加载所需的那一个。
+        Returns:
+            (hands_landmarks, hands_gestures, raw) 或 None
         """
-        if getattr(self, "_sr_initialized", False):
-            return
-
-        self._sr_initialized = True
-        self._espcn_engine = None
-        self._realesrgan_cpu_session = None
-        self._realesrgan_gpu_session = None
-        self._realesrgan_input_name = None
-        self._realesrgan_gpu_available = None  # None=未探测, True/False=已探测
-
-        self._espcn_path = resource_path("ESPCN_x2.pb")
-        self._realesrgan_path = resource_path("Real-ESRGAN_x2plus.onnx")
-
-    def _ensure_espcn(self):
-        """按需加载 ESPCN（OpenCV dnn_superres，CPU）。返回引擎或 None。"""
-        if self._espcn_engine is not None:
-            return self._espcn_engine
-        if not os.path.exists(self._espcn_path):
-            return None
         try:
-            sr = cv2.dnn_superres.DnnSuperResImpl_create()
-            sr.readModel(self._espcn_path)
-            sr.setModel("espcn", 2)
-            self._espcn_engine = sr
-            _zoom_logger.info("[SR] ESPCN model loaded successfully.")
-        except Exception as e:
-            _zoom_logger.error("[SR] Failed to load ESPCN: %s", e)
-            self._espcn_engine = None
-        return self._espcn_engine
-
-    def _ensure_realesrgan(self, prefer_gpu):
-        """按需加载 Real-ESRGAN ONNX session。
-
-        返回 (session, input_name)，不可用时返回 (None, None)。仅加载当前需要的
-        provider；input_name 取自**真正加载成功**的 session（修复此前只在 CPU
-        分支赋值导致 GPU-only 时被静默跳过的问题）。
-        """
-        if not os.path.exists(self._realesrgan_path):
-            return None, None
-
-        import onnxruntime as ort
-
-        if prefer_gpu:
-            if self._realesrgan_gpu_session is not None:
-                return self._realesrgan_gpu_session, self._realesrgan_input_name
-            if self._realesrgan_gpu_available is None:
-                self._realesrgan_gpu_available = (
-                    "DmlExecutionProvider" in ort.get_available_providers()
-                )
-            if self._realesrgan_gpu_available:
-                try:
-                    sess = ort.InferenceSession(
-                        self._realesrgan_path,
-                        providers=["DmlExecutionProvider", "CPUExecutionProvider"],
-                    )
-                    self._realesrgan_gpu_session = sess
-                    self._realesrgan_input_name = sess.get_inputs()[0].name
-                    _zoom_logger.info("[SR] Real-ESRGAN loaded on GPU (DirectML).")
-                    return sess, self._realesrgan_input_name
-                except Exception as e:
-                    _zoom_logger.warning(
-                        "[SR] Failed to init Real-ESRGAN on GPU, fallback to CPU: %s", e
-                    )
-                    self._realesrgan_gpu_available = False
-            # GPU 不可用 → 回退 CPU
-
-        if self._realesrgan_cpu_session is not None:
-            return self._realesrgan_cpu_session, self._realesrgan_input_name
-        try:
-            sess = ort.InferenceSession(
-                self._realesrgan_path, providers=["CPUExecutionProvider"]
-            )
-            self._realesrgan_cpu_session = sess
-            self._realesrgan_input_name = sess.get_inputs()[0].name
-            _zoom_logger.info("[SR] Real-ESRGAN loaded on CPU.")
-            return sess, self._realesrgan_input_name
-        except Exception as e:
-            _zoom_logger.error("[SR] Failed to load Real-ESRGAN session: %s", e)
-            return None, None
-
-    def _resolve_sr_engine(self, sr_engine, crop_size, target):
-        """将配置（含 auto）解析为具体引擎名。
-
-        进入本函数即说明正处于 crop-zoom（手部在画面中太小、需要放大），因此 auto
-        一律选用轻量的 ESPCN——"需要 ZOOM 就必须超分"。即便裁剪框 >= 目标尺寸
-        （ZOOM 过程中手部短暂靠近的过渡场景）也不再回退 none，保证整段 ZOOM 档位
-        稳定。none（纯插值）只在两种情况出现：用户显式把 zoom_sr_engine 设为
-        "none"，或所选引擎执行失败的兜底；不触发 ZOOM 时根本不进入这里，手部无需
-        放大也就不超分。Real-ESRGAN 开销大、可能掉帧，仍需用户显式选择。
-
-        例外（近距离关闭 SR）：当 crop_size >= target 时，裁剪框本就 ≥ 目标分辨率，
-        这是"下采样"场景——超分加不了任何细节，还白白吃 CPU（实测每段 ZOOM 的
-        crop 常达 1000~1300px 远大于 384px 目标）。此时 auto 直接用普通插值，
-        等效"手大/近距离不超分"，省下的算力直接体现在帧率上。真正远（crop<target，
-        需要上采样放大小手）才用 ESPCN。
-        """
-        if sr_engine == "auto":
-            # Initial decision preserves the intuitive target boundary. Once a
-            # tier is selected, use a 10% hysteresis band so crop-size jitter
-            # around 384px cannot switch ESPCN on/off every few frames.
-            if self._auto_sr_enabled is None:
-                self._auto_sr_enabled = crop_size < target
-            elif self._auto_sr_enabled and crop_size >= target * 1.10:
-                self._auto_sr_enabled = False
-            elif not self._auto_sr_enabled and crop_size <= target * 0.90:
-                self._auto_sr_enabled = True
-            return "espcn" if self._auto_sr_enabled else "none"
-        return sr_engine
-
-    def _log_sr_tier(self, tier, crop_size, target):
-        """记录本次 crop-zoom 实际生效的放大档位（ESPCN / Real-ESRGAN / none 插值）。
-
-        仅在档位变化时打印，避免逐帧刷屏；每次 ZOOM OFF 会复位 _last_sr_tier，
-        因此每段 ZOOM 会重新记录一次。
-        """
-        if tier == self._last_sr_tier:
-            return
-        self._last_sr_tier = tier
-        _zoom_logger.info(
-            "[SR] zoom upscaler -> %s (crop=%dpx, target=%dpx)", tier, crop_size, target
-        )
-
-    def _sr_espcn(self, crop, target):
-        """ESPCN 超分：限幅输入到约 target/2，2x 放大后重采样到 target。
-
-        ESPCN 开销随输入像素数增长（240² 在 CPU 上约 30ms）。由于其放大倍率固定为
-        2，把输入限制到约 target/2 既能让输出≈target、又能把单帧开销压到固定上限内
-        （≈target/2 输入约 18ms）；当 crop 本就更小则直接喂入不再下采样。
-        失败/不可用返回 None。
-        """
-        engine = self._ensure_espcn()
-        if engine is None:
-            return None
-        try:
-            cap = max(64, target // 2)
-            src = crop
-            longest = max(crop.shape[0], crop.shape[1])
-            if longest > cap:
-                s = cap / float(longest)
-                src = cv2.resize(
-                    crop,
-                    (max(1, int(round(crop.shape[1] * s))), max(1, int(round(crop.shape[0] * s)))),
-                    interpolation=cv2.INTER_AREA,
-                )
-            out = engine.upsample(src)  # 2x
-            if out.shape[0] == target and out.shape[1] == target:
-                return out
-            interp = cv2.INTER_AREA if out.shape[0] > target else cv2.INTER_LINEAR
-            return cv2.resize(out, (target, target), interpolation=interp)
-        except Exception as e:
-            _zoom_logger.error("[SR] ESPCN upsampling failed: %s", e)
-            return None
-
-    def _sr_realesrgan(self, crop, target, prefer_gpu):
-        """Real-ESRGAN 超分（固定 64x64 输入的导出）。
-
-        该 ONNX 导出的空间输入被写死为 64x64，若像旧实现那样把整张 crop 全局
-        下采样到 64 再 2x，会先丢掉已有分辨率、效果常不如双线性。这里改用
-        **分块批量推理**绕开 64 的天花板：把 crop 缩放到 grid*64 的方形后切成
-        grid*grid 个 64x64 tile，一次 batch 推理（模型 batch 维为动态），再把
-        各 128x128 输出拼接成方形并重采样到 target。模型实际"看到"的有效分辨率
-        提升到 grid*64。失败/不可用返回 None。
-        """
-        session, input_name = self._ensure_realesrgan(prefer_gpu)
-        if session is None or input_name is None:
-            return None
-        try:
-            TILE = 64
-            # 选择网格数，使输出 grid*128 尽量贴近 target（模型放大倍率为 2）
-            grid = max(1, int(round(target / (TILE * 2))))
-            side_in = grid * TILE
-
-            interp_in = cv2.INTER_AREA if crop.shape[0] > side_in else cv2.INTER_CUBIC
-            crop_sq = cv2.resize(crop, (side_in, side_in), interpolation=interp_in)
-
-            tiles = []
-            for gy in range(grid):
-                for gx in range(grid):
-                    tiles.append(crop_sq[gy * TILE:(gy + 1) * TILE, gx * TILE:(gx + 1) * TILE])
-            batch = np.stack(tiles, axis=0).astype(np.float32) / 255.0  # (N,64,64,3)
-            batch = np.transpose(batch, (0, 3, 1, 2))                   # (N,3,64,64)
-
-            out = session.run(None, {input_name: batch})[0]            # (N,3,h,w)
-            out = np.clip(out * 255.0, 0, 255).astype(np.uint8)
-            out = np.transpose(out, (0, 2, 3, 1))                      # (N,h,w,3)
-
-            th, tw = out.shape[1], out.shape[2]
-            canvas = np.empty((grid * th, grid * tw, 3), dtype=np.uint8)
-            k = 0
-            for gy in range(grid):
-                for gx in range(grid):
-                    canvas[gy * th:(gy + 1) * th, gx * tw:(gx + 1) * tw] = out[k]
-                    k += 1
-
-            if canvas.shape[0] == target and canvas.shape[1] == target:
-                return canvas
-            interp_out = cv2.INTER_AREA if canvas.shape[0] > target else cv2.INTER_LINEAR
-            return cv2.resize(canvas, (target, target), interpolation=interp_out)
-        except Exception as e:
-            _zoom_logger.error("[SR] Real-ESRGAN upsampling failed: %s", e)
-            return None
-
-    # ------------------------------------------------------------------
-    # 人脸引导的远距离手部捕获
-    # ------------------------------------------------------------------
-
-    def _ensure_face_detector(self):
-        """按需加载 OpenCV Haar 人脸级联（随 opencv 自带，无需额外下载）。"""
-        if self._face_detector_init:
-            return self._face_cascade
-        self._face_detector_init = True
-        try:
-            cascade_dir = getattr(getattr(cv2, "data", None), "haarcascades", None)
-            if cascade_dir:
-                path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
-                if os.path.exists(path):
-                    c = cv2.CascadeClassifier(path)
-                    if not c.empty():
-                        self._face_cascade = c
-                        _zoom_logger.info("[FACE] Haar 人脸级联已加载（远距捕获）。")
-        except Exception as e:
-            _zoom_logger.warning("[FACE] 人脸级联不可用: %s", e)
-        return self._face_cascade
-
-    def _face_guided_region(self, frame):
-        """检测最大人脸，据此预测手部搜索区。返回 (cx, cy, size) 或 None。"""
-        cascade = self._ensure_face_detector()
-        if cascade is None:
-            return None
-        h, w = frame.shape[:2]
-        # 缩到 _face_detect_short 短边做人脸检测以提速（越大越能检出更远/更小的脸）。
-        short = min(w, h)
-        target_short = self._face_detect_short
-        scale = target_short / short if short > target_short else 1.0
-        small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale < 1.0 else frame
-        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        try:
-            # scaleFactor 1.1（更细金字塔，识别更多尺寸）、minNeighbors 3、minSize 12
-            # 都比原来更宽松，专为"远距离小脸"放行，提升 3 米外的恢复成功率。
-            faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(12, 12))
-        except Exception:
-            return None
-        if len(faces) == 0:
-            return None
-        fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        # 映射回原帧坐标
-        fx, fy, fw, fh = fx / scale, fy / scale, fw / scale, fh / scale
-        face_cx = fx + fw / 2.0
-        face_cy = fy + fh / 2.0
-        region_size = fh * self._face_hand_region_scale
-        region_cx = face_cx
-        region_cy = face_cy + fh * self._face_hand_down_bias
-        return (region_cx, region_cy, region_size)
-
-    def _try_face_guided_acquire(self, frame, w, h):
-        """丢手时的人脸引导捕获：节流跑人脸 → 预测搜索区 → crop-zoom 检测。
-
-        命中则返回 (hands_landmarks, hands_gestures, raw) 并直接进入 ZOOM 跟踪；
-        否则返回 None。任何异常都被吞掉，绝不影响主检测流程。
-        """
-        if not self._face_acquire_enabled:
-            return None
-        self._face_scan_counter += 1
-        if self._face_scan_counter < self._face_scan_interval:
-            return None
-        self._face_scan_counter = 0
-        try:
-            region = self._face_guided_region(frame)
-            if region is None:
+            # 缩小到0.5x
+            small = cv2.resize(frame, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
+            result = self._detect(small)
+            if not result or not result[0]:
                 return None
-            cx, cy, size = region
-            size = max(self._crop_min_size, min(size, min(w, h)))
-            res = self._detect_crop_zoom(frame, (cx, cy), size)
-            if res and res[0]:
-                # 命中：直接进入 ZOOM，让下一帧用 hint 跟踪，捕获更跟手
-                self._crop_zoom_mode = True
-                self._zoom_miss_streak = 0
-                self._current_crop_center = (cx, cy)
-                self._current_crop_size = float(size)
-                _zoom_logger.info("=> ACQUIRE (人脸引导 crop-zoom 捕获到手)")
-                return res
+
+            hands_landmarks, hands_gestures, raw = result
+            # 坐标映射回原图（×2）
+            scaled_landmarks = []
+            for landmarks in hands_landmarks:
+                scaled = [[lm[0], lm[1] * 2.0, lm[2] * 2.0] for lm in landmarks]
+                scaled_landmarks.append(scaled)
+
+            # 更新 bbox_area（×4，因为面积放大4倍）
+            for g in hands_gestures:
+                g["bbox_area"] = g.get("bbox_area", 0.0) * 4.0
+
+            _zoom_logger.debug(
+                "[MULTISCALE] 0.5x 检出 %d 只手（原图未检出）", len(scaled_landmarks),
+            )
+            return scaled_landmarks, hands_gestures, raw
         except Exception as e:
-            _zoom_logger.debug("[FACE] 人脸引导捕获异常: %s", e)
-        return None
+            _zoom_logger.debug("[MULTISCALE] 多尺度检测异常: %s", e)
+            return None
 
     def _perform_crop_zoom(self, frame, crop_center, current_crop_size, run_sub_detect):
         """通用 crop-zoom 逻辑：裁剪 → 超分/插值放大 → 子类检测 → 坐标映射。
@@ -1090,19 +804,19 @@ class BaseHandTracker(ABC):
             sr_engine = self._config.get("zoom_sr_engine", "auto")
 
         # 初始化超分引擎状态（具体模型按需加载）
-        self._init_sr_engines()
+        self._sr.init()
 
         target = self._crop_target_size
 
         # 解析 auto / 显式选择 → 具体引擎
-        actual_engine = self._resolve_sr_engine(sr_engine, crop_size, target)
+        actual_engine = self._sr.resolve(sr_engine, crop_size, target)
 
         # 执行放大
         zoomed = None
         if actual_engine == "espcn":
-            zoomed = self._sr_espcn(crop, target)
+            zoomed = self._sr.espcn(crop, target)
         elif actual_engine in ("realesrgan_cpu", "realesrgan_gpu"):
-            zoomed = self._sr_realesrgan(
+            zoomed = self._sr.realesrgan(
                 crop, target, prefer_gpu=(actual_engine == "realesrgan_gpu")
             )
 
@@ -1113,11 +827,11 @@ class BaseHandTracker(ABC):
             # 实际生效档位：显式 none 用插值；否则说明所选引擎执行失败、回退插值
             effective_tier = (
                 "none(interp)" if actual_engine == "none"
-                else "none(interp,%s_failed)" % actual_engine
+                else f"none(interp,{actual_engine}_failed)"
             )
         else:
             effective_tier = actual_engine
-        self._log_sr_tier(effective_tier, crop_size, target)
+        self._sr.log_tier(effective_tier, crop_size, target)
 
         # 子类在 zoomed 上跑推理
         detection_result = run_sub_detect(zoomed)

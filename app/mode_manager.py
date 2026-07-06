@@ -2,6 +2,7 @@ import logging
 import time
 from collections import deque
 
+from modes import MODE_NAMES
 from modes.base import ModeResult
 
 logger = logging.getLogger("gesture")
@@ -58,13 +59,12 @@ class ModeManager:
         logger.info("=> 模式切换: %s -> %s", prev or "(无)", mode_name)
 
     def cycle_mode(self):
-        modes = ["presentation", "mouse", "draw"]
         current = self.current_mode_name
         try:
-            index = modes.index(current)
+            index = MODE_NAMES.index(current)
         except ValueError:
             index = 0
-        next_mode = modes[(index + 1) % len(modes)]
+        next_mode = MODE_NAMES[(index + 1) % len(MODE_NAMES)]
         # 使用 batch_update 避免立即写入磁盘，延迟到上下文退出时统一保存
         with self.config.batch_update():
             self.config.set("interaction_mode", next_mode)

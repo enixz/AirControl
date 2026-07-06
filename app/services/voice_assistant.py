@@ -1,16 +1,16 @@
 import glob
 import json
+import logging
 import os
 import string
 import time
-import logging
 import winreg
 
+import psutil
 import win32api
 import win32con
 import win32gui
 import win32process
-import psutil
 
 logger = logging.getLogger("voice_assistant")
 
@@ -24,7 +24,7 @@ _CACHE_FILE = os.path.join(
 
 def _load_cache():
     try:
-        with open(_CACHE_FILE, "r", encoding="utf-8") as f:
+        with open(_CACHE_FILE, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return {}
@@ -528,6 +528,12 @@ class VoiceAssistantService:
 
     def set_assistant(self, assistant):
         self.assistant = assistant
+
+    def stop(self):
+        """清理语音助手服务持有的资源（当前无持久资源，接口预留供 Orchestrator 统一调用）。"""
+        # VoiceAssistantService 不持有持久线程或 ONNX session，
+        # activate/hang_up 都是即时操作。此方法仅为接口一致性而存在。
+        pass
 
     def get_profile(self):
         return ASSISTANT_PROFILES.get(self.assistant, ASSISTANT_PROFILES["doubao"])

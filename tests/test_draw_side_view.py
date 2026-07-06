@@ -61,6 +61,16 @@ def make_hand(thumb_apart=False, two_finger=False, half_curl=False, yaw=1.0):
     return lm
 
 
+def make_open_palm():
+    """合成张掌（食指+中指+无名指+小指都伸出）——is_open_palm 为真。
+    也用于模拟书写中单帧关键点抖动导致 middle_up & ring_up 偶发同真的噪声帧。"""
+    lm = make_hand()
+    lm[12] = [12, 284.0, 200.0]   # 中指尖抬过 PIP(10.y=265) → middle_up
+    lm[16] = [16, 312.0, 200.0]   # 无名指尖抬过 PIP(14.y=270) → ring_up
+    lm[20] = [20, 336.0, 200.0]   # 小指尖抬过 PIP(18.y=280) → pinky_up
+    return lm
+
+
 def make_draw_mode(extra_config=None):
     overlay = mock.MagicMock()
     overlay.REFERENCE_HAND_SIZE = 100.0
@@ -162,15 +172,17 @@ class DrawStateMachineTest(unittest.TestCase):
             )
         self.overlay.force_lift_pen.assert_not_called()
 
-    def test_frontal_thumb_apart_does_not_lift_by_default(self):
-        """默认 draw_thumb_lift=False：拇指分开不再抬笔——消除近距正面书写时
-        拇指间歇被读成"分开"的笔画中途误断（实测一次会话 23 次）。单指姿势
-        维持落笔，抬笔交给 ✌️ / 握拳 / 张掌。"""
-        self.warm_writing()
-        self.overlay.force_lift_pen.reset_mock()
+    def test_frontal_thumb_apart_does_not_lift_when_disabled(self):
+        """draw_thumb_lift=False：拇指分开不再抬笔——消除近距正面书写时
+        拇指间歇被读成"分开"的笔画中途误断。单指姿势维持落笔，抬笔交给
+        ✌️ / 握拳 / 张掌。（阶段2.12 默认改为 True，此测试改为显式 False 覆盖关闭行为）"""
+        dm, overlay = make_draw_mode({"draw_thumb_lift": False})
+        for _ in range(6):
+            self.step(make_hand(), dm=dm)  # warm writing
+        overlay.force_lift_pen.reset_mock()
         for _ in range(15):
-            self.assertEqual(self.step(make_hand(thumb_apart=True)).gesture, "DRAW")
-        self.overlay.force_lift_pen.assert_not_called()
+            self.assertEqual(self.step(make_hand(thumb_apart=True), dm=dm).gesture, "DRAW")
+        overlay.force_lift_pen.assert_not_called()
 
     def test_frontal_thumb_apart_lifts_when_enabled(self):
         """draw_thumb_lift=True 恢复旧习惯：正面分开拇指 → 投 hover，多数后抬笔。"""
@@ -250,6 +262,29 @@ class DrawStateMachineTest(unittest.TestCase):
         （见 test_pointing_up_label_starts_writing_sideways）。"""
         result = self.step(make_hand(thumb_apart=True, yaw=0.45))
         self.assertEqual(result.gesture, "DRAW_HOVER")
+
+    def test_single_open_palm_frame_does_not_break_stroke(self):
+        """书写中单帧 is_open_palm 噪声（middle_up & ring_up 偶发同真）不立即抬笔：
+        旧实现单帧即 force_lift_pen 绕过去抖，是断笔主因。默认需连续 3 帧确认。"""
+        self.warm_writing()
+        self.overlay.force_lift_pen.reset_mock()
+        palm = make_open_palm()
+        # 前 2 帧（< draw_open_palm_lift_frames=3）按噪声处理，保持书写、不抬笔
+        self.assertEqual(self.step(palm).gesture, "DRAW")
+        self.assertEqual(self.step(palm).gesture, "DRAW")
+        self.overlay.force_lift_pen.assert_not_called()
+        # 第 3 帧确认抬笔（流向清屏分支）
+        self.step(palm)
+        self.overlay.force_lift_pen.assert_called()
+
+    def test_open_palm_lift_frames_one_restores_single_frame_lift(self):
+        """draw_open_palm_lift_frames=1 恢复旧的单帧立即抬笔行为（A/B 可回退）。"""
+        dm, overlay = make_draw_mode({"draw_open_palm_lift_frames": 1})
+        for _ in range(6):
+            self.step(make_hand(), dm=dm)
+        overlay.force_lift_pen.reset_mock()
+        self.step(make_open_palm(), dm=dm)
+        overlay.force_lift_pen.assert_called()
 
 
 if __name__ == "__main__":

@@ -37,27 +37,27 @@ class TestConfigEdge(unittest.TestCase):
         cm = ConfigManager(config_file=self.config_path)
         self.assertIn("edge_acceleration_enabled", cm.config)
         self.assertIn("edge_acceleration_strength", cm.config)
-        self.assertEqual(cm.get("edge_acceleration_enabled"), False)
-        self.assertEqual(cm.get("edge_acceleration_strength"), 30)
+        self.assertEqual(cm.get("edge_acceleration_enabled"), True)
+        self.assertEqual(cm.get("edge_acceleration_strength"), 100)
 
     def test_save_preserves_edge_keys(self):
         """保存后 config.json 中包含正确的 edge 配置键"""
         # Start with empty config to trigger defaults
         cm = ConfigManager(config_file=self.config_path)
-        self.assertEqual(cm.get("edge_acceleration_enabled"), False)
-        self.assertEqual(cm.get("edge_acceleration_strength"), 30)
+        self.assertEqual(cm.get("edge_acceleration_enabled"), True)
+        self.assertEqual(cm.get("edge_acceleration_strength"), 100)
 
         # Modify values
-        cm.set("edge_acceleration_enabled", True)
+        cm.set("edge_acceleration_enabled", False)
         cm.set("edge_acceleration_strength", 75)
 
         # Read back from file
-        with open(self.config_path, 'r', encoding='utf-8') as f:
+        with open(self.config_path, encoding='utf-8') as f:
             saved = json.load(f)
 
         self.assertIn("edge_acceleration_enabled", saved)
         self.assertIn("edge_acceleration_strength", saved)
-        self.assertEqual(saved["edge_acceleration_enabled"], True)
+        self.assertEqual(saved["edge_acceleration_enabled"], False)
         self.assertEqual(saved["edge_acceleration_strength"], 75)
 
     def test_batch_update_preserves_edge_keys(self):
@@ -68,7 +68,7 @@ class TestConfigEdge(unittest.TestCase):
             cm.set("edge_acceleration_strength", 60)
             cm.set("mouse_sensitivity", 55)
 
-        with open(self.config_path, 'r', encoding='utf-8') as f:
+        with open(self.config_path, encoding='utf-8') as f:
             saved = json.load(f)
 
         self.assertEqual(saved.get("edge_acceleration_enabled"), True)

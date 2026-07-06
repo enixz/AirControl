@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -9,7 +8,7 @@ class ModeResult:
     gesture: str = "NONE"
     status_text: str = ""
     status_color: tuple = field(default_factory=lambda: (0, 255, 0))
-    action: Optional[str] = None
+    action: str | None = None
 
 
 class ModeBase(ABC):

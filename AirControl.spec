@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
-
 ROOT = os.path.abspath(SPECPATH)
 CONSOLE_BUILD = os.environ.get("AIRCONTROL_BUILD_CONSOLE") == "1"
+
+# 从 app/version.py 读取版本号，作为打包产物的唯一版本来源
+sys.path.insert(0, os.path.join(ROOT, "app"))
+from version import __version__  # noqa: E402
 
 
 def add_data_if_present(items, source, destination):
@@ -91,6 +95,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="AirControl",
+    version=__version__,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

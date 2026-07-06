@@ -1,7 +1,7 @@
-import time
 import logging
-import os
 import math
+import os
+import time
 from logging.handlers import RotatingFileHandler
 
 from runtime_paths import writable_data_dir
@@ -26,6 +26,40 @@ class GestureRecognizer:
     # 距离变远→掌宽变小→阈值按比例下调，使同一物理挥动在远处也能触发。
     REFERENCE_HAND_WIDTH = 90.0
 
+    # 正面度门控阈值：hand_frontality < 此值时视为手侧对相机，
+    # hand_width 塌缩导致基于掌宽的距离阈值不可靠，回退到 y 坐标判定。
+    # 正对相机 ≈0.8，侧到 55° ≈0.45。
+    FRONTALITY_GATE = 0.45
+
+    # —— 单手手势阈值（均按掌宽比例，距离自适应）——
+    PINCH_RATIO = 0.35              # 捏合：拇指尖↔食指尖 < 掌宽×0.35
+    INDEX_EXTEND_RATIO = 0.60       # 食指伸出（进入）：食指长 > 掌宽×0.60
+    INDEX_EXTEND_EXIT_RATIO = 0.50  # 食指伸出（退出）：食指长 > 掌宽×0.50（滞回，防闪烁）
+    THUMB_TUCK_ENTER = 0.62         # 拇指内收进入：拇指尖↔食指 MCP < 掌宽×0.62
+    THUMB_TUCK_EXIT = 0.75          # 拇指内收退出：拇指尖↔食指 MCP < 掌宽×0.75（滞后）
+    THUMB_EXTEND_RATIO = 0.9        # 拇指伸出：拇指尖↔食指 MCP > 掌宽×0.9
+    THUMB_FOLD_RATIO = 0.7          # 拇指折叠辅助判定：< 掌宽×0.7
+    SCISSOR_SPREAD_RATIO = 0.28     # 剪刀手：食指↔中指间距 > 掌宽×0.28
+    MIDDLE_INDEX_RATIO = 0.95       # 中指伸出：中指长/食指长 > 0.95
+    FINGERS_CLOSE_RATIO = 0.6       # 手指并拢：相邻指尖 dx < 掌宽×0.6
+
+    # —— 拇指上下判定（基于 tip↔ip 的 y 差，单位 px）——
+    THUMBS_UP_TIP_IP_DELTA = -15    # 拇指上：tip 高于 ip 至少 15px
+    THUMBS_DOWN_TIP_IP_DELTA = 10   # 拇指下：tip 低于 ip 至少 10px
+
+    # —— 挥动判定 ——
+    EDGE_RATIO = 0.12               # 画面边缘 12% 区域视为边缘
+    EDGE_THRESHOLD_BOOST = 1.5      # 边缘区域挥动阈值放大倍数
+    SWIPE_DIR_CONSISTENCY = 0.6     # 挥动方向一致性最低比例
+
+    # —— 滚动判定 ——
+    SCROLL_THRESHOLD_RATIO = 1.2    # 滚动触发位移 > 掌宽×1.2
+    SCROLL_DIR_CONSISTENCY = 0.55   # 滚动方向一致性最低比例
+
+    # —— 双手手势阈值（按平均掌宽比例）——
+    FIST_HUG_RATIO = 1.3            # 双拳靠拢：手腕距 < 平均掌宽×1.3
+    PALM_SPREAD_RATIO = 2.2         # 双掌张开：手腕距 > 平均掌宽×2.2
+
     def __init__(self, cooldown=1.0, swipe_threshold=60):
         self.cooldown = cooldown
         self.swipe_threshold = swipe_threshold
@@ -33,11 +67,18 @@ class GestureRecognizer:
         self.history_x = []
         self.history_y = []
         self._last_hand_width = self.REFERENCE_HAND_WIDTH
+        # hand_width 慢速 EMA：仅在 frontality >= FRONTALITY_GATE 时更新，
+        # 让手势阈值不再随单帧掌宽抖动（实测 58↔208）跳变。
+        # None = 未初始化，首帧用 raw 值初始化（避免冷启动滞后）。
+        self._hand_width_ema = None
+        self._hand_width_ema_alpha = 0.1  # 慢速：10% 新值 + 90% 历史
         self.history_length = 10
         self.hand_present_frames = 0
         self.scroll_y_history = []
         # 拇指 tucked 滞后状态：避免边界距离来回切换
         self._was_tucked = False
+        # 食指伸出滞回状态：避免远距离下关键点抖动导致 index_extended 闪烁
+        self._was_index_extended = False
         # 握拳确认帧计数器
         self._fist_confirm_frames = 0
         # 允许并掌姿态丢帧计数器，容忍最大 3 帧的抖动
@@ -48,19 +89,51 @@ class GestureRecognizer:
         logger.info(f"=== GestureRecognizer Started | CD: {cooldown}s, Threshold: {swipe_threshold} ===")
 
     def get_hand_features(self, landmarks):
-        hand_width = max(20.0, math.hypot(landmarks[5][1] - landmarks[17][1], landmarks[5][2] - landmarks[17][2]))
+        raw_hand_width = max(20.0, math.hypot(landmarks[5][1] - landmarks[17][1], landmarks[5][2] - landmarks[17][2]))
+        index_len = math.hypot(landmarks[8][1] - landmarks[5][1], landmarks[8][2] - landmarks[5][2])
+        # 正面度代理：掌宽（5↔17）随偏航按 cos 塌缩，而竖直伸出的食指
+        # 长度几乎不变。正对相机 ≈0.8，侧到 60° ≈0.4。
+        # 提前计算以门控 index_extended（仅在食指伸出时有意义，拳头时
+        # index_len 短导致比值偏大，但此时 index_up 为 False，gate 不生效）。
+        # 正面度用原始掌宽计算（不受 EMA 滞后影响，否则门控判定会被扭曲）
+        hand_frontality = raw_hand_width / max(index_len, 1e-6)
+        # hand_width 慢速 EMA：仅在高正面度时更新（低正面度时掌宽塌缩，不可信）。
+        # 让手势阈值不再随单帧掌宽抖动（实测 58↔208）跳变。
+        if hand_frontality >= self.FRONTALITY_GATE:
+            if self._hand_width_ema is None:
+                self._hand_width_ema = raw_hand_width
+            else:
+                self._hand_width_ema = (
+                    (1.0 - self._hand_width_ema_alpha) * self._hand_width_ema
+                    + self._hand_width_ema_alpha * raw_hand_width
+                )
+        # 首帧或低正面度未初始化时用 raw 值兜底
+        hand_width = self._hand_width_ema if self._hand_width_ema is not None else raw_hand_width
+
         index_up = landmarks[8][2] < landmarks[6][2]
         middle_up = landmarks[12][2] < landmarks[10][2]
         ring_up = landmarks[16][2] < landmarks[14][2]
         pinky_up = landmarks[20][2] < landmarks[18][2]
         thumb_index = math.hypot(landmarks[4][1] - landmarks[8][1], landmarks[4][2] - landmarks[8][2])
         thumb_middle = math.hypot(landmarks[4][1] - landmarks[12][1], landmarks[4][2] - landmarks[12][2])
-        pinch_threshold = hand_width * 0.35
+        pinch_threshold = hand_width * self.PINCH_RATIO
 
         fingers_close = self._check_fingers_close(landmarks, hand_width)
-
-        index_len = math.hypot(landmarks[8][1] - landmarks[5][1], landmarks[8][2] - landmarks[5][2])
-        index_extended = index_len > hand_width * 0.65
+        # 正面度门控 + 滞回：高正面度时用掌宽比例判定（精确）；低正面度时
+        # hand_width 塌缩导致阈值过低，回退到 y 坐标判定（偏航不变）。
+        # 滞回：已伸出时用更低阈值（INDEX_EXTEND_EXIT_RATIO），防远距离抖动闪烁。
+        if hand_frontality >= self.FRONTALITY_GATE:
+            if self._was_index_extended:
+                index_extended = index_len > hand_width * self.INDEX_EXTEND_EXIT_RATIO
+            else:
+                index_extended = index_len > hand_width * self.INDEX_EXTEND_RATIO
+        else:
+            # y 坐标判定也加滞回：已伸出时允许 tip 略低于 PIP（3px 容差）
+            if self._was_index_extended:
+                index_extended = landmarks[8][2] < landmarks[6][2] + 3
+            else:
+                index_extended = index_up
+        self._was_index_extended = index_extended
 
         thumb_up = landmarks[4][2] < landmarks[3][2] and landmarks[4][2] < landmarks[2][2]
         thumb_tip_to_index_mcp = math.hypot(landmarks[4][1] - landmarks[5][1], landmarks[4][2] - landmarks[5][2])
@@ -68,14 +141,14 @@ class GestureRecognizer:
         # 与 v1.1.0 的 0.65/0.78（按 |Δx| 掌宽）等效——掌宽改为欧氏距离时
         # 阈值被过度压缩到 0.5/0.6，导致书写中拇指频繁被误判为分开。
         if self._was_tucked:
-            thumb_tucked = thumb_tip_to_index_mcp < hand_width * 0.75
+            thumb_tucked = thumb_tip_to_index_mcp < hand_width * self.THUMB_TUCK_EXIT
         else:
-            thumb_tucked = thumb_tip_to_index_mcp < hand_width * 0.62
+            thumb_tucked = thumb_tip_to_index_mcp < hand_width * self.THUMB_TUCK_ENTER
         self._was_tucked = thumb_tucked
-        thumb_extended = thumb_tip_to_index_mcp > hand_width * 0.9
+        thumb_extended = thumb_tip_to_index_mcp > hand_width * self.THUMB_EXTEND_RATIO
 
         thumb_folded = thumb_tucked or (not thumb_up and not thumb_extended) or \
-                      (not thumb_up and thumb_tip_to_index_mcp < hand_width * 0.7)
+                      (not thumb_up and thumb_tip_to_index_mcp < hand_width * self.THUMB_FOLD_RATIO)
 
         thumb_tip = landmarks[4]
         thumb_ip = landmarks[3]
@@ -84,13 +157,13 @@ class GestureRecognizer:
         is_thumbs_up = (
             thumb_up
             and thumb_tip[2] < thumb_mcp[2]
-            and thumb_tip_to_ip < -15
+            and thumb_tip_to_ip < self.THUMBS_UP_TIP_IP_DELTA
         )
         is_thumbs_down = (
             not thumb_up
             and thumb_tip[2] > thumb_mcp[2]
             and thumb_tip[2] > thumb_ip[2]
-            and thumb_tip_to_ip > 10
+            and thumb_tip_to_ip > self.THUMBS_DOWN_TIP_IP_DELTA
         )
 
         four_fingers_down = not index_up and not middle_up and not ring_up and not pinky_up
@@ -98,7 +171,7 @@ class GestureRecognizer:
         index_middle_spread = math.hypot(
             landmarks[8][1] - landmarks[12][1], landmarks[8][2] - landmarks[12][2]
         )
-        scissor_spread_ok = index_middle_spread > hand_width * 0.28
+        scissor_spread_ok = index_middle_spread > hand_width * self.SCISSOR_SPREAD_RATIO
         is_scissor = (
             index_up and middle_up and not ring_up and not pinky_up
             and scissor_spread_ok
@@ -111,17 +184,12 @@ class GestureRecognizer:
         # 经常超过该值（偏航时掌宽塌缩进一步加剧），16/24 次断笔由此而来。
         middle_len = math.hypot(landmarks[12][1] - landmarks[9][1], landmarks[12][2] - landmarks[9][2])
         middle_index_ratio = middle_len / max(index_len, 1e-6)
-        middle_extended = middle_index_ratio > 0.95
+        middle_extended = middle_index_ratio > self.MIDDLE_INDEX_RATIO
 
         # 双指悬停（板书抬笔）：食指+中指伸出即可，**不要求张开**（贴紧也算，
         # 区别于 is_scissor 的 spread 要求）。伸出的手指在轮廓上凸出，
         # 手侧对相机时剪影依然可辨，是偏航下最可靠的抬笔信号。
         two_finger_hover = index_extended and middle_extended and not ring_up and not pinky_up
-
-        # 正面度代理：掌宽（食指根↔小指根）随偏航按 cos 塌缩，而书写姿势下
-        # 竖直伸出的食指长度几乎不变。正对相机 ≈0.8，侧到 60° ≈0.4。
-        # 仅在食指伸出的姿势下有意义（拳头时食指短，比值无效）。
-        hand_frontality = hand_width / max(index_len, 1e-6)
 
         return {
             "index_up": index_up,
@@ -157,9 +225,11 @@ class GestureRecognizer:
         dx1 = abs(landmarks[8][1] - landmarks[12][1])
         dx2 = abs(landmarks[12][1] - landmarks[16][1])
         dx3 = abs(landmarks[16][1] - landmarks[20][1])
-        is_close1 = dx1 < 60 or dx1 < hand_width * 0.6
-        is_close2 = dx2 < 60 or dx2 < hand_width * 0.6
-        is_close3 = dx3 < 60 or dx3 < hand_width * 0.6
+        # 双判定：固定 60px 兜底 + 掌宽比例。
+        # 纯比例在远处掌窄时阈值过严（30px→18px），近处过松（150px→90px）。
+        is_close1 = dx1 < 60 or dx1 < hand_width * self.FINGERS_CLOSE_RATIO
+        is_close2 = dx2 < 60 or dx2 < hand_width * self.FINGERS_CLOSE_RATIO
+        is_close3 = dx3 < 60 or dx3 < hand_width * self.FINGERS_CLOSE_RATIO
         return is_close1 and is_close2 and is_close3
 
     def _reset_state(self):
@@ -189,7 +259,7 @@ class GestureRecognizer:
         # 边缘区域灵敏度降级：轨迹起点或终点靠近画面边缘时提高阈值
         # 解决 B11：手在边缘做非挥动动作时的误触发
         # 使用相对边缘比例而非硬编码像素值，适配不同摄像头分辨率
-        edge_ratio = 0.12  # 画面边缘 12% 区域视为边缘
+        edge_ratio = self.EDGE_RATIO  # 画面边缘比例区域视为边缘
         edge_x = self.frame_w * edge_ratio
         edge_y = self.frame_h * edge_ratio
         x_vals = (self.history_x[0], self.history_x[-1])
@@ -201,7 +271,7 @@ class GestureRecognizer:
         # clamp 防止极远处噪声放大成误触发 / 极近处阈值过高。
         dist_scale = min(1.5, max(0.3, self._last_hand_width / self.REFERENCE_HAND_WIDTH))
         base_threshold = self.swipe_threshold * dist_scale
-        effective_threshold = base_threshold * (1.5 if in_edge else 1.0)
+        effective_threshold = base_threshold * (self.EDGE_THRESHOLD_BOOST if in_edge else 1.0)
         min_avg_speed = base_threshold / 4.0
 
         if abs(dx) < effective_threshold and abs(dy) < effective_threshold:
@@ -214,8 +284,8 @@ class GestureRecognizer:
             direction = 1 if dx > 0 else -1
             consistent = sum(1 for d in pairwise_dx if d * direction > 0)
             ratio = consistent / len(pairwise_dx)
-            if ratio < 0.6:
-                logger.info(f"Swipe rejected: direction consistency {ratio:.2f} < 0.6")
+            if ratio < self.SWIPE_DIR_CONSISTENCY:
+                logger.info(f"Swipe rejected: direction consistency {ratio:.2f} < {self.SWIPE_DIR_CONSISTENCY}")
                 return "NONE"
             avg_speed = abs(dx) / len(self.history_x)
             if avg_speed < min_avg_speed:
@@ -233,8 +303,8 @@ class GestureRecognizer:
             direction = 1 if dy > 0 else -1
             consistent = sum(1 for d in pairwise_dy if d * direction > 0)
             ratio = consistent / len(pairwise_dy)
-            if ratio < 0.6:
-                logger.info(f"Swipe rejected: direction consistency {ratio:.2f} < 0.6")
+            if ratio < self.SWIPE_DIR_CONSISTENCY:
+                logger.info(f"Swipe rejected: direction consistency {ratio:.2f} < {self.SWIPE_DIR_CONSISTENCY}")
                 return "NONE"
             avg_speed = abs(dy) / len(self.history_y)
             if avg_speed < min_avg_speed:
@@ -275,13 +345,15 @@ class GestureRecognizer:
             return 0
 
         dy = self.scroll_y_history[-1] - self.scroll_y_history[0]
-        threshold = max(hand_width * 1.2, 60)
+        # 双判定：掌宽比例 + 固定 60px 下限。
+        # 纯比例在远处掌窄时阈值过小（30px→36px），手腕自然抖动即误触发滚动。
+        threshold = max(hand_width * self.SCROLL_THRESHOLD_RATIO, 60)
         if abs(dy) > threshold:
             direction = 1 if dy > 0 else -1
             consistent = sum(1 for i in range(len(self.scroll_y_history) - 1)
                             if (self.scroll_y_history[i+1] - self.scroll_y_history[i]) * direction > 0)
             ratio = consistent / (len(self.scroll_y_history) - 1)
-            if ratio < 0.55:
+            if ratio < self.SCROLL_DIR_CONSISTENCY:
                 return 0
             # 锁定滚动方向，进入持续滚动模式
             self._scroll_direction = direction
@@ -314,18 +386,25 @@ class GestureRecognizer:
             hands_landmarks[0][0][2] - hands_landmarks[1][0][2],
         )
 
+        # 距离自适应：双手手腕距离阈值按平均掌宽归一化，
+        # 使远处（掌窄）和近处（掌宽）的触发比例一致。
+        # 参考掌宽 90px 时：FIST_HUG≈120px(1.3×)，TWO_PALM_SPREAD≈200px(2.2×)
+        avg_hand_width = (first.get("hand_width", 90.0) + second.get("hand_width", 90.0)) / 2.0
+        fist_hug_threshold = avg_hand_width * self.FIST_HUG_RATIO
+        palm_spread_threshold = avg_hand_width * self.PALM_SPREAD_RATIO
+
         self._two_hand_hold_frames = getattr(self, '_two_hand_hold_frames', 0) + 1
         if self._two_hand_hold_frames < 8:
             return None
 
         self._two_hand_hold_frames = 0
 
-        if both_fists and wrist_dist < 120:
-            logger.info("=> Trigger: FIST_HUG (wrist_dist=%.0f)", wrist_dist)
+        if both_fists and wrist_dist < fist_hug_threshold:
+            logger.info("=> Trigger: FIST_HUG (wrist_dist=%.0f, threshold=%.0f)", wrist_dist, fist_hug_threshold)
             self._reset_state()
             return "FIST_HUG"
-        elif both_open and wrist_dist > 200:
-            logger.info("=> Trigger: TWO_PALM_SPREAD (wrist_dist=%.0f)", wrist_dist)
+        elif both_open and wrist_dist > palm_spread_threshold:
+            logger.info("=> Trigger: TWO_PALM_SPREAD (wrist_dist=%.0f, threshold=%.0f)", wrist_dist, palm_spread_threshold)
             self._reset_state()
             return "TWO_PALM_SPREAD"
 

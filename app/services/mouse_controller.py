@@ -26,7 +26,7 @@ def mouse_event_click(button='left'):
     MOUSEEVENTF_LEFTUP = 0x0004
     MOUSEEVENTF_RIGHTDOWN = 0x0008
     MOUSEEVENTF_RIGHTUP = 0x0010
-    
+
     if button == 'left':
         user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         time.sleep(0.02)
@@ -96,18 +96,20 @@ class ActiveRegionMapper:
       - 手移动时活动区**缓慢向内收缩**（人靠近/远离导致可达范围变化时自动重校准）；
       - 手静止时**冻结收缩**（避免笔尖在悬停时漂向屏幕中心）。
 
+    收缩速率按**秒**计算（contract 单位：归一化/秒），通过 dt 参数实现帧率无关。
     效果：无论站多远、手只占画面里偏角的一小块，都能写满全屏；移动几秒后
     自动校准到使用者的实际可达范围。无需手动标定。
     """
 
-    def __init__(self, margin=0.08, min_span=0.22, contract=0.0006, move_eps=0.004):
+    def __init__(self, margin=0.08, min_span=0.22, contract=0.018, move_eps=0.004):
         self.margin = float(margin)        # 边缘余量：不必触到扫动极值即可抵达屏幕边
         self.min_span = float(min_span)    # 活动区最小跨度，防止微动时灵敏度过高
-        self.contract = float(contract)    # 每帧向内收缩速率（归一化/帧）
+        self.contract = float(contract)    # 每秒向内收缩速率（归一化/秒），帧率无关
         self.move_eps = float(move_eps)    # 判定"在移动"的最小位移
         self._lo = [None, None]
         self._hi = [None, None]
         self._last_raw = None
+        self._last_time = None             # 上次调用的时间戳（time.monotonic）
         # 活动区跨度下限（span floor）：决定"小幅手部移动"被放大的程度。
         # 小（如 0.22）→ 小动作也放大、远距离写满全屏；大（→1.0）→ 趋近直接绝对映射，
         # gain≈1、近距离画圆轻松且不丢触达。由 map() 的 span_floor 每帧更新，书写中冻结。
@@ -117,17 +119,19 @@ class ActiveRegionMapper:
         self._lo = [None, None]
         self._hi = [None, None]
         self._last_raw = None
+        self._last_time = None
         self._span_floor = float(self.min_span)
 
-    def _map_axis(self, axis, v, moving, update):
+    def _map_axis(self, axis, v, moving, update, dt):
         v = min(1.0, max(0.0, float(v)))
         lo, hi = self._lo[axis], self._hi[axis]
         if lo is None:
             lo = hi = v                       # 首帧：以当前点为活动区起点
         elif update:
+            contraction = self.contract * dt  # 按时间收缩，帧率无关
             if moving:
-                lo = min(v, lo + self.contract)   # 快速扩张 + 缓慢收缩
-                hi = max(v, hi - self.contract)
+                lo = min(v, lo + contraction)   # 快速扩张 + 缓慢收缩
+                hi = max(v, hi - contraction)
             else:
                 lo = min(v, lo)                   # 静止：只扩张、不收缩
                 hi = max(v, hi)
@@ -144,7 +148,7 @@ class ActiveRegionMapper:
         t = (t - self.margin) / denom                    # 应用边缘余量并拉伸到全屏
         return min(1.0, max(0.0, t))
 
-    def map(self, x_norm, y_norm, update=True, span_floor=None):
+    def map(self, x_norm, y_norm, update=True, span_floor=None, dt=None):
         """映射归一化手部坐标到全屏 [0,1]。
 
         update=True：持续校准活动区与 span_floor（悬停/就绪时）。
@@ -152,16 +156,26 @@ class ActiveRegionMapper:
             保证笔画稳定不漂移、不随掌宽抖动而中途改变灵敏度。
         span_floor∈(0,1.5]：有效跨度下限。近距离传 ~1.0 → 趋近直接绝对映射、gain≈1、
             画圆轻松且不丢触达；远距离传 ~0.22 → 小动作放大、写满全屏。None 则维持当前值。
+        dt：本次调用距上次的秒数。None 时自动用 time.monotonic() 计算。
+            收缩速率按秒计算，帧率无关。
         """
         if update and span_floor is not None:
             self._span_floor = max(0.05, min(1.5, float(span_floor)))
+        # 计算时间增量 dt（帧率无关收缩）
+        if dt is None:
+            now = time.monotonic()
+            if self._last_time is None:
+                dt = 1.0 / 30.0  # 首帧默认 1/30 秒
+            else:
+                dt = max(1e-6, min(1.0, now - self._last_time))  # clamp 防止异常 dt
+            self._last_time = now
         if self._last_raw is None:
             moving = True
         else:
             d = abs(x_norm - self._last_raw[0]) + abs(y_norm - self._last_raw[1])
             moving = d > self.move_eps
         self._last_raw = (x_norm, y_norm)
-        return self._map_axis(0, x_norm, moving, update), self._map_axis(1, y_norm, moving, update)
+        return self._map_axis(0, x_norm, moving, update, dt), self._map_axis(1, y_norm, moving, update, dt)
 
 
 def interp_tiers(x, points):
@@ -177,7 +191,7 @@ def interp_tiers(x, points):
         return points[0][1]
     if x >= points[-1][0]:
         return points[-1][1]
-    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+    for (x0, y0), (x1, y1) in zip(points, points[1:], strict=False):
         if x0 <= x <= x1:
             if x1 <= x0:
                 return y1
@@ -250,7 +264,7 @@ class MouseController:
         set_cursor_pos(new_x, new_y)
         self.last_pos = (new_x, new_y)
         return new_x, new_y
-    
+
     def left_down(self):
         """按下左键（不释放）。"""
         MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -280,10 +294,10 @@ class MouseController:
         time.sleep(0.05)
         self.left_click()
         return True
-    
+
     def scroll_wheel(self, amount=120):
         mouse_event_scroll(amount)
         return True
-    
+
     def reset(self):
         self.last_pos = None

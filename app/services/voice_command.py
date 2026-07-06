@@ -416,7 +416,7 @@ class VoiceCommandService:
         )
 
         # 读取完整关键词文件
-        with open(raw_file, "r", encoding="utf-8") as f:
+        with open(raw_file, encoding="utf-8") as f:
             all_lines = [line.strip() for line in f if line.strip()]
 
         # 筛选当前模式可用的关键词
@@ -544,11 +544,11 @@ class VoiceCommandService:
                             break
 
                 # 关键词处理在锁外执行（_handle_keyword 可能触发 action_callback
-                # → execute_action → _set_mode → on_mode_changed，需要重新获取锁）
+                # → execute_action → set_mode → on_mode_changed，需要重新获取锁）
                 if detected_keyword:
                     self._handle_keyword(detected_keyword)
 
-            except IOError as e:
+            except OSError as e:
                 logger.warning("麦克风读取错误: %s", e)
                 time.sleep(0.1)
             except Exception as e:

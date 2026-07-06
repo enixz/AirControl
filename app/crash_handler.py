@@ -81,7 +81,7 @@ def _thread_excepthook(args):
 def _install_qt_handler():
     """Qt 致命/严重消息也抓一份。无 PyQt6 时静默跳过。"""
     try:
-        from PyQt6.QtCore import qInstallMessageHandler, QtMsgType
+        from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
     except Exception:
         return
 

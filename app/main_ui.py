@@ -6,6 +6,12 @@ import winsound
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+from config_manager import ConfigManager
+from draw_toolbar import DrawToolbar
+from drawing_overlay import DrawingOverlay
+from modes import MODE_NAME_ZH, MODE_NAMES
+from mouse_cursor_overlay import MouseCursorOverlay
+from orchestrator import AirControlOrchestrator
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
@@ -20,17 +26,14 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
+    QWidget,
 )
-
-from config_manager import ConfigManager
-from drawing_overlay import DrawingOverlay
-from draw_toolbar import DrawToolbar
-from mouse_cursor_overlay import MouseCursorOverlay
+from runtime_paths import resource_path
 from services.camera import list_available_cameras
 from services.mouse_controller import MouseController
-from orchestrator import AirControlOrchestrator
-from runtime_paths import resource_path
+from version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +56,7 @@ class SettingsDialog(QDialog):
         ).start()
 
     def init_ui(self):
-        layout = QFormLayout()
+        # ---- 创建所有控件（属性名保持不变以兼容 AST 测试与 save_settings） ----
 
         # 摄像头选择
         self.camera_combo = QComboBox()
@@ -65,76 +68,113 @@ class SettingsDialog(QDialog):
         self.camera_combo.addItem(f"摄像头 {current_idx}（当前）", current_idx)
         self.camera_combo.addItem("正在检测其它摄像头…", -1)
         self.camera_combo.model().item(1).setEnabled(False)
-        layout.addRow("摄像头:", self.camera_combo)
 
         self.app_combo = QComboBox()
         self.app_combo.addItems(["PowerPoint", "WPS"])
         self.app_combo.setCurrentText(self.config.get("target_app"))
-        layout.addRow("控制目标软件:", self.app_combo)
 
         self.model_combo = QComboBox()
         self.model_combo.addItems(["Lite", "Heavy"])
         self.model_combo.setCurrentText(self.config.get("model_type"))
-        layout.addRow("手势模型精度:", self.model_combo)
 
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["presentation", "mouse", "draw"])
+        self.mode_combo.addItems(list(MODE_NAMES))
         self.mode_combo.setCurrentText(self.config.get("interaction_mode"))
-        layout.addRow("交互模式:", self.mode_combo)
 
         self.cd_spin = QSpinBox()
         self.cd_spin.setRange(500, 3000)
         self.cd_spin.setSingleStep(100)
         self.cd_spin.setValue(int(self.config.get("cooldown") * 1000))
         self.cd_spin.setSuffix(" ms")
-        layout.addRow("手势防抖(冷却):", self.cd_spin)
+        self.cd_spin.setToolTip("连续手势之间的最小间隔时间，避免一个动作被重复触发")
 
+        # 手势映射
+        gesture_actions = [
+            "next_slide", "prev_slide", "start_presentation",
+            "end_presentation", "switch_app",
+            "launch_voice_assistant", "hang_up_voice_assistant", "none",
+        ]
+
+        self.right_combo = QComboBox()
+        self.right_combo.addItems(gesture_actions)
+        self.right_combo.setCurrentText(self.config.get_mapping("SWIPE_RIGHT"))
+
+        self.left_combo = QComboBox()
+        self.left_combo.addItems(gesture_actions)
+        self.left_combo.setCurrentText(self.config.get_mapping("SWIPE_LEFT"))
+
+        self.up_combo = QComboBox()
+        self.up_combo.addItems(gesture_actions)
+        self.up_combo.setCurrentText(self.config.get_mapping("SWIPE_UP"))
+
+        self.down_combo = QComboBox()
+        self.down_combo.addItems(gesture_actions)
+        self.down_combo.setCurrentText(self.config.get_mapping("SWIPE_DOWN"))
+
+        self.fist_combo = QComboBox()
+        self.fist_combo.addItems(gesture_actions)
+        self.fist_combo.setCurrentText(self.config.get_mapping("FIST"))
+
+        self.thumb_combo = QComboBox()
+        self.thumb_combo.addItems(gesture_actions)
+        self.thumb_combo.setCurrentText(self.config.get_mapping("THUMB_UP"))
+
+        self.scissor_combo = QComboBox()
+        self.scissor_combo.addItems(gesture_actions)
+        self.scissor_combo.setCurrentText(self.config.get_mapping("SCISSOR"))
+
+        self.thumb_down_combo = QComboBox()
+        self.thumb_down_combo.addItems(gesture_actions)
+        self.thumb_down_combo.setCurrentText(self.config.get_mapping("THUMB_DOWN"))
+
+        # 鼠标
         self.sensitivity_spin = QSpinBox()
-        self.sensitivity_spin.setRange(10, 100)
+        self.sensitivity_spin.setRange(1, 200)
         self.sensitivity_spin.setValue(int(self.config.get("mouse_sensitivity")))
         self.sensitivity_spin.setSuffix(" %")
-        layout.addRow("鼠标灵敏度:", self.sensitivity_spin)
+        self.sensitivity_spin.setToolTip("鼠标模式下光标跟踪灵敏度，越高越跟手但越容易抖")
 
         self.edge_check = QCheckBox("边缘加速")
         self.edge_check.setChecked(bool(self.config.get("edge_acceleration_enabled")))
         self.edge_check.stateChanged.connect(self._on_edge_toggled)
-        layout.addRow(self.edge_check)
+        self.edge_check.setToolTip("光标靠近屏幕边缘时自动加速，便于访问任务栏和角落")
 
         self.edge_strength_spin = QSpinBox()
         self.edge_strength_spin.setRange(0, 100)
         self.edge_strength_spin.setValue(int(self.config.get("edge_acceleration_strength")))
         self.edge_strength_spin.setSuffix(" %")
         self.edge_strength_spin.setEnabled(self.edge_check.isChecked())
-        layout.addRow("边缘加速强度:", self.edge_strength_spin)
+        self.edge_strength_spin.setToolTip("边缘加速的强度，越大加速越明显")
 
         self.y_canvas_check = QCheckBox("Y 轴虚拟画布（推荐用于任务栏）")
         self.y_canvas_check.setChecked(bool(self.config.get("edge_y_canvas_enabled")))
-        layout.addRow(self.y_canvas_check)
+        self.y_canvas_check.setToolTip("在屏幕上下边缘扩展虚拟移动区域，让光标能到达任务栏")
 
         self.y_dz_bottom_spin = QSpinBox()
         self.y_dz_bottom_spin.setRange(0, 30)
         self.y_dz_bottom_spin.setValue(int(self.config.get("edge_y_canvas_deadzone_bottom")))
         self.y_dz_bottom_spin.setSuffix(" %")
-        layout.addRow("Y 轴底部死区:", self.y_dz_bottom_spin)
+        self.y_dz_bottom_spin.setToolTip("底部不响应虚拟画布的区域占比，避免误触任务栏")
 
         self.y_dz_top_spin = QSpinBox()
         self.y_dz_top_spin.setRange(0, 20)
         self.y_dz_top_spin.setValue(int(self.config.get("edge_y_canvas_deadzone_top")))
         self.y_dz_top_spin.setSuffix(" %")
-        layout.addRow("Y 轴顶部死区:", self.y_dz_top_spin)
+        self.y_dz_top_spin.setToolTip("顶部不响应虚拟画布的区域占比")
 
+        # 画笔
         self.pen_spin = QSpinBox()
-        self.pen_spin.setRange(1, 20)
+        self.pen_spin.setRange(1, 100)
         self.pen_spin.setValue(int(self.config.get("pen_width")))
-        layout.addRow("画笔粗细:", self.pen_spin)
+        self.pen_spin.setToolTip("板书模式下的笔触宽度（像素），可配合笔粗距离自适应使用")
 
+        # 语音
         self.voice_combo = QComboBox()
         self.voice_combo.addItem("豆包", "doubao")
         self.voice_combo.addItem("通义千问", "qianwen")
         idx = self.voice_combo.findData(self.config.get("voice_assistant"))
         if idx >= 0:
             self.voice_combo.setCurrentIndex(idx)
-        layout.addRow("语音助手:", self.voice_combo)
 
         self.zoom_sr_combo = QComboBox()
         self.zoom_sr_combo.addItem("自动调整 (Auto)", "auto")
@@ -146,66 +186,110 @@ class SettingsDialog(QDialog):
         idx_sr = self.zoom_sr_combo.findData(sr_val)
         if idx_sr >= 0:
             self.zoom_sr_combo.setCurrentIndex(idx_sr)
-        layout.addRow("手势缩放超分引擎:", self.zoom_sr_combo)
+        self.zoom_sr_combo.setToolTip("远距离手势识别的超分辨率引擎，Auto 自动按距离切换")
 
-        gesture_actions = [
-            "next_slide", "prev_slide", "start_presentation",
-            "end_presentation", "switch_app",
-            "launch_voice_assistant", "hang_up_voice_assistant", "none",
-        ]
+        # ---- 用 QTabWidget 分组 ----
+        tabs = QTabWidget()
 
-        self.right_combo = QComboBox()
-        self.right_combo.addItems(gesture_actions)
-        self.right_combo.setCurrentText(self.config.get_mapping("SWIPE_RIGHT"))
-        layout.addRow("右挥动作映射:", self.right_combo)
+        # Tab 1: 基础
+        tab_basic = QFormLayout()
+        tab_basic.addRow("摄像头:", self.camera_combo)
+        tab_basic.addRow("控制目标软件:", self.app_combo)
+        tab_basic.addRow("手势模型精度:", self.model_combo)
+        tab_basic.addRow("交互模式:", self.mode_combo)
+        w_basic = QWidget()
+        w_basic.setLayout(tab_basic)
+        tabs.addTab(w_basic, "基础")
 
-        self.left_combo = QComboBox()
-        self.left_combo.addItems(gesture_actions)
-        self.left_combo.setCurrentText(self.config.get_mapping("SWIPE_LEFT"))
-        layout.addRow("左挥动作映射:", self.left_combo)
+        # Tab 2: 手势
+        tab_gesture = QFormLayout()
+        tab_gesture.addRow("手势防抖(冷却):", self.cd_spin)
+        tab_gesture.addRow("右挥动作映射:", self.right_combo)
+        tab_gesture.addRow("左挥动作映射:", self.left_combo)
+        tab_gesture.addRow("上挥动作映射:", self.up_combo)
+        tab_gesture.addRow("下挥动作映射:", self.down_combo)
+        tab_gesture.addRow("握拳动作映射:", self.fist_combo)
+        tab_gesture.addRow("点赞动作映射:", self.thumb_combo)
+        tab_gesture.addRow("剪刀手动作映射:", self.scissor_combo)
+        tab_gesture.addRow("拇指向下动作映射:", self.thumb_down_combo)
+        w_gesture = QWidget()
+        w_gesture.setLayout(tab_gesture)
+        tabs.addTab(w_gesture, "手势")
 
-        self.up_combo = QComboBox()
-        self.up_combo.addItems(gesture_actions)
-        self.up_combo.setCurrentText(self.config.get_mapping("SWIPE_UP"))
-        layout.addRow("上挥动作映射:", self.up_combo)
+        # Tab 3: 鼠标
+        tab_mouse = QFormLayout()
+        tab_mouse.addRow("鼠标灵敏度:", self.sensitivity_spin)
+        tab_mouse.addRow(self.edge_check)
+        tab_mouse.addRow("边缘加速强度:", self.edge_strength_spin)
+        tab_mouse.addRow(self.y_canvas_check)
+        tab_mouse.addRow("Y 轴底部死区:", self.y_dz_bottom_spin)
+        tab_mouse.addRow("Y 轴顶部死区:", self.y_dz_top_spin)
+        w_mouse = QWidget()
+        w_mouse.setLayout(tab_mouse)
+        tabs.addTab(w_mouse, "鼠标")
 
-        self.down_combo = QComboBox()
-        self.down_combo.addItems(gesture_actions)
-        self.down_combo.setCurrentText(self.config.get_mapping("SWIPE_DOWN"))
-        layout.addRow("下挥动作映射:", self.down_combo)
+        # Tab 4: 画笔
+        tab_pen = QFormLayout()
+        tab_pen.addRow("画笔粗细:", self.pen_spin)
+        w_pen = QWidget()
+        w_pen.setLayout(tab_pen)
+        tabs.addTab(w_pen, "画笔")
 
-        self.fist_combo = QComboBox()
-        self.fist_combo.addItems(gesture_actions)
-        self.fist_combo.setCurrentText(self.config.get_mapping("FIST"))
-        layout.addRow("握拳动作映射:", self.fist_combo)
+        # Tab 5: 语音
+        tab_voice = QFormLayout()
+        tab_voice.addRow("语音助手:", self.voice_combo)
+        tab_voice.addRow("手势缩放超分引擎:", self.zoom_sr_combo)
+        w_voice = QWidget()
+        w_voice.setLayout(tab_voice)
+        tabs.addTab(w_voice, "语音")
 
-        self.thumb_combo = QComboBox()
-        self.thumb_combo.addItems(gesture_actions)
-        self.thumb_combo.setCurrentText(self.config.get_mapping("THUMB_UP"))
-        layout.addRow("点赞动作映射:", self.thumb_combo)
-
-        self.scissor_combo = QComboBox()
-        self.scissor_combo.addItems(gesture_actions)
-        self.scissor_combo.setCurrentText(self.config.get_mapping("SCISSOR"))
-        layout.addRow("剪刀手动作映射:", self.scissor_combo)
-
-        self.thumb_down_combo = QComboBox()
-        self.thumb_down_combo.addItems(gesture_actions)
-        self.thumb_down_combo.setCurrentText(self.config.get_mapping("THUMB_DOWN"))
-        layout.addRow("拇指向下动作映射:", self.thumb_down_combo)
-
+        # ---- 底部按钮 ----
         btn_layout = QHBoxLayout()
         save_btn = QPushButton("保存")
         save_btn.clicked.connect(self.save_settings)
         cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
+        reset_btn = QPushButton("恢复默认")
+        reset_btn.setToolTip("将所有设置恢复为默认值（需点击保存生效）")
+        reset_btn.clicked.connect(self._reset_defaults)
+        btn_layout.addWidget(reset_btn)
+        btn_layout.addStretch()
         btn_layout.addWidget(save_btn)
         btn_layout.addWidget(cancel_btn)
 
         main_layout = QVBoxLayout()
-        main_layout.addLayout(layout)
+        main_layout.addWidget(tabs)
         main_layout.addLayout(btn_layout)
         self.setLayout(main_layout)
+
+    def _reset_defaults(self):
+        """将所有设置控件恢复为默认值（不立即写入 config，需点保存生效）。"""
+        defaults = self.config.default_config
+        self.app_combo.setCurrentText(defaults.get("target_app", "WPS"))
+        self.model_combo.setCurrentText(defaults.get("model_type", "Heavy"))
+        self.mode_combo.setCurrentText(defaults.get("interaction_mode", "mouse"))
+        self.cd_spin.setValue(int(defaults.get("cooldown", 1.0) * 1000))
+        self.sensitivity_spin.setValue(int(defaults.get("mouse_sensitivity", 40)))
+        self.edge_check.setChecked(bool(defaults.get("edge_acceleration_enabled", True)))
+        self.edge_strength_spin.setValue(int(defaults.get("edge_acceleration_strength", 100)))
+        self.y_canvas_check.setChecked(bool(defaults.get("edge_y_canvas_enabled", True)))
+        self.y_dz_bottom_spin.setValue(int(defaults.get("edge_y_canvas_deadzone_bottom", 18)))
+        self.y_dz_top_spin.setValue(int(defaults.get("edge_y_canvas_deadzone_top", 10)))
+        self.pen_spin.setValue(int(defaults.get("pen_width", 20)))
+        idx = self.voice_combo.findData(defaults.get("voice_assistant", "doubao"))
+        if idx >= 0:
+            self.voice_combo.setCurrentIndex(idx)
+        idx_sr = self.zoom_sr_combo.findData(defaults.get("zoom_sr_engine", "auto"))
+        if idx_sr >= 0:
+            self.zoom_sr_combo.setCurrentIndex(idx_sr)
+        for combo, key in [
+            (self.right_combo, "SWIPE_RIGHT"), (self.left_combo, "SWIPE_LEFT"),
+            (self.up_combo, "SWIPE_UP"), (self.down_combo, "SWIPE_DOWN"),
+            (self.fist_combo, "FIST"), (self.thumb_combo, "THUMB_UP"),
+            (self.scissor_combo, "SCISSOR"), (self.thumb_down_combo, "THUMB_DOWN"),
+        ]:
+            default_action = defaults.get("gesture_mapping", {}).get(key, "none")
+            combo.setCurrentText(default_action)
 
     def _on_edge_toggled(self, state):
         self.edge_strength_spin.setEnabled(state == Qt.CheckState.Checked.value)
@@ -285,7 +369,7 @@ class SettingsDialog(QDialog):
 class FloatingWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        
+
         # 1. 实例化纯 UI 渲染相关的 overlays 与基础配置
         self.config = ConfigManager()
         self.overlay = DrawingOverlay(self, pen_width=self.config.get("pen_width"))
@@ -304,25 +388,28 @@ class FloatingWindow(QMainWindow):
         )
 
         # 3. 实例化 Orchestrator (编排控制器) 处理所有的后台服务和业务逻辑
+        # 显式依赖注入：overlay/cursor_overlay/toolbar/hwnd/config/mouse 全部通过参数传入，
+        # 不再通过 parent 反向读取，便于测试 mock 和生命周期管理。
         self.orchestrator = AirControlOrchestrator(
             self.overlay, self.cursor_overlay, self.toolbar,
-            hwnd=int(self.winId()), parent=self, config=self.config
+            hwnd=int(self.winId()), parent=self, config=self.config, mouse=self.mouse
         )
-        # 单一配置数据源引用
-        self.config = self.orchestrator.config
-        
+
         self.init_ui()
         self._connect_toolbar()
-        
+
         # 4. 关联 Orchestrator 核心业务流信号
         self.orchestrator.frame_processed.connect(self._on_frame_processed)
         self.orchestrator.voice_status_updated.connect(self._on_voice_status_updated)
         self.orchestrator.fps_updated.connect(self._on_fps_updated)
         self.orchestrator.mode_changed.connect(self._on_mode_changed)
+        self.orchestrator.status_updated.connect(self._on_status_updated)
         self.orchestrator.minimize_requested.connect(self.showMinimized)
         self.orchestrator.restore_requested.connect(self._on_restore_requested)
 
         self._current_fps = 0.0
+        self._last_mode_text = ""   # 缓存 mode_label 文本，避免每帧 setText
+        self._last_hint_text = ""   # 缓存 hint_label 文本，避免每帧 setText
         self.drag_pos = None
 
     def init_ui(self):
@@ -330,6 +417,7 @@ class FloatingWindow(QMainWindow):
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowTitle(f"AirControl v{__version__}")
 
         try:
             scale = float(self.config.get("floating_window_scale") or 1.5)
@@ -374,6 +462,9 @@ class FloatingWindow(QMainWindow):
         self.mode_label = QLabel()
         self.mode_label.setFixedHeight(s(30))
         self.mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mode_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mode_label.setToolTip("点击切换模式（或按 F2/F3/F4）")
+        self.mode_label.mousePressEvent = lambda ev: self._cycle_mode()
         self.mode_label.setStyleSheet(f"""
             QLabel {{
                 color: white;
@@ -382,6 +473,9 @@ class FloatingWindow(QMainWindow):
                 font-size: {s(15)}px;
                 font-weight: bold;
                 padding: 1px 6px;
+            }}
+            QLabel:hover {{
+                background-color: rgba(0, 0, 0, 200);
             }}
         """)
 
@@ -449,6 +543,23 @@ class FloatingWindow(QMainWindow):
         """)
         main_layout.addWidget(self.hint_label)
 
+        # 动态状态标签：显示 Orchestrator 发射的实时状态（书写中/未检测到手/清屏进度/推理错误等）
+        self.status_label = QLabel()
+        self.status_label.setFixedHeight(s(22))
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setStyleSheet(f"""
+            QLabel {{
+                color: #39ff14;
+                background-color: rgba(0, 0, 0, 210);
+                border-radius: 6px;
+                font-size: {s(12)}px;
+                font-weight: bold;
+                padding: 2px 6px;
+            }}
+        """)
+        self._status_color_cache = (0, 255, 0)
+        main_layout.addWidget(self.status_label)
+
         # 角落显示当前摄像头分辨率：浮层徽标（不进布局），左上角紧贴顶栏下方。
         # 文字由 _on_frame_processed 按实际帧尺寸刷新，故反映真实生效分辨率而非 config。
         self.res_label = QLabel(self.video_label)
@@ -466,7 +577,13 @@ class FloatingWindow(QMainWindow):
         self.res_label.hide()  # 收到第一帧后再显示
         self._res_text = ""
 
-        screen = QApplication.primaryScreen().geometry()
+        # 默认定位到鼠标光标所在屏幕的左下角（多显示器场景下跟随用户操作屏），
+        # 找不到光标时回退主屏。
+        from PyQt6.QtGui import QCursor
+        cursor_screen = QApplication.screenAt(QCursor.pos())
+        if cursor_screen is None:
+            cursor_screen = QApplication.primaryScreen()
+        screen = cursor_screen.geometry()
         self._default_x = screen.left() + 10
         self._default_y = screen.bottom() - self.height() - 10
 
@@ -477,7 +594,7 @@ class FloatingWindow(QMainWindow):
         self.toolbar.clear_requested.connect(self._on_toolbar_clear)
         self.toolbar.shape_correction_toggled.connect(self.overlay.set_shape_correction_enabled)
         self.overlay.undo_changed.connect(self.toolbar.set_undo_enabled)
-        
+
         # 实时字幕写满屏幕时自动停止听写（由 Orchestrator 处理）
         self.overlay.caption_full.connect(self.orchestrator._on_caption_full)
 
@@ -535,7 +652,7 @@ class FloatingWindow(QMainWindow):
         qt_image = QImage(
             frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888
         ).copy()
-        
+
         self.video_label.setPixmap(
             QPixmap.fromImage(qt_image).scaled(
                 self.video_label.width(),
@@ -544,8 +661,15 @@ class FloatingWindow(QMainWindow):
             )
         )
         # 模式标签上直接显示实时帧率（_current_fps 由 fps_updated 每秒刷新），便于现场观察卡顿
-        self.mode_label.setText(f"{self._mode_name_zh()}　{self._current_fps:.0f} FPS")
-        self.hint_label.setText(self._mode_hint_zh())
+        # 仅在文本变化时 setText，避免每帧触发 Qt 重绘
+        mode_text = f"{self._mode_name_zh()}　{self._current_fps:.0f} FPS"
+        if mode_text != self._last_mode_text:
+            self._last_mode_text = mode_text
+            self.mode_label.setText(mode_text)
+        hint_text = self._mode_hint_zh()
+        if hint_text != self._last_hint_text:
+            self._last_hint_text = hint_text
+            self.hint_label.setText(hint_text)
 
         # 角落分辨率徽标：仅在尺寸变化时刷新（避免每帧 adjustSize/raise_）
         res_text = f"{w}×{h}"
@@ -559,8 +683,10 @@ class FloatingWindow(QMainWindow):
     def _on_voice_status_updated(self, text):
         if not hasattr(self, "voice_label") or self.voice_label is None:
             return
+        if self.voice_label.text() == text:
+            return
         self.voice_label.setText(text)
-        
+
         # 根据状态文本前缀应用不同的样式
         if text.startswith("🎤 语音开"):
             self.voice_label.setStyleSheet("""
@@ -602,6 +728,34 @@ class FloatingWindow(QMainWindow):
     def _on_mode_changed(self, mode_name):
         self._refresh_voice_tooltip()
 
+    def _on_status_updated(self, text, color):
+        """显示 Orchestrator 发射的实时状态文字（带颜色）。
+
+        信号每帧可能多次发射，仅在实际变化时刷新以避免无谓重绘。
+        """
+        if not hasattr(self, "status_label") or self.status_label is None:
+            return
+        if self.status_label.text() == text and self._status_color_cache == color:
+            return
+        self.status_label.setText(text)
+        self._status_color_cache = color
+        # 将 RGB 元组转为 hex 颜色
+        try:
+            r, g, b = int(color[0]), int(color[1]), int(color[2])
+            hex_color = f"#{r:02x}{g:02x}{b:02x}"
+        except (TypeError, IndexError, ValueError):
+            hex_color = "#00ff88"
+        self.status_label.setStyleSheet(f"""
+            QLabel {{
+                color: {hex_color};
+                background-color: rgba(0, 0, 0, 210);
+                border-radius: 6px;
+                font-size: {self._ui_scale * 12:.0f}px;
+                font-weight: bold;
+                padding: 2px 6px;
+            }}
+        """)
+
     def _on_restore_requested(self):
         if self.isMinimized():
             self.showNormal()
@@ -611,15 +765,11 @@ class FloatingWindow(QMainWindow):
         self.activateWindow()
 
     def _mode_name_zh(self):
-        mode = self.orchestrator.mode_manager.current_mode_name
-        return {
-            "presentation": "演示模式",
-            "mouse": "鼠标模式",
-            "draw": "板书模式",
-        }.get(mode, "未知模式")
+        mode = self.orchestrator.current_mode_name
+        return MODE_NAME_ZH.get(mode, "未知模式")
 
     def _mode_hint_zh(self):
-        mode = self.orchestrator.mode_manager.current_mode_name
+        mode = self.orchestrator.current_mode_name
         if mode == "mouse":
             return "🤟保持切模式 | 中指移光标 | 捏食指=左键 | 捏中指=右键 | 剪刀手滚动"
         elif mode == "draw":
@@ -630,7 +780,7 @@ class FloatingWindow(QMainWindow):
     # ------------------------------------------------------------------
     # 语音指令帮助提示 (Dialog & Tooltip)
     # ------------------------------------------------------------------
-    
+
     _VOICE_COMMANDS_BY_MODE = {
         "global": [
             ("召唤豆包", "呼出豆包 AI 助手"),
@@ -660,8 +810,8 @@ class FloatingWindow(QMainWindow):
     def _refresh_voice_tooltip(self):
         if not hasattr(self, "voice_label") or self.voice_label is None:
             return
-        mode = self.orchestrator.mode_manager.current_mode_name if hasattr(self, "orchestrator") else "presentation"
-        mode_zh = {"presentation": "演示模式", "mouse": "鼠标模式", "draw": "板书模式"}.get(mode, mode)
+        mode = self.orchestrator.current_mode_name if hasattr(self, "orchestrator") else "presentation"
+        mode_zh = MODE_NAME_ZH.get(mode, mode)
 
         lines = [f"【{mode_zh}】"]
         for kw, desc in self._VOICE_COMMANDS_BY_MODE.get(mode, []):
@@ -682,7 +832,7 @@ class FloatingWindow(QMainWindow):
         self._open_voice_cheatsheet()
 
     def _open_voice_cheatsheet(self):
-        current_mode = self.orchestrator.mode_manager.current_mode_name
+        current_mode = self.orchestrator.current_mode_name
 
         dlg = QDialog(self)
         dlg.setWindowTitle("语音指令")
@@ -834,12 +984,44 @@ class FloatingWindow(QMainWindow):
             self.move(self._default_x, self._default_y)
         super().show()
 
+    def _cycle_mode(self):
+        """点击模式标签时循环切换 演示→鼠标→板书→演示。"""
+        current = self.orchestrator.current_mode_name
+        try:
+            idx = MODE_NAMES.index(current)
+        except ValueError:
+            idx = 0
+        next_mode = MODE_NAMES[(idx + 1) % len(MODE_NAMES)]
+        self.orchestrator.set_mode(next_mode)
+
+    # F2/F3/F4 → 模式名映射，与 MODE_NAMES 顺序一致
+    _MODE_SHORTCUTS = {
+        Qt.Key.Key_F2: "presentation",
+        Qt.Key.Key_F3: "mouse",
+        Qt.Key.Key_F4: "draw",
+    }
+
     def keyPressEvent(self, event):
-        """F1 切换调试覆盖层（开发/排查时用）。"""
-        if event.key() == Qt.Key.Key_F1:
+        """键盘快捷键：F1 调试覆盖层，F2/F3/F4 切换模式，F5 录制/停止。"""
+        key = event.key()
+        if key == Qt.Key.Key_F1:
             if hasattr(self.orchestrator, "inference_worker"):
                 new_state = not self.orchestrator.inference_worker.debug_overlay
                 self.orchestrator.inference_worker.set_debug_overlay(new_state)
+            event.accept()
+            return
+        if key in self._MODE_SHORTCUTS:
+            self.orchestrator.set_mode(self._MODE_SHORTCUTS[key])
+            event.accept()
+            return
+        if key == Qt.Key.Key_F5:
+            now_recording, path = self.orchestrator.toggle_recording()
+            if now_recording:
+                self.setWindowTitle(f"AirControl v{__version__} [REC: {os.path.basename(path)}]")
+                logger.info("F5 录制开始 -> %s", path)
+            else:
+                self.setWindowTitle(f"AirControl v{__version__}")
+                logger.info("F5 录制停止 -> %s", path)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -922,6 +1104,12 @@ def main():
             return 0
         except Exception as e:
             logger.warning("提权请求被拒绝或失败: %s，将以普通权限启动。", e)
+
+    # 统一日志配置：所有模块日志写入 gesture.log（在崩溃捕获之前，确保 critical 也能落盘）
+    from log_config import setup_logging
+    setup_logging()
+
+    logger.info("AirControl v%s 启动", __version__)
 
     # 崩溃捕获：原生段错误 / 主线程 / 工作线程 / Qt 致命消息 → crash.log
     from crash_handler import install as install_crash_handler

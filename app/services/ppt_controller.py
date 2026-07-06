@@ -229,7 +229,7 @@ class PptController:
         win32api.keybd_event(win32con.VK_PRIOR, 0, win32con.KEYEVENTF_KEYUP, 0)
         logger.info("PPT操作: 上一页 (PageUp)")
         return True
-        
+
     def start_presentation(self):
         self._ensure_app_active()
         # 模拟 F5
@@ -237,7 +237,7 @@ class PptController:
         win32api.keybd_event(win32con.VK_F5, 0, win32con.KEYEVENTF_KEYUP, 0)
         logger.info("PPT操作: 开始播放 (F5)")
         return True
-        
+
     def end_presentation(self):
         self._ensure_app_active()
         # 模拟 ESC
@@ -245,7 +245,7 @@ class PptController:
         win32api.keybd_event(win32con.VK_ESCAPE, 0, win32con.KEYEVENTF_KEYUP, 0)
         logger.info("PPT操作: 结束播放 (Esc)")
         return True
-        
+
     def _launch_by_id(self, app_id, display_name):
         """通用启动逻辑：自动定位 + os.startfile 启动。"""
         exe = find_executable(app_id)

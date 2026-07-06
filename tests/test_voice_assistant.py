@@ -2,18 +2,26 @@
 Unit tests for VoiceAssistantService focusing on the focus restoration bug fix.
 Tests the _restore_aircontrol_focus method and the try/finally patterns in activate() and hang_up().
 """
-import unittest
-from unittest.mock import patch, MagicMock
-import sys
+import atexit
 import os
+import sys
+import types
+import unittest
+from unittest.mock import MagicMock, patch
 
 # Add app directory to path
 _app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app')
 sys.path.insert(0, _app_dir)
 sys.path.insert(0, os.path.join(_app_dir, 'services'))
 
+# 保存被替换的原始模块，进程退出时恢复，避免污染同进程后续测试
+_mocked_modules = {}
+
+def _save_and_mock(name, mock_obj):
+    _mocked_modules[name] = sys.modules.get(name)
+    sys.modules[name] = mock_obj
+
 # Mock ctypes / Windows API before importing mouse_controller
-import types
 mock_ctypes = types.ModuleType('ctypes')
 mock_ctypes.wintypes = types.ModuleType('ctypes.wintypes')
 mock_windll = types.ModuleType('ctypes.windll')
@@ -27,8 +35,8 @@ mock_ctypes.windll = mock_windll
 mock_ctypes.byref = lambda x: x
 mock_ctypes.wintypes.POINT = lambda: type('POINT', (), {'x': 0, 'y': 0})()
 
-sys.modules['ctypes'] = mock_ctypes
-sys.modules['ctypes.wintypes'] = mock_ctypes.wintypes
+_save_and_mock('ctypes', mock_ctypes)
+_save_and_mock('ctypes.wintypes', mock_ctypes.wintypes)
 
 # Create a proper win32con mock with integer constants
 mock_win32con = types.ModuleType('win32con')
@@ -39,16 +47,54 @@ mock_win32con.SW_SHOW = 5
 mock_win32con.VK_MENU = 0x12
 mock_win32con.VK_ESCAPE = 0x1B
 mock_win32con.KEYEVENTF_KEYUP = 0x0002
-sys.modules['win32con'] = mock_win32con
+_save_and_mock('win32con', mock_win32con)
 
-for mod_name in ['win32api', 'win32gui', 'win32process', 'psutil', 'winreg']:
-    sys.modules[mod_name] = MagicMock()
+# 运行时按需 mock 的 win32/系统模块；除在导入期安装外，每个测试的 setUp 会重装，
+# 使本模块对其他测试 tearDownClass“还原真实 pywin32”的污染免疫（详见 _reinstall_win32_mocks）。
+_RUNTIME_MOCK_NAMES = ['win32api', 'win32gui', 'win32process', 'psutil', 'winreg']
+for mod_name in _RUNTIME_MOCK_NAMES:
+    _save_and_mock(mod_name, MagicMock())
+
+
+def _reinstall_win32_mocks():
+    """重装运行时 win32 mock：win32con 复用常量对象，其余每次新建 MagicMock。
+
+    可重复调用，在每个测试 setUp 里调用，确保无论前序测试如何改动 sys.modules
+    （例如把 win32gui pop 掉导致后续 import 加载真实 pywin32），本模块的测试始终
+    拿到干净的 MagicMock，且各测试间互不串状态。
+
+    voice_assistant.py 在导入期已 `import win32gui` 等并绑定为模块属性，被测代码
+    用的是这些属性；测试里 `import win32gui` 取的是 sys.modules。两者必须是同一对象，
+    因此同步把 voice_assistant 的模块属性指向新 mock。
+    """
+    import voice_assistant
+    sys.modules['win32con'] = mock_win32con
+    if hasattr(voice_assistant, 'win32con'):
+        voice_assistant.win32con = mock_win32con
+    for _name in _RUNTIME_MOCK_NAMES:
+        _mock = MagicMock()
+        sys.modules[_name] = _mock
+        if hasattr(voice_assistant, _name):
+            setattr(voice_assistant, _name, _mock)
+
+# 进程退出时恢复被 mock 的模块
+def _restore_mocked_modules():
+    for name, original in _mocked_modules.items():
+        if original is not None:
+            sys.modules[name] = original
+        else:
+            sys.modules.pop(name, None)
+
+atexit.register(_restore_mocked_modules)
 
 from voice_assistant import VoiceAssistantService, _bring_to_front
 
 
 class TestVoiceAssistantService(unittest.TestCase):
     """Test VoiceAssistantService with focus on the bug fix."""
+
+    def setUp(self):
+        _reinstall_win32_mocks()
 
     def test_init_sets_aircontrol_hwnd_none(self):
         """__init__ should initialize aircontrol_hwnd to None."""
@@ -167,9 +213,9 @@ class TestVoiceAssistantService(unittest.TestCase):
         svc = VoiceAssistantService()
         svc.aircontrol_hwnd = 12345
 
-        with patch('voice_assistant._find_and_focus', side_effect=Exception("unexpected")), \
+        with patch('voice_assistant._find_and_focus', side_effect=RuntimeError("unexpected")), \
              patch.object(svc, '_restore_aircontrol_focus') as mock_restore:
-            with self.assertRaises(Exception):
+            with self.assertRaises(RuntimeError):
                 svc.activate()
             mock_restore.assert_called_once()
 
@@ -178,9 +224,9 @@ class TestVoiceAssistantService(unittest.TestCase):
         svc = VoiceAssistantService()
         svc.aircontrol_hwnd = 12345
 
-        with patch('voice_assistant._is_process_running', side_effect=Exception("unexpected")), \
+        with patch('voice_assistant._is_process_running', side_effect=RuntimeError("unexpected")), \
              patch.object(svc, '_restore_aircontrol_focus') as mock_restore:
-            with self.assertRaises(Exception):
+            with self.assertRaises(RuntimeError):
                 svc.hang_up()
             mock_restore.assert_called_once()
 

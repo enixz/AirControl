@@ -11,7 +11,6 @@ import re
 import threading
 
 import numpy as np
-
 from runtime_paths import resource_path
 
 try:
@@ -63,6 +62,22 @@ class VoiceDictationService:
         model_file = self._resolve_model_file()
         tokens_file = os.path.join(self._model_dir, "tokens.txt")
         return model_file is not None and os.path.isfile(tokens_file)
+
+    def stop(self):
+        """释放 SenseVoice ONNX recognizer，允许 GC 回收模型内存。
+
+        释放后若再次调用 dictate()，_ensure_loaded() 会重新加载模型。
+        """
+        with self._load_lock:
+            if self._recognizer is not None:
+                try:
+                    # sherpa-onnx OfflineRecognizer 没有显式 close，删除引用让 GC 回收
+                    del self._recognizer
+                except Exception:
+                    pass
+                self._recognizer = None
+            # 重置加载失败标志，允许下次重新尝试加载
+            self._load_failed = False
 
     def dictate(self, samples, sample_rate=None):
         """对一段音频做语音识别，返回纯文本（已去除元标签）。

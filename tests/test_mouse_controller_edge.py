@@ -2,10 +2,18 @@
 T2: MouseController 向后兼容性单元测试
 验证默认构造、旧式调用、to_screen 行为、热更新、move_to_normalized 委托。
 """
+import atexit
 import os
 import sys
 import types
 import unittest
+
+# 保存被替换的原始模块，进程退出时恢复
+_mocked_modules = {}
+
+def _save_and_mock(name, mock_obj):
+    _mocked_modules[name] = sys.modules.get(name)
+    sys.modules[name] = mock_obj
 
 # Mock ctypes / Windows API before importing mouse_controller
 mock_ctypes = types.ModuleType('ctypes')
@@ -26,14 +34,24 @@ mock_ctypes.windll = mock_windll
 mock_ctypes.byref = lambda x: x
 mock_ctypes.wintypes.POINT = lambda: type('POINT', (), {'x': 0, 'y': 0})()
 
-sys.modules['ctypes'] = mock_ctypes
-sys.modules['ctypes.wintypes'] = mock_ctypes.wintypes
+_save_and_mock('ctypes', mock_ctypes)
+_save_and_mock('ctypes.wintypes', mock_ctypes.wintypes)
+
+def _restore_mocked_modules():
+    for name, original in _mocked_modules.items():
+        if original is not None:
+            sys.modules[name] = original
+        else:
+            sys.modules.pop(name, None)
+
+atexit.register(_restore_mocked_modules)
 
 _app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app')
 sys.path.insert(0, _app_dir)
 sys.path.insert(0, os.path.join(_app_dir, 'services'))
 
 import mouse_controller as _mc_module
+
 # 强制替换已加载模块中的 user32 引用，防止模块缓存导致 mock 不生效
 _mc_module.user32 = mock_user32
 

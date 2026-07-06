@@ -1,0 +1,44 @@
+# AirControl - 依赖锁文件（可复现安装）
+#
+# 本文件由当前已知可工作的环境快照生成，所有版本已锁定。
+# install.bat 默认使用本文件安装，确保环境一致。
+#
+# 更新方式（需要网络）：
+#   uv pip compile requirements.txt -o requirements.lock
+#
+# ============================================================
+# 直接依赖（来源：requirements.txt）
+# ============================================================
+numpy==2.3.0
+opencv-contrib-python==4.13.0.92
+mediapipe==0.10.33
+PyQt6==6.11.0
+pywin32==311
+psutil==7.2.2
+sherpa_onnx==1.13.2
+sounddevice==0.5.5
+onnxruntime-directml==1.24.4
+
+# ============================================================
+# 传递依赖（自动解析，勿手动编辑）
+# ============================================================
+absl-py==2.4.0              # mediapipe
+cffi==2.0.0                 # sounddevice
+contourpy==1.3.2            # matplotlib
+cycler==0.12.1              # matplotlib
+flatbuffers==25.12.19       # mediapipe, onnxruntime-directml
+fonttools==4.58.4           # matplotlib
+kiwisolver==1.4.8           # matplotlib
+matplotlib==3.10.3          # mediapipe
+mpmath==1.3.0               # sympy
+packaging==24.2             # onnxruntime-directml
+pillow==12.2.0              # matplotlib
+protobuf==7.34.1            # onnxruntime-directml
+pycparser==2.22             # cffi
+pyparsing==3.2.3            # matplotlib
+PyQt6-Qt6==6.11.1           # PyQt6
+PyQt6_sip==13.11.1          # PyQt6
+python-dateutil==2.9.0.post0  # matplotlib
+sherpa-onnx-core==1.13.2    # sherpa_onnx
+six==1.17.0                 # python-dateutil
+sympy==1.14.0               # onnxruntime-directml

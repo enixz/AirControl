@@ -1,8 +1,8 @@
-import math
-import time
 import ctypes
 import ctypes.wintypes
 import logging
+import math
+import time
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QBrush, QColor, QPainter, QPen
@@ -35,6 +35,8 @@ class MouseCursorOverlay(QWidget):
     CLICK_DURATION = 0.4
     SCROLL_DURATION = 0.35
     HOLD_PULSE_FREQ = 10   # Hz
+    _TIMER_FAST_MS = 16    # 有动画时的定时器间隔（~60 FPS）
+    _TIMER_IDLE_MS = 50    # 无动画时的定时器间隔（仅 topmost 重应用，~20 Hz）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -109,13 +111,19 @@ class MouseCursorOverlay(QWidget):
         except Exception as e:
             logging.error("_make_click_through failed: %s", e)
 
-    def show_fullscreen(self):
+    def show_fullscreen(self, screen=None):
         """显示全屏覆盖层。**必须在 show() 之后再设置 WS_EX_TRANSPARENT**，
         否则 Qt 的 show() 会覆盖掉我们手动设置的扩展样式。
-        每次显示前重置 _click_through_applied，防止隐藏后再显示时 Win32 样式丢失。"""
+        每次显示前重置 _click_through_applied，防止隐藏后再显示时 Win32 样式丢失。
+
+        参数 screen 可选：
+        - None（默认）：自动选择鼠标光标所在屏幕，无光标时回退主屏
+        - QScreen 实例：覆盖该屏幕
+        - int（屏幕索引）：覆盖 QApplication.screens()[index]
+        """
         self._click_through_applied = False  # 强制重新应用 Win32 样式
-        screen = QApplication.primaryScreen().geometry()
-        self.setGeometry(screen)
+        target = self._resolve_screen(screen)
+        self.setGeometry(target.geometry())
         self.show()
         self.raise_()
         # 关键：show() 之后再设置点击穿透
@@ -125,7 +133,25 @@ class MouseCursorOverlay(QWidget):
         # 导致 _system_cursor_hidden 标志与实际状态不同步。
         self._system_cursor_hidden = False
         self._hide_system_cursor()
-        self._timer.start(16)  # 约60 FPS，用于更新点击/滚动动画
+        self._timer.start(self._TIMER_IDLE_MS)  # 无动画时用慢速，动画触发时自动加速
+
+    @staticmethod
+    def _resolve_screen(screen):
+        """将 screen 参数解析为 QScreen 实例。
+
+        None → 鼠标光标所在屏幕（多显示器场景下覆盖用户正在操作的屏幕），
+        找不到光标时回退主屏。
+        """
+        if screen is None:
+            from PyQt6.QtGui import QCursor
+            cursor_screen = QApplication.screenAt(QCursor.pos())
+            return cursor_screen if cursor_screen is not None else QApplication.primaryScreen()
+        if isinstance(screen, int):
+            screens = QApplication.screens()
+            if 0 <= screen < len(screens):
+                return screens[screen]
+            return QApplication.primaryScreen()
+        return screen
 
     def update_cursor(self, x, y):
         """更新自定义光标位置。"""
@@ -152,20 +178,30 @@ class MouseCursorOverlay(QWidget):
 
     def trigger_left_click(self, x, y):
         self._click = ("left", time.time(), int(x / self._dpr), int(y / self._dpr))
+        self._ensure_fast_timer()
         self.update()
 
     def trigger_right_click(self, x, y):
         self._click = ("right", time.time(), int(x / self._dpr), int(y / self._dpr))
+        self._ensure_fast_timer()
         self.update()
 
     def trigger_scroll(self, direction):
         self._scroll = (1 if direction > 0 else -1, time.time())
+        self._ensure_fast_timer()
         self.update()
 
     def set_left_hold(self, holding: bool):
         """设置左键按住视觉反馈状态。"""
         self._left_hold = holding
+        if holding:
+            self._ensure_fast_timer()
         self.update()
+
+    def _ensure_fast_timer(self):
+        """有动画时加速定时器到 _TIMER_FAST_MS（~60 FPS）。"""
+        if self._timer.isActive() and self._timer.interval() != self._TIMER_FAST_MS:
+            self._timer.setInterval(self._TIMER_FAST_MS)
 
     def _tick(self):
         now = time.time()
@@ -180,8 +216,16 @@ class MouseCursorOverlay(QWidget):
             dirty = True
         elif self._scroll:
             dirty = True
+        # 左键按住时的脉冲动画需要持续重绘
+        if self._left_hold:
+            dirty = True
         if dirty:
             self.update()
+
+        # 动画结束后降速到 idle 间隔，减少空转 CPU 开销
+        if not self._click and not self._scroll and not self._left_hold:
+            if self._timer.isActive() and self._timer.interval() != self._TIMER_IDLE_MS:
+                self._timer.setInterval(self._TIMER_IDLE_MS)
 
         # 每 ~50ms 重新拉到 topmost 组最上层。否则后开的 topmost 窗口
         # （如语音指令面板）会盖在光标上面，用户看不到自己鼠标移到了哪里。

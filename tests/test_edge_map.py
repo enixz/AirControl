@@ -9,8 +9,10 @@ import unittest
 # mock ctypes / Windows API so mouse_controller can import without win32
 try:
     import ctypes
-    ctypes.windll
+    _has_windll = hasattr(ctypes, 'windll')
 except AttributeError:
+    _has_windll = False
+if not _has_windll:
     import types
     mock_ctypes = types.ModuleType('ctypes')
     mock_ctypes.wintypes = types.ModuleType('ctypes.wintypes')

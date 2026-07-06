@@ -3,7 +3,6 @@
 import os
 import sys
 
-
 APP_NAME = "AirControl"
 
 

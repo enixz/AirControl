@@ -198,6 +198,19 @@ def process_frame(frame: np.ndarray) -> dict:
 
 ### 6. 测试指南
 
+#### 一键自测（推荐）
+
+提交前运行标准化自测，它等价于 CI 的核心检查（编译 + lint + 测试），
+退出码 `0` 表示全部通过：
+
+```bash
+python selftest.py          # 编译 + lint + 测试
+python selftest.py --cov    # 附带覆盖率
+python selftest.py -k mouse # 聚焦某些测试（参数透传给 pytest）
+```
+
+详见 [docs/自测与开发循环.md](docs/自测与开发循环.md)。
+
 #### 运行测试
 
 ```bash

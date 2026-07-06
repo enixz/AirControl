@@ -1,14 +1,15 @@
 import logging
+import math
 import threading
 import time
-import math
 
-from .base import ModeBase, ModeResult
 from services.mouse_controller import (
     ActiveRegionMapper,
     blended_landmark_point,
     interp_tiers,
 )
+
+from .base import ModeBase, ModeResult
 
 logger = logging.getLogger("gesture")
 
@@ -34,6 +35,14 @@ class MouseMode(ModeBase):
         # 不必大幅度挥手才能让光标跨屏；近距离 ≈ 直接映射，保留触达。
         # margin 取小（0.04）：减少活动区相对旧"直接映射"带来的整体灵敏度抬升。
         self._region_mapper = ActiveRegionMapper(margin=0.04)
+        # hand_width EMA 平滑：避免帧间剧烈波动导致 span_floor 在分段间跳变。
+        # alpha=0.15 → 时间常数约 7 帧，平衡平滑性和响应速度。
+        self._hand_width_ema = None
+        self._hand_width_alpha = 0.15
+        # span_floor 滞回：避免 ratio 在分段边界附近反复跳变。
+        # _last_span_floor 记录上一帧使用的 span_floor，新值与之差异超过阈值才更新。
+        self._last_span_floor = None
+        self._span_floor_hysteresis = 0.08  # 滞回带宽
 
     # 守护线程：handle() 静默超过该秒数且 _is_left_holding=True，认为主线程被
     # DefWindowProc 模态循环堵住（典型场景：手势 LEFTDOWN 落在某对话框标题栏触发
@@ -49,6 +58,9 @@ class MouseMode(ModeBase):
         self.toolbar.hide()
         self.mouse.reset()  # 重置鼠标状态，防止从其他模式切回时 last_pos 残留
         self._region_mapper.reset()  # 重置活动区，避免沿用上次会话的标定
+        # 重置 hand_width 平滑和 span_floor 滞回状态
+        self._hand_width_ema = None
+        self._last_span_floor = None
         self.cursor_overlay.show_fullscreen()
         # 新增：状态机初始化
         self._is_left_holding = False
@@ -58,6 +70,8 @@ class MouseMode(ModeBase):
         self._left_hold_blocked_until_release = False
         self._last_handle_time = time.time()
         self.cursor_overlay.set_left_hold(False)
+        if self.recognizer:
+            self.recognizer._reset_state()
 
         # 启动守护线程
         self._watchdog_stop = threading.Event()
@@ -152,6 +166,9 @@ class MouseMode(ModeBase):
             self._is_right_pinching = False
             self.mouse.reset()
             self.cursor_overlay.hide_cursor()
+            # 重置 hand_width 平滑和 span_floor 滞回状态
+            self._hand_width_ema = None
+            self._last_span_floor = None
             return ModeResult(
                 gesture="NONE",
                 status_text="未检测到手",
@@ -161,17 +178,33 @@ class MouseMode(ModeBase):
         landmarks = hands_landmarks[0]
         features = self.recognizer.get_hand_features(landmarks)
         # 先把中指尖归一化坐标经活动区映射拉伸到全屏（远距离也能轻松跨屏），
-        # 再交给 move_to_normalized（跳过边缘加速，避免双重拉伸）做灵敏度平滑+落点。
+        # 再交给 move_to_normalized（启用边缘加速+Y轴虚拟画布，解决屏幕角落和任务栏触达）
+        # 做灵敏度平滑+落点。edge_strength=35 较温和，避免与活动区双重拉伸过度。
         # span_floor 按距离分段：近→趋近直接映射（不过敏），远→放大够到全屏。
-        ratio = features["hand_width"] / self.recognizer.REFERENCE_HAND_WIDTH
-        span_floor = interp_tiers(ratio, self.SPAN_FLOOR_TIERS)
+        # 对 hand_width 做 EMA 平滑 + span_floor 滞回，避免帧间抖动导致灵敏度跳变。
+        raw_hand_width = features["hand_width"]
+        if self._hand_width_ema is None:
+            self._hand_width_ema = raw_hand_width
+        else:
+            self._hand_width_ema = (
+                self._hand_width_ema * (1 - self._hand_width_alpha)
+                + raw_hand_width * self._hand_width_alpha
+            )
+        ratio = self._hand_width_ema / self.recognizer.REFERENCE_HAND_WIDTH
+        new_span_floor = interp_tiers(ratio, self.SPAN_FLOOR_TIERS)
+        # 滞回：新 span_floor 与上一帧差异超过带宽才更新，避免边界附近反复跳变
+        if self._last_span_floor is None or abs(new_span_floor - self._last_span_floor) >= self._span_floor_hysteresis:
+            span_floor = new_span_floor
+            self._last_span_floor = new_span_floor
+        else:
+            span_floor = self._last_span_floor
         pointer_x, pointer_y = blended_landmark_point(
             landmarks, self.POINTER_WEIGHTS
         )
         x_norm = pointer_x / frame_w
         y_norm = pointer_y / frame_h
         nx, ny = self._region_mapper.map(x_norm, y_norm, span_floor=span_floor)
-        screen_x, screen_y = self.mouse.move_to_normalized(nx, ny, apply_accel=False)
+        screen_x, screen_y = self.mouse.move_to_normalized(nx, ny, apply_accel=True)
         self.cursor_overlay.update_cursor(screen_x, screen_y)
 
         # 2. 滚轮检测（持续滚动：保持剪刀手则持续输出）
@@ -182,7 +215,7 @@ class MouseMode(ModeBase):
                 self.cursor_overlay.trigger_scroll(scroll_dir)
                 # 滚动时不提前 return，继续处理移动和点击，实现边滚边操作
 
-        # 3. 左键按住状态机（本期核心变更）
+        # 3. 左键按住状态机（使用 recognizer 的 pinch 特征，与老版一致）
         if features["thumb_index_pinch"]:
             # watchdog 强制释放过一次后，必须等用户先松手才允许再 LEFTDOWN，
             # 否则主线程刚解锁就在同一位置再次进入模态循环重新死锁
@@ -210,7 +243,7 @@ class MouseMode(ModeBase):
             # 用户松开捏合 → 解除 watchdog 锁定，下次捏合可正常 LEFTDOWN
             self._left_hold_blocked_until_release = False
 
-        # 4. 右键单击（单次触发：捏合期间只触发一次，松开才重置）
+        # 4. 右键单击（单次触发：使用 recognizer 的 pinch 特征）
         if features["thumb_middle_pinch"]:
             if not self._is_right_pinching:
                 self._is_right_pinching = True

@@ -124,7 +124,8 @@ class _GestureEventCounter(logging.Handler):
 
     def __init__(self):
         super().__init__()
-        self.zoom_on = self.zoom_off = self.acquire = self.sr_switch = 0
+        # 注意：不能用 self.acquire，会覆盖 logging.Handler.acquire（线程锁方法）
+        self.zoom_on = self.zoom_off = self.acquire_count = self.sr_switch = 0
 
     def emit(self, record):
         try:
@@ -136,7 +137,7 @@ class _GestureEventCounter(logging.Handler):
         elif "ZOOM OFF" in msg:
             self.zoom_off += 1
         elif "ACQUIRE" in msg:
-            self.acquire += 1
+            self.acquire_count += 1
         elif "[SR]" in msg and "upscaler" in msg:
             self.sr_switch += 1
 
@@ -229,14 +230,14 @@ def _print_single(metrics, counter, label):
     print(f"\n=== {label} ===")
     for k in _FMT:
         print(f"  {k:<18} {_fmt(k, metrics.get(k))}")
-    print(f"  {'acquire':<18} {counter.acquire}")
+    print(f"  {'acquire':<18} {counter.acquire_count}")
     print(f"  {'sr_switch':<18} {counter.sr_switch}")
 
 
 def _print_compare(base, base_c, var, var_c, var_label):
     keys = list(_FMT) + ["acquire", "sr_switch"]
-    base = dict(base); base["acquire"] = base_c.acquire; base["sr_switch"] = base_c.sr_switch
-    var = dict(var); var["acquire"] = var_c.acquire; var["sr_switch"] = var_c.sr_switch
+    base = dict(base); base["acquire"] = base_c.acquire_count; base["sr_switch"] = base_c.sr_switch
+    var = dict(var); var["acquire"] = var_c.acquire_count; var["sr_switch"] = var_c.sr_switch
     print(f"\n{'metric':<18} {'baseline':>12} {var_label:>20} {'delta':>12}")
     print("-" * 66)
     for k in keys:

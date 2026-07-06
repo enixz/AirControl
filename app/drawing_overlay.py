@@ -6,7 +6,6 @@ from collections import deque
 from PyQt6.QtCore import QPoint, QPointF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QApplication, QWidget
-
 from services.shape_recognizer import recognize_and_correct
 
 GWL_EXSTYLE = -20
@@ -142,12 +141,18 @@ class DrawingOverlay(QWidget):
         except Exception as e:
             logging.warning("DrawingOverlay 恢复系统光标失败: %s", e)
 
-    def show_fullscreen(self):
+    def show_fullscreen(self, screen=None):
         """显示全屏绘制层。不用 Qt 的 showFullScreen()，避免它重置窗口标志。
-        每次显示前重置 _click_through_applied，防止隐藏后再显示时 Win32 样式丢失。"""
+        每次显示前重置 _click_through_applied，防止隐藏后再显示时 Win32 样式丢失。
+
+        参数 screen 可选：
+        - None（默认）：自动选择鼠标光标所在屏幕，无光标时回退主屏
+        - QScreen 实例：覆盖该屏幕
+        - int（屏幕索引）：覆盖 QApplication.screens()[index]
+        """
         self._click_through_applied = False  # 强制重新应用 Win32 样式
-        screen = QApplication.primaryScreen().geometry()
-        self.setGeometry(screen)
+        target = self._resolve_screen(screen)
+        self.setGeometry(target.geometry())
         self.show()
         self.raise_()
         self._make_click_through()
@@ -155,6 +160,24 @@ class DrawingOverlay(QWidget):
         # 重置标志后再隐藏，确保外部 Win32 操作改变过 ShowCursor 计数器时仍能正确隐藏。
         self._system_cursor_hidden = False
         self._hide_system_cursor()
+
+    @staticmethod
+    def _resolve_screen(screen):
+        """将 screen 参数解析为 QScreen 实例。
+
+        None → 鼠标光标所在屏幕（多显示器场景下覆盖用户正在操作的屏幕），
+        找不到光标时回退主屏。
+        """
+        if screen is None:
+            from PyQt6.QtGui import QCursor
+            cursor_screen = QApplication.screenAt(QCursor.pos())
+            return cursor_screen if cursor_screen is not None else QApplication.primaryScreen()
+        if isinstance(screen, int):
+            screens = QApplication.screens()
+            if 0 <= screen < len(screens):
+                return screens[screen]
+            return QApplication.primaryScreen()
+        return screen
 
     def hide(self):
         """隐藏绘制层并恢复系统光标（退出板书模式时调用）。"""

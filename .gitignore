@@ -72,3 +72,17 @@ draw_trace.jsonl
 
 # 原始视频录制（replay_video.py 回放用，体积大，按需录到本地）
 raw_capture/
+
+# 重构备份与开发笔记（不进仓库）
+refactor_backup_*/
+最早对话.md
+AC-trae_问题清单.md
+AI_CONTRIBUTIONS.md
+PLAN.md
+DEMO作品帖.md
+t.txt
+
+# IDE / 缓存
+.trae/
+.pytest_cache/
+.ruff_cache/

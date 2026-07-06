@@ -6,9 +6,10 @@ import threading
 import time
 import winsound
 
-from .base import ModeBase, ModeResult
 from runtime_paths import data_path
 from services.mouse_controller import ActiveRegionMapper, interp_tiers
+
+from .base import ModeBase, ModeResult
 
 logger = logging.getLogger("gesture")
 
@@ -88,7 +89,8 @@ class DrawMode(ModeBase):
 
     # 中央投票笔状态机：决定起落前，时间窗内至少要有 VOTE_MIN 帧证据，
     # 防止窗口刚填充时凭 1-2 帧的比例噪声误触（低帧率下尤甚）。
-    VOTE_MIN = 3
+    # VOTE_MIN=2：低帧率（15-20fps）下 0.3s 窗口仅 4-6 帧，VOTE_MIN=3 太严。
+    VOTE_MIN = 2
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -108,16 +110,17 @@ class DrawMode(ModeBase):
         self._thumb_apart_frames = 0
         # 标定遥测节流
         self._last_telemetry = 0.0
-        # 正面度低于此值视为拇指不可观测（侧对相机），冻结笔状态
+        # 正面度低于此值视为拇指不可观测（侧对相机），冻结笔状态。
+        # 0.65（阶段2.12）：从 0.55 提高到 0.65，配合 draw_thumb_lift=True 默认启用，
+        # 只在手非常正对相机时才信任拇指分开信号，降低侧视/近距噪声误抬。
         self._frontality_gate = (
-            float(self.config.get("draw_frontality_gate", 0.55)) if self.config else 0.55
+            float(self.config.get("draw_frontality_gate", 0.65)) if self.config else 0.65
         )
-        # 拇指分开抬笔：默认关闭。实测（2026-06-13）近距正面书写时拇指间歇被
-        # 读成"分开"，造成单指（POINTING_UP）笔画中途误抬（一次会话 14 次）。
-        # 关闭后单指姿势一律落笔，抬笔只认可靠信号——✌️双指 / 握拳 / 张掌。
-        # 设 True 可恢复旧的"正面拇指并拢落笔、分开抬笔"习惯。
+        # 拇指分开抬笔：阶段2.12 改为默认启用。书写中食指伸出+拇指分开→hover（抬笔），
+        # 比剪刀手 ✌️ 更自然（无需切换手指）。配合 frontality_gate=0.65 降低误抬。
+        # 若实测仍有误抬，可在 config 设 draw_thumb_lift=false 回退到剪刀手停笔。
         self._thumb_lift = (
-            bool(self.config.get("draw_thumb_lift", False)) if self.config else False
+            bool(self.config.get("draw_thumb_lift", True)) if self.config else True
         )
         # ✌️ 双指抬笔的几何兜底：默认关闭。实测（2026-06-13）侧视书写时中指 2D
         # 投影使 mi 频繁 >0.95，单指被误判成双指而中途断笔（一会话 12 次误判
@@ -135,8 +138,15 @@ class DrawMode(ModeBase):
             float(self.config.get("draw_vote_window_sec", 0.30)) if self.config else 0.30
         )
         self._vote_ratio = (
-            float(self.config.get("draw_vote_ratio", 0.60)) if self.config else 0.60
+            float(self.config.get("draw_vote_ratio", 0.50)) if self.config else 0.50
         )
+        # 书写中"张掌立即抬笔"的连续帧去抖：is_open_palm 单帧噪声（middle_up &
+        # ring_up 偶发同真）此前会绕过投票窗立即 force_lift_pen → 断笔。改为需连续
+        # N 帧确认；真张掌持续会很快累计到阈值再抬笔，几乎无感。1=恢复旧的单帧行为。
+        self._open_palm_lift_min = (
+            int(self.config.get("draw_open_palm_lift_frames", 3)) if self.config else 3
+        )
+        self._open_palm_lift_frames = 0
         # 全帧率关键点轨迹录制（draw_trace.jsonl，项目根目录，会话开始时清空）：
         # 供 simulate_draw.py --replay 离线回放，用真实数据对比判定逻辑变体
         self._trace_writer = None
@@ -163,9 +173,12 @@ class DrawMode(ModeBase):
         self._two_finger_frames = 0
         self._two_finger_hovering = False
         self._thumb_apart_frames = 0
+        self._open_palm_lift_frames = 0
         self._vote.clear()
         self._recent_points.clear()
         self._region_mapper.reset()
+        if self.recognizer:
+            self.recognizer._reset_state()
 
     def on_exit(self):
         if self._trace_writer is not None:
@@ -186,6 +199,7 @@ class DrawMode(ModeBase):
         self._two_finger_frames = 0
         self._two_finger_hovering = False
         self._thumb_apart_frames = 0
+        self._open_palm_lift_frames = 0
 
     def _position_toolbar(self):
         sw = self.overlay.width()
@@ -225,15 +239,16 @@ class DrawMode(ModeBase):
         单帧不直接决定笔状态，只投一票，由 handle() 的时间窗多数表决决定
         起落（与 🤟 切模式同构）。判定照搬 analyze_trace.py 中经 draw_trace
         实录回放验证过的 VotedGate.classify（误断 57→2）：
-          - 握拳 / 张掌 → stop（就绪 / 清屏）；
+          - 握拳 → stop（就绪）；
           - ✌️ 双指 → hover：VICTORY 标签直接确认；POINTING_UP / FIST 标签
             否决几何；其余靠几何（中指≈食指等长伸出、无名指小指未伸）；
-          - 单指伸出 → 拇指可观测性门控：手正对相机且拇指分开 → hover（抬笔），
-            否则（贴紧 / 侧偏拇指不可读）→ write（落笔）；
+          - 书写姿势（食指伸出 + 至多1个其他手指伸出）→ write（落笔）；
+            在 is_open_palm 之前判定，避免3指 open_palm 误覆盖书写姿势；
+          - 张掌（3+指伸出）→ stop（清屏）；
           - 其余 → other。
         features 在此处永不为 None（丢手在 handle() 上游已返回）。
         """
-        if features["is_fist"] or features["is_open_palm"]:
+        if features["is_fist"]:
             return "stop"
         if label in ("POINTING_UP", "FIST"):
             two_finger = False            # ML 标签否决几何（单指/握拳姿势）
@@ -251,13 +266,24 @@ class DrawMode(ModeBase):
             two_finger = False
         if two_finger:
             return "hover"
-        if features["index_extended"]:
+        # 书写姿势优先于 is_open_palm：食指伸出 + 至多1个其他手指伸出 → write。
+        # 避免放宽的3指 is_open_palm 在中指/无名指被误检为 up 时覆盖书写。
+        other_fingers_up = (
+            features["middle_up"] + features["ring_up"] + features["pinky_up"]
+        )
+        if features["index_extended"] and other_fingers_up <= 1:
             # 默认不让拇指改变笔状态（噪声大、近距正面误抬）；单指即落笔。
             # draw_thumb_lift=True 时恢复"手正对相机且拇指分开 → 抬笔"。
             if self._thumb_lift:
                 readable = features["hand_frontality"] >= self._frontality_gate
                 if readable and not features["thumb_tucked"]:
                     return "hover"
+            return "write"
+        # 张掌（3+指伸出，非书写姿势）→ stop（清屏）
+        if features["is_open_palm"]:
+            return "stop"
+        # 食指伸出但2+其他手指也伸出 → 仍尝试书写（可能是部分张掌的过渡帧）
+        if features["index_extended"]:
             return "write"
         return "other"
 
@@ -283,6 +309,7 @@ class DrawMode(ModeBase):
             self._record_trace(None, "NONE")
             self.fist_hold_frames = 0
             self.open_palm_frames = 0
+            self._open_palm_lift_frames = 0
 
             # 手部跟丢缓冲：如果之前正在书写，允许短暂跟丢而不中断笔画
             if self._was_writing:
@@ -294,7 +321,7 @@ class DrawMode(ModeBase):
                         status_text="正在书写 (跟丢缓冲)",
                         status_color=(0, 255, 255),
                     )
-            
+
             self._was_writing = False
             self._writing_lost_frames = 0
             self.overlay.hide_cursor()
@@ -373,6 +400,7 @@ class DrawMode(ModeBase):
             if total >= self.VOTE_MIN and n_write >= total * self._vote_ratio:
                 self._was_writing = True
                 self._writing_lost_frames = 0
+                self._open_palm_lift_frames = 0
                 self._log_pen("down", "vote", features, label)
                 # 落笔回填：把确认期间积累的轨迹补画上，消除投票窗带来的起笔断头
                 for _, px, py in self._recent_points:
@@ -384,7 +412,32 @@ class DrawMode(ModeBase):
                     status_color=(0, 255, 255),
                 )
         else:
-            if total >= self.VOTE_MIN and n_up >= total * self._vote_ratio:
+            # 张掌清屏优先级最高，但需连续 _open_palm_lift_min 帧确认才抬笔。
+            # 旧实现单帧 is_open_palm 即 force_lift_pen，绕过投票窗去抖——而
+            # is_open_palm = index_up & middle_up & ring_up，关键点抖动时 middle_up
+            # 与 ring_up 偶发同真，单帧噪声直接断笔（实测断笔的主因）。改为连续确认：
+            # 真张掌持续 → 很快累计到阈值抬笔流向清屏（仅多 ~0.15s，无感）；
+            # 一两帧噪声 → 当书写继续，不断笔。
+            if features["is_open_palm"]:
+                self._open_palm_lift_frames += 1
+                if self._open_palm_lift_frames >= self._open_palm_lift_min:
+                    self._was_writing = False
+                    self._writing_lost_frames = 0
+                    self._log_pen("lift", "open_palm_interrupt", features, label)
+                    self.overlay.force_lift_pen()
+                    # 不返回：流向下方张掌清屏分支
+                else:
+                    # 未达确认帧数：按噪声处理，保持书写、继续描画，避免断笔。
+                    self._writing_lost_frames = 0
+                    self.overlay.draw_to(x_screen, y_screen)
+                    self._telemetry(features, label, "writing")
+                    return ModeResult(
+                        gesture="DRAW",
+                        status_text="正在书写",
+                        status_color=(0, 255, 255),
+                    )
+            elif total >= self.VOTE_MIN and n_up >= total * self._vote_ratio:
+                self._open_palm_lift_frames = 0
                 cause = "vote_stop" if n_stop * 2 >= n_up else "vote_hover"
                 self._was_writing = False
                 self._writing_lost_frames = 0
@@ -392,6 +445,7 @@ class DrawMode(ModeBase):
                 self.overlay.force_lift_pen()
                 # 不返回：显式停止（拳/掌）继续流向下方分支（清屏/就绪）
             else:
+                self._open_palm_lift_frames = 0
                 self._writing_lost_frames = 0
                 self.fist_hold_frames = 0
                 self.open_palm_frames = 0
@@ -454,10 +508,12 @@ class DrawMode(ModeBase):
             )
 
         # 张掌 -> 清屏（长按）
+        # open_palm_frames 阈值 15（20fps 下 0.75s）：30 帧（1.5s）太长用户以为没反应。
+        OPEN_PALM_CLEAR_FRAMES = 15
         if features["is_open_palm"]:
             self.open_palm_frames += 1
             self.overlay.tick_idle()
-            if self.open_palm_frames >= 30 and self._throttle_special_action():
+            if self.open_palm_frames >= OPEN_PALM_CLEAR_FRAMES and self._throttle_special_action():
                 self.overlay.clear_canvas()
                 self.fist_hold_frames = 0
                 self.open_palm_frames = 0
@@ -473,7 +529,7 @@ class DrawMode(ModeBase):
                     status_text="已清空画布",
                     status_color=(0, 165, 255),
                 )
-            progress = self.open_palm_frames / 30 * 100
+            progress = min(self.open_palm_frames / OPEN_PALM_CLEAR_FRAMES, 1.0) * 100
             return ModeResult(
                 gesture="DRAW_READY",
                 status_text=f"清屏中... {progress:.0f}%",

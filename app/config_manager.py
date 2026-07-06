@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 
+from modes import MODE_NAMES
 from runtime_paths import data_path, project_root
 
 logger = logging.getLogger(__name__)
@@ -52,8 +53,8 @@ _CONFIG_SCHEMA = {
     "mouse_sensitivity": (int, _is_int_in(1, 200), 40),
     "pen_width": (int, _is_int_in(1, 100), 15),
     "pen_width_auto_scale": (bool, _is_bool, False),
-    "edge_acceleration_enabled": (bool, _is_bool, False),
-    "edge_acceleration_strength": (int, _is_int_in(0, 500), 30),
+    "edge_acceleration_enabled": (bool, _is_bool, True),
+    "edge_acceleration_strength": (int, _is_int_in(0, 500), 100),
     "edge_y_canvas_enabled": (bool, _is_bool, True),
     "edge_y_canvas_deadzone_bottom": (int, _is_int_in(0, 100), 18),
     "edge_y_canvas_deadzone_top": (int, _is_int_in(0, 100), 10),
@@ -68,7 +69,7 @@ _CONFIG_SCHEMA = {
     "model_type": (str, lambda v: v in ("Heavy", "Lite", "Full"), "Heavy"),
     "interaction_mode": (
         str,
-        lambda v: v in ("mouse", "draw", "presentation"),
+        lambda v: v in MODE_NAMES,
         "mouse",
     ),
     "voice_command_threshold": ((int, float), _is_num_in(0.0, 1.0), 0.25),
@@ -99,26 +100,47 @@ _CONFIG_SCHEMA = {
     "zoom_far_threshold": ((int, float), _is_num_in(0.001, 0.05), 0.008),
     "zoom_near_threshold": ((int, float), _is_num_in(0.01, 0.20), 0.040),
     # 手部关键点一欧元滤波：min_cutoff 越小静止越不抖；beta 越大运动越跟手。
+    # 阶段 2.10：回到 0.5/0.015（D:\airControl 实测不拉扯的参数）。更强的低通
+    # 吸收 MediaPipe 检测抖动，配合 handedness-keyed smoother 根治双手拉扯。
     "hand_smoothing_min_cutoff": ((int, float), _is_num_in(0.05, 5.0), 0.5),
     "hand_smoothing_beta": ((int, float), _is_num_in(0.0, 1.0), 0.015),
+    # 推理降采样宽度：高分辨率帧（如 1080p）先缩到此宽度再喂 MediaPipe，坐标归一化无需补偿。
+    # 1080p 整帧推理 ~42ms → ~640-720px 后 ~15ms，直接决定"快速移动跟不跟手"。0=不降采样。
+    "inference_max_width": (int, _is_int_in(0, 1920), 720),
     # 远距离 ZOOM 鲁棒性：连续丢帧多少帧才断 ZOOM；人脸检测短边分辨率（越大越能找回远处的手）。
     "zoom_miss_frames": (int, _is_int_in(3, 60), 10),
     "face_detect_short": (int, _is_int_in(240, 1280), 400),
+    # === 投机式增强层总开关（阶段1：默认关闭，详见 docs/修复记录_阶段0-1.md）===
+    # 这些层是 GLM5.2 强化时叠加的，互相打架反而降低识别率/产生闪烁/断笔/不跟手。
+    # 默认关闭 = 回到接近原版 aircontrol 的直管线；需要时单独打开做 A/B 验证。
+    "adaptive_skip_enabled": (bool, _is_bool, False),       # 自适应跳帧补帧（冻结→跳变）
+    "long_range_enabled": (bool, _is_bool, True),           # crop-zoom/多尺度/人脸引导远距增强（与 config.json 默认对齐）
+    "geometric_constraint_enabled": (bool, _is_bool, False),  # 骨长约束滤波（运动时冻结关键点）
+    "hand_prediction_enabled": (bool, _is_bool, True),      # 幽灵手/丢手预测补帧（与老版一致，默认开启）
+    "temporal_voter_enabled": (bool, _is_bool, False),      # 时序投票器+FSM（阶段2.11默认关闭，回到老版基线）
     "mode_switch_hold_sec": ((int, float), _is_num_in(0.4, 3.0), 1.0),
     "mode_switch_vote_ratio": ((int, float), _is_num_in(0.5, 1.0), 0.6),
     "mode_switch_release_sec": ((int, float), _is_num_in(0.1, 1.0), 0.25),
-    "draw_frontality_gate": ((int, float), _is_num_in(0.0, 3.0), 0.55),
+    "draw_frontality_gate": ((int, float), _is_num_in(0.0, 3.0), 0.65),
     "draw_record_trace": (bool, _is_bool, False),
-    "draw_thumb_lift": (bool, _is_bool, False),
+    "draw_thumb_lift": (bool, _is_bool, True),
     "draw_two_finger_geom": (bool, _is_bool, False),
     "draw_vote_window_sec": ((int, float), _is_num_in(0.1, 1.0), 0.30),
     "draw_vote_ratio": ((int, float), _is_num_in(0.5, 1.0), 0.60),
+    # 书写中"张掌立即抬笔"的连续帧去抖：单帧 is_open_palm 噪声不再断笔，
+    # 需连续 N 帧才确认抬笔（真张掌清屏几乎无感延迟）。1=旧的单帧行为。
+    "draw_open_palm_lift_frames": (int, _is_int_in(1, 10), 3),
     "record_raw_video": (bool, _is_bool, False),
     "record_raw_max_frames": (int, _is_int_in(1, 100000), 2000),
     "record_raw_max_seconds": (
         (int, float),
         _is_num_in(1.0, 3600.0),
         120.0,
+    ),
+    "record_raw_codec": (
+        str,
+        lambda v: v in ("mp4v", "ffv1"),
+        "mp4v",
     ),
     "wps_exe_path": ((str, type(None)), _is_optional_string, None),
     "powerpoint_exe_path": ((str, type(None)), _is_optional_string, None),
@@ -172,8 +194,8 @@ class ConfigManager:
             "camera_height": None,
             "camera_force_mjpeg": True,
             "camera_min_fps": 10,
-            "edge_acceleration_enabled": False,
-            "edge_acceleration_strength": 30,
+            "edge_acceleration_enabled": True,
+            "edge_acceleration_strength": 100,
             "edge_y_canvas_enabled": True,
             "edge_y_canvas_deadzone_bottom": 18,
             "edge_y_canvas_deadzone_top": 10,
@@ -185,8 +207,16 @@ class ConfigManager:
             "zoom_near_threshold": 0.040,
             "hand_smoothing_min_cutoff": 0.5,
             "hand_smoothing_beta": 0.015,
+            "inference_max_width": 720,
             "zoom_miss_frames": 10,
             "face_detect_short": 400,
+            # 投机式增强层总开关（long_range_enabled 与 config.json 默认对齐为 True，
+            # 支持远距离 crop-zoom/多尺度/人脸引导；其余增强层默认关闭）
+            "adaptive_skip_enabled": False,
+            "long_range_enabled": True,
+            "geometric_constraint_enabled": False,
+            "hand_prediction_enabled": True,
+            "temporal_voter_enabled": False,
             "detection_engine": "mediapipe",
             "dominant_hand": "Auto",
             "hand_detection_confidence": 0.4,
@@ -195,12 +225,13 @@ class ConfigManager:
             "mode_switch_hold_sec": 1.0,
             "mode_switch_vote_ratio": 0.6,
             "mode_switch_release_sec": 0.25,
-            "draw_frontality_gate": 0.55,
+            "draw_frontality_gate": 0.65,
             "draw_record_trace": False,
-            "draw_thumb_lift": False,
+            "draw_thumb_lift": True,
             "draw_two_finger_geom": False,
             "draw_vote_window_sec": 0.30,
             "draw_vote_ratio": 0.60,
+            "draw_open_palm_lift_frames": 3,
             "dictation_enabled": True,
             "dictation_model_dir": "models/sense-voice",
             "dictation_language": "auto",
@@ -210,6 +241,7 @@ class ConfigManager:
             "record_raw_video": False,
             "record_raw_max_frames": 2000,
             "record_raw_max_seconds": 120.0,
+            "record_raw_codec": "mp4v",
             "debug_overlay": False,
             "floating_window_scale": 1.5,
             "wps_exe_path": None,
@@ -233,7 +265,7 @@ class ConfigManager:
     def load_config(self):
         if os.path.exists(self.config_file):
             try:
-                with open(self.config_file, 'r', encoding='utf-8') as f:
+                with open(self.config_file, encoding='utf-8') as f:
                     user_config = json.load(f)
                     merged = self.default_config.copy()
                     merged.update(user_config)

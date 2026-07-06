@@ -79,14 +79,14 @@ class TestZoomSR(unittest.TestCase):
         tracker = DummyHandTracker(config=cm)
 
         # 初始时，未初始化
-        self.assertFalse(hasattr(tracker, "_sr_initialized"))
+        self.assertFalse(tracker._sr._sr_initialized)
 
-        # 调用 _init_sr_engines 后应处于初始化完毕状态
-        tracker._init_sr_engines()
-        self.assertTrue(tracker._sr_initialized)
-        self.assertIsNone(tracker._espcn_engine)
-        self.assertIsNone(tracker._realesrgan_cpu_session)
-        self.assertIsNone(tracker._realesrgan_gpu_session)
+        # 调用 init 后应处于初始化完毕状态
+        tracker._sr.init()
+        self.assertTrue(tracker._sr._sr_initialized)
+        self.assertIsNone(tracker._sr._espcn_engine)
+        self.assertIsNone(tracker._sr._realesrgan_cpu_session)
+        self.assertIsNone(tracker._sr._realesrgan_gpu_session)
 
     def test_auto_enables_espcn_when_upscaling(self):
         """回归：auto 模式在裁剪框 < 目标尺寸（远距离放大）时必须启用 ESPCN。
@@ -98,8 +98,8 @@ class TestZoomSR(unittest.TestCase):
         tracker = DummyHandTracker(config=cm)
         target = tracker._crop_target_size  # 384
         # 远距离：裁剪框被钳到下限 240 < 384 → 在放大 → 必须启用 espcn（而非 none）
-        self.assertEqual(tracker._resolve_sr_engine("auto", 240, target), "espcn")
-        self.assertEqual(tracker._resolve_sr_engine("auto", target - 1, target), "espcn")
+        self.assertEqual(tracker._sr.resolve("auto", 240, target), "espcn")
+        self.assertEqual(tracker._sr.resolve("auto", target - 1, target), "espcn")
 
     def test_auto_enables_espcn_for_tight_crops(self):
         """去掉 240 人为下限后：远距离的紧凑裁剪框（远小于 240）仍应启用 ESPCN。
@@ -112,7 +112,7 @@ class TestZoomSR(unittest.TestCase):
         target = tracker._crop_target_size
         self.assertLess(tracker._crop_min_size, 240)  # 不再有 240 人为下限
         for cs in (tracker._crop_min_size, 64, 120, 239):
-            self.assertEqual(tracker._resolve_sr_engine("auto", cs, target), "espcn")
+            self.assertEqual(tracker._sr.resolve("auto", cs, target), "espcn")
 
     def test_auto_disables_sr_when_downscaling(self):
         """近距离关闭 SR：auto 模式下裁剪框 >= 目标尺寸（下采样/手较近）时退回普通插值。
@@ -125,11 +125,11 @@ class TestZoomSR(unittest.TestCase):
         tracker = DummyHandTracker(config=cm)
         target = tracker._crop_target_size
         # 下采样（手较近）→ 关闭超分
-        self.assertEqual(tracker._resolve_sr_engine("auto", target, target), "none")
-        self.assertEqual(tracker._resolve_sr_engine("auto", target + 200, target), "none")
+        self.assertEqual(tracker._sr.resolve("auto", target, target), "none")
+        self.assertEqual(tracker._sr.resolve("auto", target + 200, target), "none")
         # 从关闭状态重新进入需要越过滞回下沿，避免在 target 附近抖动。
         self.assertEqual(
-            tracker._resolve_sr_engine("auto", int(target * 0.89), target),
+            tracker._sr.resolve("auto", int(target * 0.89), target),
             "espcn",
         )
 
@@ -139,8 +139,8 @@ class TestZoomSR(unittest.TestCase):
         tracker = DummyHandTracker(config=cm)
         target = tracker._crop_target_size
         for eng in ("espcn", "realesrgan_cpu", "realesrgan_gpu", "none"):
-            self.assertEqual(tracker._resolve_sr_engine(eng, 240, target), eng)
-            self.assertEqual(tracker._resolve_sr_engine(eng, target + 100, target), eng)
+            self.assertEqual(tracker._sr.resolve(eng, 240, target), eng)
+            self.assertEqual(tracker._sr.resolve(eng, target + 100, target), eng)
 
     def test_auto_uses_hysteresis_near_target(self):
         cm = ConfigManager(config_file=self.config_path)
@@ -148,20 +148,20 @@ class TestZoomSR(unittest.TestCase):
         target = tracker._crop_target_size
 
         self.assertEqual(
-            tracker._resolve_sr_engine("auto", target - 1, target), "espcn"
+            tracker._sr.resolve("auto", target - 1, target), "espcn"
         )
         self.assertEqual(
-            tracker._resolve_sr_engine("auto", target + 1, target), "espcn"
+            tracker._sr.resolve("auto", target + 1, target), "espcn"
         )
         self.assertEqual(
-            tracker._resolve_sr_engine("auto", int(target * 1.11), target),
+            tracker._sr.resolve("auto", int(target * 1.11), target),
             "none",
         )
         self.assertEqual(
-            tracker._resolve_sr_engine("auto", target - 1, target), "none"
+            tracker._sr.resolve("auto", target - 1, target), "none"
         )
         self.assertEqual(
-            tracker._resolve_sr_engine("auto", int(target * 0.89), target),
+            tracker._sr.resolve("auto", int(target * 0.89), target),
             "espcn",
         )
 
@@ -173,12 +173,12 @@ class TestZoomSR(unittest.TestCase):
 
         cm = ConfigManager(config_file=self.config_path)
         tracker = DummyHandTracker(config=cm)
-        tracker._init_sr_engines()
+        tracker._sr.init()
 
         dummy = np.zeros((240, 240, 3), dtype=np.uint8)
-        self.assertIsNone(tracker._sr_espcn(dummy, 384))
-        self.assertIsNone(tracker._sr_realesrgan(dummy, 384, prefer_gpu=True))
-        self.assertIsNone(tracker._sr_realesrgan(dummy, 384, prefer_gpu=False))
+        self.assertIsNone(tracker._sr.espcn(dummy, 384))
+        self.assertIsNone(tracker._sr.realesrgan(dummy, 384, prefer_gpu=True))
+        self.assertIsNone(tracker._sr.realesrgan(dummy, 384, prefer_gpu=False))
 
 
 if __name__ == "__main__":

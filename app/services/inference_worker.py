@@ -6,6 +6,8 @@ from collections import deque
 import cv2
 from PyQt6.QtCore import QThread, pyqtSignal
 
+logger = logging.getLogger(__name__)
+
 
 class InferenceWorker(QThread):
     """
@@ -13,8 +15,8 @@ class InferenceWorker(QThread):
     通过信号将结果发送到主线程处理模式逻辑和UI更新。
     """
 
-    # 信号：帧数据、手部关键点、手势识别结果
-    frame_ready = pyqtSignal(object, list, list)
+    # 信号：帧数据、手部关键点、手势识别结果、worker本身引用
+    frame_ready = pyqtSignal(object, list, list, object)
     error_occurred = pyqtSignal(str)
     fps_updated = pyqtSignal(float)
     performance_updated = pyqtSignal(object)
@@ -24,6 +26,7 @@ class InferenceWorker(QThread):
         super().__init__(parent)
         self.camera = camera
         self.tracker = tracker
+        self._pending_tracker = None
         self.frame_recorder = frame_recorder  # 可选：原始帧无损录制（默认 None）
         self.running = False
         self.lock = threading.Lock()
@@ -57,7 +60,7 @@ class InferenceWorker(QThread):
             daemon=True,
         )
         self._capture_thread.start()
-        logging.info("InferenceWorker 启动")
+        logger.info("InferenceWorker 启动")
 
         try:
             while self.running:
@@ -67,7 +70,7 @@ class InferenceWorker(QThread):
                 try:
                     self._process_frame(*item)
                 except Exception as e:
-                    logging.error("InferenceWorker 错误: %s", e, exc_info=True)
+                    logger.error("InferenceWorker 错误: %s", e, exc_info=True)
                     self.error_occurred.emit(str(e))
                     time.sleep(0.1)
         finally:
@@ -76,7 +79,7 @@ class InferenceWorker(QThread):
                 self._capture_condition.notify_all()
             if self._capture_thread and self._capture_thread.is_alive():
                 self._capture_thread.join(timeout=3.0)
-            logging.info("InferenceWorker 停止")
+            logger.info("InferenceWorker 停止")
 
     def _capture_loop(self):
         """Continuously capture frames and retain only the newest one."""
@@ -85,7 +88,9 @@ class InferenceWorker(QThread):
             success, frame = self.camera.read_frame()
             capture_ms = (time.perf_counter() - started) * 1000.0
             if not success:
-                self._capture_stop.wait(0.01)
+                # 处于冷却期或摄像头彻底未打开时，增加休眠避免 100Hz 的极速盲等死循环
+                sleep_time = 0.01 if self.camera.cap is not None else 0.5
+                self._capture_stop.wait(sleep_time)
                 continue
             frame = cv2.flip(frame, 1)
             captured_at = time.perf_counter()
@@ -124,18 +129,37 @@ class InferenceWorker(QThread):
         start_time = time.perf_counter()
         queue_ms = max(0.0, (start_time - captured_at) * 1000.0)
 
-        # 原始帧录制：必须在 find_hands(draw=True) 绘制叠层之前，录的是干净输入。
-        if self.frame_recorder is not None:
-            self.frame_recorder.write(frame)
+        # 原始帧录制：find_hands(draw=True) 会原地绘制叠层污染 frame，故先 copy 一份
+        # 干净帧；待 find_hands 完成后再写入（带检测元数据），保证 meta 与 frame 对齐。
+        record_frame = frame.copy() if self.frame_recorder is not None else None
 
         inference_started = time.perf_counter()
         # Hold the lock through native inference so an old detector cannot be
         # closed while MediaPipe is still using it.
         with self.lock:
+            # 在执行推理前安全替换 _pending_tracker，消除主线程的 lock 阻塞
+            if self._pending_tracker is not None:
+                old_tracker = self.tracker
+                self.tracker = self._pending_tracker
+                self._pending_tracker = None
+                if old_tracker is not self.tracker:
+                    close = getattr(old_tracker, "close", None)
+                    if callable(close):
+                        try:
+                            close()
+                        except Exception:
+                            logger.exception("关闭旧 tracker 失败")
+                logger.info("InferenceWorker: tracker 已异步更新完成")
+
             frame, hands_landmarks, hands_gestures = self.tracker.find_hands(
                 frame, draw=True
             )
         inference_ms = (time.perf_counter() - inference_started) * 1000.0
+
+        # 原始帧 + 检测元数据一起写入（meta 让 replay/analyze 能重建原始运行时识别点轨迹）
+        if self.frame_recorder is not None and record_frame is not None:
+            meta = self._collect_record_meta(hands_landmarks, hands_gestures)
+            self.frame_recorder.write(record_frame, meta=meta)
 
         # 计算FPS
         self._update_fps()
@@ -147,11 +171,11 @@ class InferenceWorker(QThread):
         # Qt 的 queued signal 没有天然背压。主线程忙时只保留一个待处理结果，
         # 避免旧帧持续堆积并放大端到端延迟。
         if self._claim_result_slot():
-            self.frame_ready.emit(frame, hands_landmarks, hands_gestures)
+            self.frame_ready.emit(frame, hands_landmarks, hands_gestures, self)
 
         total_ms = (time.perf_counter() - start_time) * 1000.0
         self._record_performance(capture_ms, queue_ms, inference_ms, total_ms)
-        
+
         # 节流：确保不超过最大帧率
         elapsed = time.perf_counter() - start_time
         sleep_time = self._frame_interval - elapsed
@@ -199,18 +223,17 @@ class InferenceWorker(QThread):
             self._fps_start_time = current_time
 
     def update_tracker(self, new_tracker):
-        """线程安全地更新tracker"""
+        """线程安全地异步更新tracker：不立即抢锁，而是提交给 worker 在下一个推理循环时替换"""
         with self.lock:
-            old_tracker = self.tracker
-            self.tracker = new_tracker
-        if old_tracker is not new_tracker:
-            close = getattr(old_tracker, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    logging.exception("关闭旧 tracker 失败")
-        logging.info("InferenceWorker: tracker 已更新")
+            if self._pending_tracker is not None and self._pending_tracker is not new_tracker:
+                close = getattr(self._pending_tracker, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        logger.warning("关闭旧 pending tracker 失败，忽略", exc_info=True)
+            self._pending_tracker = new_tracker
+        logger.info("InferenceWorker: tracker 异步更新已挂起")
 
     def _claim_result_slot(self):
         with self._result_lock:
@@ -227,7 +250,48 @@ class InferenceWorker(QThread):
     def set_debug_overlay(self, enabled):
         """切换调试覆盖层（F1 或 config 控制）"""
         self.debug_overlay = bool(enabled)
-        logging.info("调试覆盖层: %s", "开" if self.debug_overlay else "关")
+        logger.info("调试覆盖层: %s", "开" if self.debug_overlay else "关")
+
+    def set_frame_recorder(self, recorder):
+        """线程安全替换原始帧录制器（F5 热切换）。
+
+        _process_frame 在 self.lock 之外读 self.frame_recorder，故这里也用同一把锁
+        保护赋值，避免热切换时 worker 线程拿到半初始化对象。
+        """
+        with self.lock:
+            self.frame_recorder = recorder
+
+    def _collect_record_meta(self, hands_landmarks, hands_gestures):
+        """收集用于回放分析的元数据：主手 wrist、手数、crop 视口等。
+
+        让 analyze_primary_stability.py 能直接读 meta.jsonl 重建原始运行时识别点
+        轨迹，而不是用当前代码重新跑 find_hands（那只能看当前代码的表现，看不到原始
+        运行时的"拉扯"行为）。
+
+        注意：hands_landmarks 是 find_hands 返回的 smoothed 结果（按 _priority_score
+        降序排列，index 0 是分数最高的手），即用户实际看到的识别点位置。
+        """
+        tracker = self.tracker
+        meta = {
+            "hands": len(hands_landmarks),
+            "zoom_on": bool(getattr(tracker, "_crop_zoom_mode", False)),
+        }
+        if hands_landmarks:
+            # smoothed wrists（用户看到的识别点位置）；index 0 是分数最高的手
+            meta["wrists"] = [
+                [round(float(h[0][1]), 2), round(float(h[0][2]), 2)]
+                for h in hands_landmarks
+            ]
+            # primary_wrist 单独冗余一份，方便分析脚本直接取
+            pw = hands_landmarks[0][0]
+            meta["primary_wrist"] = [round(float(pw[1]), 2), round(float(pw[2]), 2)]
+        cc = getattr(tracker, "_current_crop_center", None)
+        cs = getattr(tracker, "_current_crop_size", None)
+        if cc is not None:
+            meta["crop_center"] = [round(float(cc[0]), 2), round(float(cc[1]), 2)]
+        if cs is not None:
+            meta["crop_size"] = round(float(cs), 2)
+        return meta
 
     def _draw_debug_overlay(self, frame, hands_landmarks, hands_gestures):
         """在画面上叠加 FPS、手数、handedness、predicted 标记等调试信息。
@@ -251,7 +315,7 @@ class InferenceWorker(QThread):
         )
 
         # 每只手的元数据
-        for i, (landmarks, gesture) in enumerate(zip(hands_landmarks, hands_gestures)):
+        for i, (landmarks, gesture) in enumerate(zip(hands_landmarks, hands_gestures, strict=True)):
             if not landmarks:
                 continue
             wrist = landmarks[0]
@@ -259,7 +323,8 @@ class InferenceWorker(QThread):
             label = f"#{i} {gesture.get('handedness', '?')[:1]}"
             if gesture.get("predicted"):
                 label += " [predict]"
-                color = (0, 255, 255)
+                # 统一用紫色：预测补帧与真实检测视觉一致，避免黄紫交替闪烁
+                color = (255, 0, 255) if i == 0 else (200, 200, 200)
             else:
                 color = (255, 0, 255) if i == 0 else (200, 200, 200)
             cv2.putText(
@@ -268,14 +333,33 @@ class InferenceWorker(QThread):
             )
 
     def stop(self):
-        """停止线程"""
+        """停止线程。
+
+        若 update_tracker() 提交了 _pending_tracker 但 worker 在下次推理前就被
+        停掉，该 pending tracker 永远不会被 swap-in、也不会被关闭，原生
+        MediaPipe 句柄与 SR ONNX session 会泄漏。这里在停掉线程后 flush 它：
+        关闭 pending tracker。active tracker 不在此关闭——它由 orchestrator
+        持有并负责释放（camera 切换时还会复用同一只 tracker）。
+        """
         self.running = False
         self._capture_stop.set()
         with self._capture_condition:
             self._capture_condition.notify_all()
         if not self.wait(5000):
-            logging.warning("InferenceWorker 5 秒内未能停止")
-        logging.info("InferenceWorker: 已停止")
+            logger.warning("InferenceWorker 5 秒内未能停止")
+        # flush 未被消费的 pending tracker，避免句柄泄漏
+        with self.lock:
+            pending = self._pending_tracker
+            self._pending_tracker = None
+        if pending is not None:
+            close = getattr(pending, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.exception("关闭 pending tracker 失败")
+            logger.info("InferenceWorker: 已 flush 未消费的 pending tracker")
+        logger.info("InferenceWorker: 已停止")
 
     def get_fps(self):
         """获取当前FPS"""

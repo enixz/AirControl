@@ -14,6 +14,8 @@ class PresentationMode(ModeBase):
         self.toolbar.hide()
         self.cursor_overlay.hide()
         self.cursor_overlay.setGeometry(-100, -100, 0, 0)
+        if self.recognizer:
+            self.recognizer._reset_state()
 
     def on_exit(self):
         pass
