@@ -18,6 +18,23 @@
 
 ---
 
+## 🎬 演示动画
+
+<div align="center">
+
+### 📊 演示模式
+![演示模式](https://raw.githubusercontent.com/enixz/AirControl/main/gif/演示模式.gif)
+
+### 🖱️ 鼠标模式
+![鼠标模式](https://raw.githubusercontent.com/enixz/AirControl/main/gif/鼠标模式.gif)
+
+### ✏️ 板书模式
+![板书模式](https://raw.githubusercontent.com/enixz/AirControl/main/gif/板书模式.gif)
+
+</div>
+
+---
+
 ## ✨ 一句话介绍
 
 > **AirControl** 是一款基于 MediaPipe + 语音识别的 Windows 空中控制器，让你无需触碰键盘鼠标，仅通过**手势**和**语音**即可控制 PPT 演示、操控鼠标、屏幕板书，甚至启动语音助手。
