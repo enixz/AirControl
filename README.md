@@ -23,13 +23,13 @@
 <div align="center">
 
 ### 📊 演示模式
-![演示模式](https://raw.githubusercontent.com/enixz/AirControl/main/gif/演示模式.gif)
+![演示模式](https://raw.githubusercontent.com/enixz/AirControl/master/gif/演示模式.gif)
 
 ### 🖱️ 鼠标模式
-![鼠标模式](https://raw.githubusercontent.com/enixz/AirControl/main/gif/鼠标模式.gif)
+![鼠标模式](https://raw.githubusercontent.com/enixz/AirControl/master/gif/鼠标模式.gif)
 
 ### ✏️ 板书模式
-![板书模式](https://raw.githubusercontent.com/enixz/AirControl/main/gif/板书模式.gif)
+![板书模式](https://raw.githubusercontent.com/enixz/AirControl/master/gif/板书模式.gif)
 
 </div>
 
