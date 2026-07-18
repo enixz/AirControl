@@ -7,9 +7,11 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 ROOT = os.path.abspath(SPECPATH)
 CONSOLE_BUILD = os.environ.get("AIRCONTROL_BUILD_CONSOLE") == "1"
 
-# 从 app/version.py 读取版本号，作为打包产物的唯一版本来源
-sys.path.insert(0, os.path.join(ROOT, "app"))
-from version import __version__  # noqa: E402
+# build.py 从 app/version.py 生成合法的 Windows VSVersionInfo 临时文件。
+# 显式要求该文件，避免把普通版本字符串误当成资源文件路径。
+VERSION_FILE = os.environ.get("AIRCONTROL_VERSION_FILE")
+if not VERSION_FILE or not os.path.isfile(VERSION_FILE):
+    raise RuntimeError("请通过 python build.py 构建，以生成 Windows 版本资源")
 
 
 def add_data_if_present(items, source, destination):
@@ -95,7 +97,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="AirControl",
-    version=__version__,
+    version=VERSION_FILE,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

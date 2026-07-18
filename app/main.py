@@ -4,6 +4,7 @@ Please run `main_ui.py` to start the AirControl application.
 """
 import sys
 
+
 def main():
     print("=====================================================", file=sys.stderr)
     print("WARNING: main.py is deprecated and no longer maintained.", file=sys.stderr)

@@ -8,7 +8,6 @@
 
 EMA 消除手势阈值随单帧掌宽抖动（实测 58↔208）跳变。
 """
-import math
 import os
 import sys
 import unittest

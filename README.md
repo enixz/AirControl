@@ -4,7 +4,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078d4?logo=windows&logoColor=white)
-![Release](https://img.shields.io/badge/Release-v1.3.6-6f42c1)
+![Release](https://img.shields.io/badge/Release-v1.4.0-6f42c1)
 ![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)
 ![Stars](https://img.shields.io/github/stars/enixz/AirControl?style=social)
 

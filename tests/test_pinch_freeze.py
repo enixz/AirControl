@@ -186,7 +186,6 @@ class TestPinchFreezeStateMachine(unittest.TestCase):
         recognizer.get_hand_features.return_value = _features_for(pinch=True)
         mode.handle([_make_landmarks(pinch=True)], [], 640, 480)
         self.assertEqual(mode._frozen_pos, (510, 410))
-        rising_edge_calls = mouse.move_to_normalized.call_count
 
         # 后续帧（grace 期内）：仍 pinch，但 move_to_normalized 不应被再次调用
         mouse.move_to_normalized.reset_mock()

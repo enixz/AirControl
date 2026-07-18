@@ -1,7 +1,9 @@
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -16,6 +18,45 @@ def _get_app_version():
     sys.path.insert(0, str(ROOT / "app"))
     from version import __version__
     return __version__
+
+
+def _render_windows_version_info(app_version):
+    """Render the PyInstaller VSVersionInfo resource from the app version."""
+    parsed = Version(app_version)
+    numeric = tuple(parsed.release[:4])
+    file_version = numeric + (0,) * (4 - len(numeric))
+    dotted_version = ".".join(str(part) for part in parsed.release)
+    return f"""# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={file_version!r},
+    prodvers={file_version!r},
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable(
+        u'040904B0',
+        [
+          StringStruct(u'CompanyName', u'AirControl'),
+          StringStruct(u'FileDescription', u'AirControl Gesture and Voice Control'),
+          StringStruct(u'FileVersion', u'{dotted_version}'),
+          StringStruct(u'InternalName', u'AirControl'),
+          StringStruct(u'OriginalFilename', u'AirControl.exe'),
+          StringStruct(u'ProductName', u'AirControl'),
+          StringStruct(u'ProductVersion', u'{dotted_version}')
+        ]
+      )
+    ]),
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+  ]
+)
+"""
 
 
 def _check_version_consistency():
@@ -66,7 +107,15 @@ def build():
         "--clean",
         str(ROOT / "AirControl.spec"),
     ]
-    subprocess.run(cmd, check=True, cwd=str(ROOT))
+    with tempfile.TemporaryDirectory(prefix="aircontrol-version-") as temp_dir:
+        version_file = Path(temp_dir) / "version_info.txt"
+        version_file.write_text(
+            _render_windows_version_info(_get_app_version()),
+            encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env["AIRCONTROL_VERSION_FILE"] = str(version_file)
+        subprocess.run(cmd, check=True, cwd=str(ROOT), env=env)
     print("\n打包完成: dist/AirControl/AirControl.exe")
 
 

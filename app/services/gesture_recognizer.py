@@ -265,7 +265,8 @@ class GestureRecognizer:
             "thumb_index_pinch": thumb_index_pinch,
             "thumb_middle_pinch": thumb_middle_pinch,
             "is_fist": four_fingers_down and thumb_folded,
-            "is_open_palm": index_up and middle_up and ring_up,
+            # 清屏等破坏性动作使用严格张掌：五指均伸出，避免三指姿势误触发。
+            "is_open_palm": index_up and middle_up and ring_up and pinky_up and thumb_up,
             "thumb_tucked": thumb_tucked,
             "thumb_extended": thumb_extended,
             # Phase 3.3: 旋转不变新特征（始终输出，供 telemetry 并存对照）

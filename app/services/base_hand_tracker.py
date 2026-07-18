@@ -11,28 +11,26 @@
 """
 
 import logging
-import os
 import time
 from abc import ABC, abstractmethod
 
 import cv2
-import numpy as np
-from runtime_paths import resource_path
+
+from .face_guide import FaceGuide
+from .renderer import HandTrackerRenderer
 
 # 平滑器与几何约束已拆到独立模块；此处 re-export 保持
 # `from services.base_hand_tracker import KalmanSmoother/OneEuroSmoother/...`
 # 等历史 import 路径可用（hand_tracker.py 与多个测试依赖此路径）。
 from .smoothers import (  # noqa: F401
     _BONE_CONNECTIONS,
-    _pack_landmarks,
     GeometricConstraintFilter,
     KalmanSmoother,
     OneEuroFilter,
     OneEuroSmoother,
+    _pack_landmarks,
 )
 from .sr_engine import SREngine
-from .face_guide import FaceGuide
-from .renderer import HandTrackerRenderer
 
 _zoom_logger = logging.getLogger("gesture")
 
@@ -502,7 +500,7 @@ class BaseHandTracker(ABC):
             # 去重：如果两只手分到同一个 key，第二只用另一个
             if keys[0] == keys[1] and keys[0] in ("Left", "Right"):
                 keys[1] = "Right" if keys[0] == "Left" else "Left"
-            self._prev_wrist_keys = list(zip(wrists, keys))
+            self._prev_wrist_keys = list(zip(wrists, keys, strict=True))
             return keys
 
         # 位置匹配：当前帧手腕与上一帧最近的匹配为同一 smoother
@@ -520,7 +518,7 @@ class BaseHandTracker(ABC):
         pairs.sort()
 
         assigned_current = set()
-        for dist, i, j in pairs:
+        for _dist, i, j in pairs:
             if i in assigned_current or j in used_prev:
                 continue
             keys[i] = prev_keys[j]
@@ -535,7 +533,7 @@ class BaseHandTracker(ABC):
                     h = "Unknown"
                 keys[i] = h
 
-        self._prev_wrist_keys = list(zip(wrists, keys))
+        self._prev_wrist_keys = list(zip(wrists, keys, strict=True))
         return keys
 
     def _handle_hands_present(self, frame, hands_landmarks, hands_gestures,

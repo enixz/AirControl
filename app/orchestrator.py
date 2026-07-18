@@ -474,6 +474,12 @@ class AirControlOrchestrator(QObject):
 
     def apply_config(self):
         self.recognizer.cooldown = self.config.get("cooldown")
+        self.recognizer.pinch_hysteresis_enabled = bool(
+            self.config.get("pinch_hysteresis_enabled", False)
+        )
+        self.recognizer.thumb_perp_ratio_enabled = bool(
+            self.config.get("thumb_perp_ratio_enabled", False)
+        )
         self.ppt.set_target_app(self.config.get("target_app"))
         self.mouse.set_sensitivity(self.config.get("mouse_sensitivity"))
         self.mouse.set_edge_acceleration(

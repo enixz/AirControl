@@ -7,23 +7,12 @@ instantiated in a test env), we test the logic of the key methods by importing
 them as unbound functions and calling them on a manually constructed object that
 has all required attributes.
 """
-import atexit
-import os
 import sys
 import types
 import unittest
-from unittest.mock import MagicMock
-
-# Add app directory to path
-_app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app')
-sys.path.insert(0, _app_dir)
-
-# 保存被替换的原始模块，进程退出时恢复，避免污染同进程后续测试
-_mocked_modules = {}
-
-def _save_and_mock(name, mock_obj):
-    _mocked_modules[name] = sys.modules.get(name)
-    sys.modules[name] = mock_obj
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 # Mock ctypes for Windows API before importing
 mock_ctypes = types.ModuleType('ctypes')
@@ -39,9 +28,6 @@ mock_windll.user32 = mock_user32
 mock_ctypes.windll = mock_windll
 mock_ctypes.byref = lambda x: x
 mock_ctypes.wintypes.POINT = lambda: type('POINT', (), {'x': 0, 'y': 0})()
-
-_save_and_mock('ctypes', mock_ctypes)
-_save_and_mock('ctypes.wintypes', mock_ctypes.wintypes)
 
 # Now we need to import the module in a way that QWidget can be mocked
 # We'll patch at the module level
@@ -71,23 +57,21 @@ mock_screen.devicePixelRatio.return_value = 1.0
 mock_qt_app.primaryScreen.return_value = mock_screen
 mock_qt_widgets.QApplication = mock_qt_app
 mock_qt_widgets.QWidget = FakeQWidget
-_save_and_mock('PyQt6', types.ModuleType('PyQt6'))
-_save_and_mock('PyQt6.QtCore', MagicMock())
-_save_and_mock('PyQt6.QtGui', MagicMock())
-_save_and_mock('PyQt6.QtWidgets', mock_qt_widgets)
+_module_mocks = {
+    "ctypes": mock_ctypes,
+    "ctypes.wintypes": mock_ctypes.wintypes,
+    "PyQt6": types.ModuleType("PyQt6"),
+    "PyQt6.QtCore": MagicMock(),
+    "PyQt6.QtGui": MagicMock(),
+    "PyQt6.QtWidgets": mock_qt_widgets,
+}
+_module_path = Path(__file__).resolve().parents[1] / "app" / "mouse_cursor_overlay.py"
+_spec = spec_from_file_location("mouse_cursor_overlay_under_test", _module_path)
+_overlay_module = module_from_spec(_spec)
+with patch.dict(sys.modules, _module_mocks):
+    _spec.loader.exec_module(_overlay_module)
 
-# 进程退出时恢复被 mock 的模块，避免污染同进程的其他测试模块
-def _restore_mocked_modules():
-    for name, original in _mocked_modules.items():
-        if original is not None:
-            sys.modules[name] = original
-        else:
-            sys.modules.pop(name, None)
-
-atexit.register(_restore_mocked_modules)
-
-# Now import the module
-from mouse_cursor_overlay import MouseCursorOverlay
+MouseCursorOverlay = _overlay_module.MouseCursorOverlay
 
 
 def _make_overlay():

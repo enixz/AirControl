@@ -15,7 +15,6 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app'))
 
-import cv2
 from services.renderer import HandTrackerRenderer
 
 
@@ -157,10 +156,8 @@ class TestApplyVisualZoom(unittest.TestCase):
     def test_zero_size_returns_frame(self):
         """crop_size=0 时不抛异常（被钳到 crop_min_size）。"""
         frame = _make_black_frame(w=640, h=480)
-        try:
-            result = self.renderer.apply_visual_zoom(frame, (320.0, 240.0), 0)
-        except Exception as e:
-            self.fail(f"size=0 抛异常: {e}")
+        result = self.renderer.apply_visual_zoom(frame, (320.0, 240.0), 0)
+        self.assertEqual(result.shape, frame.shape)
 
 
 if __name__ == "__main__":

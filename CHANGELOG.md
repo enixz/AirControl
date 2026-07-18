@@ -1,99 +1,47 @@
 # Changelog
 
-## v1.7.0 - 2026-07-18
-
-- **Enable Phase 3.1 + 3.2 by default** after A/B validation on local
-  recording `raw_capture/20260705_174137` (1583 frames, 1455 with hands):
-  - `pinch_freeze_enabled`: now `true` by default. A/B showed 10 pinch
-    rising-edges with grace-period fingertip drift mean 63.9px (P95 283px)
-    — freeze eliminates this click-point drift.
-  - `pinch_hysteresis_enabled`: now `true` by default. A/B showed pinch
-    flips 20→18 (-10%), 16 frames in the 0.30-0.40 hysteresis band
-    stabilized (32% of pinch frames).
-- **Consistency fix**: both switches added to all three
-  `stability_profile` presets (stable/balanced/long_range) as `true`, so
-  the profile system remains the single source of truth for stability
-  switches (previously they were unmanaged by profiles, causing an
-  incomplete stability picture on profile switch). Schema defaults and
-  `default_config` updated to match.
-- `thumb_perp_ratio_enabled` remains `false` — A/B showed the 0.50
-  threshold is far below the measured perp_ratio mean (1.106); needs
-  thumb-tucked calibration recording before enabling.
-- No code logic changes (Phase 3.1-3.3 implementations unchanged); this
-  release only flips validated defaults and aligns the profile system.
-
-## v1.6.0 - 2026-07-18
-
-- **Phase 3.3 (实施方案)**: Rotation-invariant `thumb_extended` via
-  perpendicular-distance ratio. Adds `_thumb_perp_ratio()` computing the
-  thumb tip's perpendicular distance to the palm axis (wrist→middle MCP),
-  normalized by palm width. This is rotation-invariant: the ratio stays
-  stable when the hand rotates, unlike the old `thumb_tip_to_index_mcp`
-  distance which varies with hand orientation.
-- **Parallel coexistence**: both old (`thumb_tip_to_index_mcp > 0.9×hw`)
-  and new (`thumb_perp_ratio > 0.5`) features are always computed and
-  output to the features dict (`thumb_extended`, `thumb_extended_new`,
-  `thumb_perp_ratio`). Telemetry logs all three for A/B calibration.
-- New config switch `thumb_perp_ratio_enabled` (default off). When enabled,
-  `thumb_extended` follows the new rotation-invariant logic; when disabled,
-  the old distance-based logic is used (fully reversible).
-- Threshold `THUMB_PERP_RATIO_THRESHOLD=0.5` is an initial value requiring
-  real-world calibration (anchored: extended ≈ 0.5+×palm_width, tucked ≈
-  0.2×palm_width). Rotation-invariance verified by unit test: ratio stays
-  within 20% across 0°/45°/90°/135° rotations.
-- 10 new unit tests: perp_ratio computation, rotation invariance, feature
-  output, config switch behavior.
-
-## v1.5.0 - 2026-07-18
-
-- **Phase 3.2 (实施方案)**: Pinch dual-threshold hysteresis. Adds
-  `PINCH_ENTER_RATIO=0.30` (stricter) and `PINCH_EXIT_RATIO=0.40` (lenient)
-  to eliminate pinch-state flicker at the threshold boundary. When already
-  pinching, the EXIT threshold keeps the state stable until the distance
-  exceeds 0.40×hand_width; when not pinching, the ENTER threshold requires
-  the distance to drop below 0.30×hand_width.
-- Calibration anchors documented in code: real pinch ≈ 0.15–0.25×hand_width,
-  fist ≈ 0.50+×hand_width, so EXIT=0.40 stays well below fist (fist never
-  misfires as pinch-release). This matches Air-Cursor's lesson that
-  finger-extension guards are unreliable and distance thresholds alone
-  provide clean separation.
-- New config switch `pinch_hysteresis_enabled` (default off for
-  reversibility). Telemetry extended to log `idx_ratio`/`mid_ratio` for
-  real-world calibration.
-- 8 new unit tests: ENTER/EXIT boundaries, full hysteresis cycle, state reset.
-
 ## v1.4.0 - 2026-07-18
 
-- **Phase 3.1 (实施方案)**: Freeze-on-pinch cursor stabilization. When the
-  user pinches (thumb-index), the cursor locks at the aimed position for a
-  configurable grace period (`pinch_freeze_grace_sec`, default 0.3s), then
-  releases for normal drag. Eliminates click-point drift caused by wrist
-  micro-motion and landmark jitter during the pinch gesture.
-- Borrowed from Air-Cursor's `freeze-on-fist` design, localized to pinch
-  (AC-trae's click gesture is thumb-index pinch, not fist). Follows the
-  existing freeze precedent in `draw_mode.py` (freeze active-region mapping
-  during writing).
-- New config switches (default off for reversibility): `pinch_freeze_enabled`
-  (bool) and `pinch_freeze_grace_sec` (0.0–2.0s). Set `pinch_freeze_enabled`
-  to `true` in `config.json` to enable.
-- 8 new unit tests covering the state machine: rising-edge record, grace-period
-  lock, post-grace release, pinch-release clear, hand-lost clear, on_exit clear.
+AirControl 1.4 consolidates the locally iterated pinch-stability work into a
+single public minor release over v1.3.5. The three new gesture layers are
+available for controlled trials, but remain **off by default** until labeled
+click/drag recordings demonstrate both accuracy and acceptable latency.
 
-## v1.3.6 - 2026-07-08
-
-- Absorbed v1.3's conservative interaction defaults into the v1.3.5 tracker
-  base: board writing now defaults to single-finger write stability
-  (draw_thumb_lift=false), VOTE_MIN is back to 3, and the draw vote ratio is
-  consistently 0.60.
-- Reduced mouse-mode over-amplification: active-region mapping remains, but
-  edge acceleration is only applied when the user enables it; the stable
-  default is edge_acceleration_enabled=false with strength 35.
-- Added stability_profile presets (stable / balanced / long_range) and exposed
-  them in settings so far-distance enhancements remain available without
-  affecting the default classroom/whiteboard feel.
-- Stable profile now keeps speculative layers off by default, including
-  long_range_enabled=false, while preserving the v1.3.5 handedness-keyed
-  smoother, recording diagnostics, camera hardening, and expanded tests.
+- **Freeze-on-pinch cursor stabilization**: `pinch_freeze_enabled` can lock the
+  cursor for `pinch_freeze_grace_sec` (default 0.3s) after pinch begins. The
+  corrected replay metric excludes the release frame and follows MouseMode's
+  blended pointer. Recording `20260705_095523` had no evaluable continuing
+  pinch event; `20260705_174137` had 6 evaluable events with event-maximum
+  source-video drift mean 43.3px and P95 105.4px. These are observational
+  values without click/drag ground truth, so the feature remains disabled.
+- **Pinch dual-threshold hysteresis**: optional ENTER=0.30 / EXIT=0.40 ratios
+  reduce boundary flicker. Corrected replay changed 1 frame in the first
+  recording and 9 frames in the second; the pinch-heavy recording showed
+  flips 22→18 (-18.2%). Fewer flips do not prove higher click accuracy, so
+  `pinch_hysteresis_enabled` also remains disabled by default.
+- **Rotation-invariant `thumb_extended` telemetry**: both the legacy feature
+  and the perpendicular-distance ratio are emitted for calibration. The new
+  path remains behind `thumb_perp_ratio_enabled=false`; the recordings lack
+  labeled tucked/extended poses and therefore cannot select a safe threshold.
+- Added stable / balanced / long-range experience profiles. The stable default
+  keeps long-range prediction, adaptive skipping, geometric constraints, edge
+  acceleration, and temporal voting conservative, while the long-range profile
+  retains crop zoom, face guidance, and prediction for distant presentation use.
+- Restored predictable board-writing and pointer defaults: single-finger pen
+  lift, vote ratio 0.60, VOTE_MIN 3, and edge acceleration disabled at strength
+  35 unless a user selects a profile that enables it.
+- All stability profiles, schema defaults, the shipped config, and runtime
+  configuration updates agree on these conservative defaults. Changing the
+  hysteresis or perpendicular-ratio switch now takes effect without restart.
+- Restored strict five-finger `is_open_palm` recognition so three-finger poses
+  cannot accidentally enter destructive board clear behavior.
+- Fixed the Windows PyInstaller version resource pipeline. The packaged EXE
+  now carries FileVersion/ProductVersion 1.4.0 from `app/version.py`.
+- Removed collection-time test module pollution and inference-worker leaks;
+  the full suite can run repeatedly in one process without starting real
+  camera or MediaPipe services from mocked orchestrator tests.
+- Added focused tests for all three gesture phases, benchmark release-frame
+  exclusion, build version resources, and runtime switch refresh.
 
 ## v1.3.5 - 2026-07-06
 

@@ -2,38 +2,33 @@
 T1: _edge_map 数学正确性单元测试
 验证非线性边缘加速映射函数的数学性质。
 """
-import os
 import sys
+import types
 import unittest
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+from unittest.mock import patch
 
-# mock ctypes / Windows API so mouse_controller can import without win32
-try:
-    import ctypes
-    _has_windll = hasattr(ctypes, 'windll')
-except AttributeError:
-    _has_windll = False
-if not _has_windll:
-    import types
-    mock_ctypes = types.ModuleType('ctypes')
-    mock_ctypes.wintypes = types.ModuleType('ctypes.wintypes')
-    mock_windll = types.ModuleType('ctypes.windll')
-    mock_user32 = types.ModuleType('user32')
-    mock_user32.GetSystemMetrics = lambda idx: 1920 if idx in (0, 78) else 1080
-    mock_user32.GetCursorPos = lambda pt: None
-    mock_user32.SetCursorPos = lambda x, y: None
-    mock_user32.mouse_event = lambda *a: None
-    mock_windll.user32 = mock_user32
-    mock_ctypes.windll = mock_windll
-    mock_ctypes.byref = lambda x: x
-    mock_ctypes.wintypes.POINT = lambda: type('POINT', (), {'x': 0, 'y': 0})()
-    sys.modules['ctypes'] = mock_ctypes
-    sys.modules['ctypes.wintypes'] = mock_ctypes.wintypes
+# 在唯一模块名下导入被测文件，mock 仅在导入上下文内存在，不污染 pytest collection。
+mock_ctypes = types.ModuleType("ctypes")
+mock_ctypes.wintypes = types.ModuleType("ctypes.wintypes")
+mock_windll = types.ModuleType("ctypes.windll")
+mock_user32 = types.ModuleType("user32")
+mock_windll.user32 = mock_user32
+mock_ctypes.windll = mock_windll
+mock_ctypes.byref = lambda value: value
+mock_ctypes.wintypes.POINT = lambda: type("POINT", (), {"x": 0, "y": 0})()
 
-_app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app')
-sys.path.insert(0, _app_dir)
-sys.path.insert(0, os.path.join(_app_dir, 'services'))
+_module_path = Path(__file__).resolve().parents[1] / "app" / "services" / "mouse_controller.py"
+_spec = spec_from_file_location("edge_map_mouse_controller_under_test", _module_path)
+_module = module_from_spec(_spec)
+with patch.dict(
+    sys.modules,
+    {"ctypes": mock_ctypes, "ctypes.wintypes": mock_ctypes.wintypes},
+):
+    _spec.loader.exec_module(_module)
 
-from mouse_controller import _edge_map
+_edge_map = _module._edge_map
 
 
 class TestEdgeMapMath(unittest.TestCase):

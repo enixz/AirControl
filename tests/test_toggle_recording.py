@@ -9,46 +9,11 @@ FrameRecorder 用 MagicMock 替代，避免真实写盘。
 """
 import os
 import sys
-import types
 import unittest
 from unittest.mock import MagicMock, patch
 
 _app_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app')
 sys.path.insert(0, _app_dir)
-
-# 清除可能被前序测试污染的 PyQt6 / orchestrator 缓存（与 test_orchestrator_dictation 同套路）
-for _m in list(sys.modules.keys()):
-    if _m == 'PyQt6' or _m.startswith('PyQt6.'):
-        del sys.modules[_m]
-
-_app_module_names = ['orchestrator']
-_saved_app_modules = {_m: sys.modules.get(_m) for _m in _app_module_names}
-for _m in _app_module_names:
-    sys.modules.pop(_m, None)
-
-# Mock win32 / 系统模块（orchestrator 导入期需要）
-_mock_win32con = types.ModuleType('win32con')
-_mock_win32con.WS_MINIMIZE = 0x20000000
-_mock_win32con.GWL_STYLE = -16
-_mock_win32con.SW_RESTORE = 9
-_mock_win32con.SW_SHOW = 5
-_mock_win32con.VK_MENU = 0x12
-_mock_win32con.VK_ESCAPE = 0x1B
-_mock_win32con.KEYEVENTF_KEYUP = 0x0002
-
-_saved_modules = {}
-_win32_mocks = {
-    'win32con': _mock_win32con,
-    'win32api': MagicMock(),
-    'win32gui': MagicMock(),
-    'win32process': MagicMock(),
-    'psutil': MagicMock(),
-    'winreg': MagicMock(),
-    'winsound': MagicMock(),
-}
-for _name, _mock in _win32_mocks.items():
-    _saved_modules[_name] = sys.modules.get(_name)
-    sys.modules[_name] = _mock
 
 from orchestrator import AirControlOrchestrator
 

@@ -16,7 +16,9 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app'))
 
 from services.base_hand_tracker import (  # noqa: E402
-    GeometricConstraintFilter, KalmanSmoother, OneEuroSmoother,
+    GeometricConstraintFilter,
+    KalmanSmoother,
+    OneEuroSmoother,
 )
 from services.geometric_classifier import WeightedVoteClassifier  # noqa: E402
 

@@ -39,6 +39,8 @@ class TestConfigEdge(unittest.TestCase):
         self.assertIn("edge_acceleration_strength", cm.config)
         self.assertEqual(cm.get("edge_acceleration_enabled"), False)
         self.assertEqual(cm.get("edge_acceleration_strength"), 35)
+        self.assertEqual(cm.get("pinch_freeze_enabled"), False)
+        self.assertEqual(cm.get("pinch_hysteresis_enabled"), False)
 
     def test_save_preserves_edge_keys(self):
         """保存后 config.json 中包含正确的 edge 配置键"""
@@ -84,12 +86,16 @@ class TestConfigEdge(unittest.TestCase):
         self.assertEqual(cm.get("edge_acceleration_strength"), 60)
         self.assertEqual(cm.get("long_range_enabled"), True)
         self.assertEqual(cm.get("draw_thumb_lift"), False)
+        self.assertEqual(cm.get("pinch_freeze_enabled"), False)
+        self.assertEqual(cm.get("pinch_hysteresis_enabled"), False)
 
         cm.apply_stability_profile("stable")
         self.assertEqual(cm.get("stability_profile"), "stable")
         self.assertEqual(cm.get("edge_acceleration_enabled"), False)
         self.assertEqual(cm.get("edge_acceleration_strength"), 35)
         self.assertEqual(cm.get("long_range_enabled"), False)
+        self.assertEqual(cm.get("pinch_freeze_enabled"), False)
+        self.assertEqual(cm.get("pinch_hysteresis_enabled"), False)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,6 @@ MediaPipe 更强。请配合 analyze_primary_stability.py 使用。
 
 import logging
 import os
-import time
 
 import cv2
 import mediapipe as mp
@@ -434,12 +433,8 @@ class HagridYoloHandTracker(BaseHandTracker):
                 # 太小，放大到 256x256
                 crop = frame[cy0:cy1, cx0:cx1]
                 crop = cv2.resize(crop, (256, 256), interpolation=cv2.INTER_LINEAR)
-                scale_x = crop_w / 256.0
-                scale_y = crop_h / 256.0
             else:
                 crop = frame[cy0:cy1, cx0:cx1]
-                scale_x = 1.0
-                scale_y = 1.0
 
             if crop.size == 0:
                 continue

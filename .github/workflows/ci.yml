@@ -30,10 +30,10 @@ jobs:
         run: python -m pip check
 
       - name: Compile Python sources
-        run: python -m compileall -q app tests build.py selftest.py
+        run: python -m compileall -q app tests benchmark_gesture_ab.py build.py selftest.py
 
       - name: Lint Python sources
-        run: python -m ruff check app tests build.py selftest.py
+        run: python -m ruff check app tests benchmark_gesture_ab.py build.py selftest.py
 
       - name: Run tests with coverage
         env:
@@ -46,3 +46,26 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+
+      - name: Build Windows release bundle
+        if: matrix.python-version == '3.12'
+        run: python build.py
+
+      - name: Verify packaged release bundle
+        if: matrix.python-version == '3.12'
+        shell: pwsh
+        run: |
+          $expected = python -c "import sys; sys.path.insert(0, 'app'); from version import __version__; print(__version__)"
+          $exe = Get-Item -LiteralPath dist\AirControl\AirControl.exe
+          if ($exe.VersionInfo.FileVersion -ne $expected) {
+            throw "Unexpected FileVersion: $($exe.VersionInfo.FileVersion)"
+          }
+          if ($exe.VersionInfo.ProductVersion -ne $expected) {
+            throw "Unexpected ProductVersion: $($exe.VersionInfo.ProductVersion)"
+          }
+          $env:AIRCONTROL_DATA_DIR = Join-Path $env:RUNNER_TEMP 'AirControl-smoke'
+          New-Item -ItemType Directory -Force -Path $env:AIRCONTROL_DATA_DIR | Out-Null
+          $process = Start-Process -FilePath $exe.FullName -ArgumentList '--self-test' -WorkingDirectory $exe.DirectoryName -WindowStyle Hidden -PassThru -Wait
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged self-test failed with exit code $($process.ExitCode)"
+          }

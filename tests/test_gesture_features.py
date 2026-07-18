@@ -181,8 +181,6 @@ class TestFingersCloseAdaptive(unittest.TestCase):
         gr = GestureRecognizer()
         # 远处小手：掌宽≈30px → close_threshold=18px，但 60px 兜底主导
         small_hand = make_frontal_index_extended_hand(scale=30.0 / 65.0)
-        features_small = gr.get_hand_features(small_hand)
-        hw_small = features_small["hand_width"]
 
         # 手指间距设为 25px（> 18px 但 < 60px）
         # 60px 兜底 → 25 < 60 → 判为 close

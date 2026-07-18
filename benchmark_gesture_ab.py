@@ -3,12 +3,13 @@
 用本地录像离线对比三个新特性开关前后的**手势指标**：
   - pinch_hysteresis（Phase 3.2）：pinch 状态翻转次数、滞回带帧数
   - thumb_perp_ratio（Phase 3.3）：thumb_extended 翻转次数、perp_ratio 分布
-  - pinch_freeze（Phase 3.1）：pinch 上升沿后 grace 期内手部漂移（收益评估）
+  - pinch_freeze（Phase 3.1）：pinch 持续期间混合指针的漂移风险（观察性指标）
 
 设计原则（参考项目 memory 教训）：
   - 同一批 landmarks 喂给 4 个独立 recognizer（各自维护滞回状态），公平对比
   - 检测阶段只跑一次（find_hands 依赖 smoother 状态，重跑会变）
-  - 单元测试验证过逻辑本身；本脚本测"实际录像场景下的指标差异"
+  - freeze 指标不把松手帧计入，并使用 MouseMode 的混合指针而非单一食指尖
+  - 无人工点击/拖拽真值时只报告观察结果，不自动建议默认开启
 
 用法：
   python benchmark_gesture_ab.py raw_capture/20260705_174137
@@ -107,13 +108,76 @@ def _count_flips(states):
     return flips
 
 
+def _p95(values):
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
+
+
+def _compute_freeze_observation(pinch_states, pointer_positions, grace_frames=9):
+    """Measure pointer drift only while pinch remains active.
+
+    The release frame is deliberately excluded: MouseMode clears freeze as soon as
+    pinch is released, so counting release motion would overstate freeze benefit.
+    Events with no active continuation frame are reported as unevaluable.
+    """
+    rising_events = 0
+    event_start = None
+    pointer_at_rise = None
+    current_drifts = []
+    event_max_drifts = []
+    observed_frames = 0
+    previous = False
+
+    def finish_event():
+        nonlocal event_start, pointer_at_rise, current_drifts
+        if current_drifts:
+            event_max_drifts.append(max(current_drifts))
+        event_start = None
+        pointer_at_rise = None
+        current_drifts = []
+
+    for frame_index, (is_pinch, pointer) in enumerate(
+        zip(pinch_states, pointer_positions, strict=True)
+    ):
+        if is_pinch and not previous and pointer is not None:
+            finish_event()
+            rising_events += 1
+            event_start = frame_index
+            pointer_at_rise = pointer
+        elif event_start is not None:
+            within_grace = frame_index - event_start <= grace_frames
+            if is_pinch and pointer is not None and within_grace:
+                dx = pointer[0] - pointer_at_rise[0]
+                dy = pointer[1] - pointer_at_rise[1]
+                current_drifts.append(math.hypot(dx, dy))
+                observed_frames += 1
+            else:
+                finish_event()
+        previous = is_pinch
+
+    finish_event()
+    return {
+        "freeze_events": rising_events,
+        "freeze_evaluable_events": len(event_max_drifts),
+        "freeze_observed_frames": observed_frames,
+        "freeze_event_max_drift_mean_px": (
+            statistics.mean(event_max_drifts) if event_max_drifts else 0.0
+        ),
+        "freeze_event_max_drift_p95_px": _p95(event_max_drifts),
+    }
+
+
 def _analyze_config(cached_landmarks, pinch_hyst, thumb_perp):
     """用指定配置跑所有帧，返回手势指标。
 
     pinch_hyst: pinch_hysteresis_enabled
     thumb_perp: thumb_perp_ratio_enabled
     """
+    from modes.mouse_mode import MouseMode
     from services.gesture_recognizer import GestureRecognizer
+    from services.mouse_controller import blended_landmark_point
 
     gr = GestureRecognizer()
     gr.pinch_hysteresis_enabled = pinch_hyst
@@ -122,21 +186,14 @@ def _analyze_config(cached_landmarks, pinch_hyst, thumb_perp):
     pinch_states = []
     thumb_ext_states = []
     idx_ratios = []
-    mid_ratios = []
     perp_ratios = []
-    # freeze 收益：记录每次 pinch 上升沿后 grace 期内食指尖漂移
-    freeze_drifts = []
-    pinch_rising_frame = None  # pinch 上升沿的帧索引
-    idx_tip_at_rise = None     # 上升沿时食指尖位置
-    GRACE_FRAMES = 9  # ~0.3s @ 30fps
+    pointer_positions = []
 
-    for fi, hands in enumerate(cached_landmarks):
+    for _fi, hands in enumerate(cached_landmarks):
         if not hands:
             pinch_states.append(False)
             thumb_ext_states.append(False)
-            # 手丢失 → pinch 释放，结束当前 freeze 窗口
-            pinch_rising_frame = None
-            idx_tip_at_rise = None
+            pointer_positions.append(None)
             gr._reset_state()
             continue
 
@@ -146,6 +203,7 @@ def _analyze_config(cached_landmarks, pinch_hyst, thumb_perp):
         is_pinch = features.get("thumb_index_pinch", False)
         pinch_states.append(is_pinch)
         thumb_ext_states.append(features.get("thumb_extended", False))
+        pointer_positions.append(blended_landmark_point(lm, MouseMode.POINTER_WEIGHTS))
 
         # 记录比值（用于标定）
         hw = features.get("hand_width", 0) or 1
@@ -153,45 +211,22 @@ def _analyze_config(cached_landmarks, pinch_hyst, thumb_perp):
         idx_ratios.append(thumb_idx_dist / hw)
         perp_ratios.append(features.get("thumb_perp_ratio", 0.0))
 
-        # freeze 收益分析：检测 pinch 上升沿，记录后续 grace 期内食指尖漂移
-        if (len(pinch_states) >= 2 and is_pinch and not pinch_states[-2]):
-            # 上升沿
-            pinch_rising_frame = fi
-            idx_tip_at_rise = (lm[8][1], lm[8][2])
-        elif (pinch_rising_frame is not None
-              and fi - pinch_rising_frame <= GRACE_FRAMES
-              and idx_tip_at_rise is not None):
-            # grace 期内，计算食指尖相对上升沿的漂移
-            dx = lm[8][1] - idx_tip_at_rise[0]
-            dy = lm[8][2] - idx_tip_at_rise[1]
-            freeze_drifts.append(math.hypot(dx, dy))
-        elif is_pinch and pinch_rising_frame is not None:
-            # grace 结束或 pinch 释放
-            if fi - pinch_rising_frame > GRACE_FRAMES:
-                pinch_rising_frame = None
-                idx_tip_at_rise = None
-        if not is_pinch:
-            pinch_rising_frame = None
-            idx_tip_at_rise = None
-
     # 滞回带帧数：idx_ratio 在 0.30-0.40 之间
     in_band = sum(1 for r in idx_ratios if 0.30 <= r <= 0.40)
-
-    return {
+    result = {
         "pinch_flips": _count_flips(pinch_states),
         "pinch_frames": sum(pinch_states),
         "pinch_in_hysteresis_band": in_band,
+        "pinch_changed_frames_vs_baseline": 0,
         "thumb_ext_flips": _count_flips(thumb_ext_states),
         "idx_ratio_mean": statistics.mean(idx_ratios) if idx_ratios else 0,
         "idx_ratio_std": statistics.stdev(idx_ratios) if len(idx_ratios) > 1 else 0,
         "perp_ratio_mean": statistics.mean(perp_ratios) if perp_ratios else 0,
         "perp_ratio_std": statistics.stdev(perp_ratios) if len(perp_ratios) > 1 else 0,
-        "freeze_drift_mean_px": statistics.mean(freeze_drifts) if freeze_drifts else 0,
-        "freeze_drift_p95_px": (sorted(freeze_drifts)[min(len(freeze_drifts) - 1, int(len(freeze_drifts) * 0.95))]
-                                if freeze_drifts else 0),
-        "freeze_events": len([1 for i in range(1, len(pinch_states))
-                              if pinch_states[i] and not pinch_states[i-1]]),
+        "_pinch_states": pinch_states,
     }
+    result.update(_compute_freeze_observation(pinch_states, pointer_positions))
+    return result
 
 
 def _print_compare_table(results, labels):
@@ -199,15 +234,18 @@ def _print_compare_table(results, labels):
     keys = [
         ("pinch_flips", "{:.0f}", "pinch 状态翻转次数（↓好）"),
         ("pinch_frames", "{:.0f}", "pinch 帧数"),
-        ("pinch_in_hysteresis_band", "{:.0f}", "滞回带内帧数 0.30-0.40"),
+        ("pinch_in_hysteresis_band", "{:.0f}", "滞回带候选帧数 0.30-0.40"),
+        ("pinch_changed_frames_vs_baseline", "{:.0f}", "相对基线实际改变的帧数"),
         ("thumb_ext_flips", "{:.0f}", "thumb_extended 翻转次数（↓好）"),
         ("idx_ratio_mean", "{:.3f}", "idx_ratio 均值（标定用）"),
         ("idx_ratio_std", "{:.3f}", "idx_ratio 标准差"),
         ("perp_ratio_mean", "{:.3f}", "perp_ratio 均值（标定用）"),
         ("perp_ratio_std", "{:.3f}", "perp_ratio 标准差"),
         ("freeze_events", "{:.0f}", "pinch 上升沿次数"),
-        ("freeze_drift_mean_px", "{:.1f}", "grace 期漂移均值 px（freeze 收益）"),
-        ("freeze_drift_p95_px", "{:.1f}", "grace 期漂移 P95 px"),
+        ("freeze_evaluable_events", "{:.0f}", "可评估持续 pinch 事件数"),
+        ("freeze_observed_frames", "{:.0f}", "grace 内持续 pinch 帧数"),
+        ("freeze_event_max_drift_mean_px", "{:.1f}", "事件最大混合指针漂移均值"),
+        ("freeze_event_max_drift_p95_px", "{:.1f}", "事件最大混合指针漂移 P95"),
     ]
 
     w = 14
@@ -221,7 +259,7 @@ def _print_compare_table(results, labels):
     print("=" * 100)
 
 
-def _print_conclusions(results, labels):
+def _print_conclusions(results):
     """打印结论分析。"""
     print("\n" + "=" * 100)
     print("结论分析")
@@ -233,43 +271,42 @@ def _print_conclusions(results, labels):
     hyst = results[1]
     flip_reduction = base["pinch_flips"] - hyst["pinch_flips"]
     flip_pct = (flip_reduction / base["pinch_flips"] * 100) if base["pinch_flips"] else 0
-    print(f"\n[Phase 3.2] pinch 双阈值滞回:")
+    print("\n[Phase 3.2] pinch 双阈值滞回:")
     print(f"  pinch 翻转次数: {base['pinch_flips']} → {hyst['pinch_flips']}  "
           f"(减少 {flip_reduction} 次, -{flip_pct:.1f}%)")
-    print(f"  滞回带内帧数: {base['pinch_in_hysteresis_band']} 帧 "
-          f"(这些帧在旧版会抖动，新版滞回保持稳定)")
-    if base["pinch_in_hysteresis_band"] > 0:
-        print(f"  → 滞回对 {base['pinch_in_hysteresis_band']} 帧有效（占 pinch 帧的 "
-              f"{base['pinch_in_hysteresis_band']/max(base['pinch_frames'],1)*100:.1f}%）")
+    print(f"  滞回带候选帧数: {base['pinch_in_hysteresis_band']} 帧")
+    print(f"  相对基线实际改变: {hyst['pinch_changed_frames_vs_baseline']} 帧")
+    print("  → 无人工点击真值，翻转减少不等同于准确率提高，不能据此自动开启默认值")
 
     # Phase 3.3: thumb_perp 旋转不变
     perp = results[2]
     ext_flip_reduction = base["thumb_ext_flips"] - perp["thumb_ext_flips"]
     ext_flip_pct = (ext_flip_reduction / base["thumb_ext_flips"] * 100) if base["thumb_ext_flips"] else 0
-    print(f"\n[Phase 3.3] thumb_extended 旋转不变判定:")
+    print("\n[Phase 3.3] thumb_extended 旋转不变判定:")
     print(f"  thumb_extended 翻转次数: {base['thumb_ext_flips']} → {perp['thumb_ext_flips']}  "
           f"(减少 {ext_flip_reduction} 次, -{ext_flip_pct:.1f}%)")
     print(f"  perp_ratio 分布: 均值 {perp['perp_ratio_mean']:.3f}, 标准差 {perp['perp_ratio_std']:.3f}")
-    print(f"  → 标定建议: 阈值 {perp['perp_ratio_mean']:.2f} 附近（当前 0.50）")
+    print("  → 样本没有 thumb-tucked/extended 标签，均值不能用于选阈值；继续默认关闭")
 
     # Phase 3.1: freeze 收益
-    print(f"\n[Phase 3.1] freeze-on-pinch 收益评估:")
+    print("\n[Phase 3.1] freeze-on-pinch 收益评估:")
     print(f"  pinch 上升沿次数: {base['freeze_events']}")
-    if base["freeze_drift_mean_px"] > 0:
-        print(f"  grace 期内食指尖漂移: 均值 {base['freeze_drift_mean_px']:.1f}px, "
-              f"P95 {base['freeze_drift_p95_px']:.1f}px")
-        if base["freeze_drift_mean_px"] > 5:
-            print(f"  → 漂移 >5px，freeze 能显著消除点击漂移（建议开启 pinch_freeze_enabled）")
-        else:
-            print(f"  → 漂移较小，freeze 收益有限（可暂不开启）")
+    print(f"  可评估持续 pinch 事件: {base['freeze_evaluable_events']}")
+    if base["freeze_evaluable_events"]:
+        print(
+            "  grace 内事件最大混合指针漂移: "
+            f"均值 {base['freeze_event_max_drift_mean_px']:.1f}px, "
+            f"P95 {base['freeze_event_max_drift_p95_px']:.1f}px"
+        )
+        print("  → 这是录像像素的观察指标；仍需实际屏幕点击/拖拽真值决定默认值")
     else:
-        print(f"  → 录像中无完整 pinch 上升沿，无法评估 freeze 收益")
+        print("  → 没有持续至少两个帧的 pinch 事件，无法评估 freeze")
 
     # idx_ratio 标定
-    print(f"\n[标定参考] pinch 比值分布:")
+    print("\n[标定参考] pinch 比值分布:")
     print(f"  idx_ratio 均值 {base['idx_ratio_mean']:.3f}, 标准差 {base['idx_ratio_std']:.3f}")
-    print(f"  → 真实捏合 idx_ratio 应 < 0.30（ENTER 阈值），")
-    print(f"     握拳 idx_ratio 应 > 0.40（EXIT 阈值）。若均值落在 0.30-0.40 说明录像多为边界状态")
+    print("  → 真实捏合 idx_ratio 应 < 0.30（ENTER 阈值），")
+    print("     握拳 idx_ratio 应 > 0.40（EXIT 阈值）。若均值落在 0.30-0.40 说明录像多为边界状态")
 
 
 def main():
@@ -308,14 +345,35 @@ def main():
         r["config"] = label
         results.append(r)
 
+    state_sequences = [result.pop("_pinch_states") for result in results]
+    baseline_states = state_sequences[0]
+    for result, states in zip(results[1:], state_sequences[1:], strict=True):
+        result["pinch_changed_frames_vs_baseline"] = sum(
+            old != new for old, new in zip(baseline_states, states, strict=True)
+        )
+
     labels = [c[2] for c in configs]
     _print_compare_table(results, labels)
-    _print_conclusions(results, labels)
+    _print_conclusions(results)
 
     # 保存结果
     out_path = os.path.join(args.rec_dir, "gesture_ab_result.json")
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump({"configs": labels, "results": results}, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "schema_version": 2,
+                "methodology": {
+                    "freeze_pointer": "MouseMode blended pointer in source-video pixels",
+                    "release_frame_excluded": True,
+                    "has_click_drag_ground_truth": False,
+                },
+                "configs": labels,
+                "results": results,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
     print(f"\n结果已保存: {out_path}")
 
 
