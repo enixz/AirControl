@@ -43,9 +43,11 @@ class GestureRecognizer:
     MIDDLE_INDEX_RATIO = 0.95       # 中指伸出：中指长/食指长 > 0.95
     FINGERS_CLOSE_RATIO = 0.6       # 手指并拢：相邻指尖 dx < 掌宽×0.6
 
-    # —— 拇指上下判定（基于 tip↔ip 的 y 差，单位 px）——
+    # —— 拇指上下判定（基于 tip↔ip 的 y 差）——
     THUMBS_UP_TIP_IP_DELTA = -15    # 拇指上：tip 高于 ip 至少 15px
-    THUMBS_DOWN_TIP_IP_DELTA = 10   # 拇指下：tip 低于 ip 至少 10px
+    # THUMB_DOWN 改为掌宽比例（距离自适应），避免固定 10px 在 1080p 下过松
+    THUMBS_DOWN_ENTER_RATIO = 0.30  # 拇指下进入：tip 低于 ip 超过 掌宽×0.30
+    THUMBS_DOWN_EXIT_RATIO = 0.20   # 拇指下退出：tip 低于 ip 小于 掌宽×0.20（滞回）
 
     # —— 挥动判定 ——
     EDGE_RATIO = 0.12               # 画面边缘 12% 区域视为边缘
@@ -79,6 +81,9 @@ class GestureRecognizer:
         self._was_tucked = False
         # 食指伸出滞回状态：避免远距离下关键点抖动导致 index_extended 闪烁
         self._was_index_extended = False
+        # THUMB_DOWN 滞回状态 + 帧数确认：避免几何阈值边缘抖动导致每秒误触发
+        self._was_thumbs_down = False
+        self._thumbs_down_confirm_frames = 0
         # 握拳确认帧计数器
         self._fist_confirm_frames = 0
         # 允许并掌姿态丢帧计数器，容忍最大 3 帧的抖动
@@ -159,12 +164,18 @@ class GestureRecognizer:
             and thumb_tip[2] < thumb_mcp[2]
             and thumb_tip_to_ip < self.THUMBS_UP_TIP_IP_DELTA
         )
+        # THUMB_DOWN 滞回判定（掌宽比例自适应）：避免固定 10px 在 1080p 下过松
+        thumbs_down_threshold = hand_width * (
+            self.THUMBS_DOWN_EXIT_RATIO if self._was_thumbs_down
+            else self.THUMBS_DOWN_ENTER_RATIO
+        )
         is_thumbs_down = (
             not thumb_up
             and thumb_tip[2] > thumb_mcp[2]
             and thumb_tip[2] > thumb_ip[2]
-            and thumb_tip_to_ip > self.THUMBS_DOWN_TIP_IP_DELTA
+            and thumb_tip_to_ip > thumbs_down_threshold
         )
+        self._was_thumbs_down = is_thumbs_down
 
         four_fingers_down = not index_up and not middle_up and not ring_up and not pinky_up
 
@@ -201,7 +212,7 @@ class GestureRecognizer:
             "thumb_index_pinch": thumb_index < pinch_threshold,
             "thumb_middle_pinch": thumb_middle < pinch_threshold,
             "is_fist": four_fingers_down and thumb_folded,
-            "is_open_palm": index_up and middle_up and ring_up and pinky_up and thumb_up,
+            "is_open_palm": index_up and middle_up and ring_up,
             "thumb_tucked": thumb_tucked,
             "thumb_extended": thumb_extended,
             "thumb_writing": index_extended and not middle_up and not ring_up and not pinky_up and not thumb_extended,
@@ -457,9 +468,14 @@ class GestureRecognizer:
             return "THUMB_DOWN"
 
         if features["is_thumbs_down"] and not features["index_up"] and not features["middle_up"] and not features["ring_up"] and not features["pinky_up"]:
-            logger.info("=> Trigger: THUMB_DOWN (geometric)")
-            self._reset_state()
-            return "THUMB_DOWN"
+            self._thumbs_down_confirm_frames += 1
+            if self._thumbs_down_confirm_frames >= 3:
+                logger.info("=> Trigger: THUMB_DOWN (geometric, confirmed %d frames)", self._thumbs_down_confirm_frames)
+                self._thumbs_down_confirm_frames = 0
+                self._reset_state()
+                return "THUMB_DOWN"
+        else:
+            self._thumbs_down_confirm_frames = 0
 
         if ml_label == "FIST":
             logger.info("=> Trigger: FIST (ML)")

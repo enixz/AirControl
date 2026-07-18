@@ -37,15 +37,15 @@ class TestConfigEdge(unittest.TestCase):
         cm = ConfigManager(config_file=self.config_path)
         self.assertIn("edge_acceleration_enabled", cm.config)
         self.assertIn("edge_acceleration_strength", cm.config)
-        self.assertEqual(cm.get("edge_acceleration_enabled"), True)
-        self.assertEqual(cm.get("edge_acceleration_strength"), 100)
+        self.assertEqual(cm.get("edge_acceleration_enabled"), False)
+        self.assertEqual(cm.get("edge_acceleration_strength"), 35)
 
     def test_save_preserves_edge_keys(self):
         """保存后 config.json 中包含正确的 edge 配置键"""
         # Start with empty config to trigger defaults
         cm = ConfigManager(config_file=self.config_path)
-        self.assertEqual(cm.get("edge_acceleration_enabled"), True)
-        self.assertEqual(cm.get("edge_acceleration_strength"), 100)
+        self.assertEqual(cm.get("edge_acceleration_enabled"), False)
+        self.assertEqual(cm.get("edge_acceleration_strength"), 35)
 
         # Modify values
         cm.set("edge_acceleration_enabled", False)
@@ -74,6 +74,22 @@ class TestConfigEdge(unittest.TestCase):
         self.assertEqual(saved.get("edge_acceleration_enabled"), True)
         self.assertEqual(saved.get("edge_acceleration_strength"), 60)
         self.assertEqual(saved.get("mouse_sensitivity"), 55)
+
+    def test_apply_stability_profile_sets_related_defaults(self):
+        """体验档位会同步相关稳定性开关。"""
+        cm = ConfigManager(config_file=self.config_path)
+        cm.apply_stability_profile("long_range")
+        self.assertEqual(cm.get("stability_profile"), "long_range")
+        self.assertEqual(cm.get("edge_acceleration_enabled"), True)
+        self.assertEqual(cm.get("edge_acceleration_strength"), 60)
+        self.assertEqual(cm.get("long_range_enabled"), True)
+        self.assertEqual(cm.get("draw_thumb_lift"), False)
+
+        cm.apply_stability_profile("stable")
+        self.assertEqual(cm.get("stability_profile"), "stable")
+        self.assertEqual(cm.get("edge_acceleration_enabled"), False)
+        self.assertEqual(cm.get("edge_acceleration_strength"), 35)
+        self.assertEqual(cm.get("long_range_enabled"), False)
 
 
 if __name__ == "__main__":

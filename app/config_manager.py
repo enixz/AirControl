@@ -32,9 +32,51 @@ def _is_optional_string(value):
     return value is None or isinstance(value, str)
 
 
+_STABILITY_PROFILE_PRESETS = {
+    # v1.3.6 默认档：吸收 v1.3 的可预期手感，优先少误触、少断笔。
+    "stable": {
+        "edge_acceleration_enabled": False,
+        "edge_acceleration_strength": 35,
+        "long_range_enabled": False,
+        "draw_thumb_lift": False,
+        "draw_vote_ratio": 0.60,
+        "adaptive_skip_enabled": False,
+        "geometric_constraint_enabled": False,
+        "temporal_voter_enabled": False,
+    },
+    # 保留 1.3.5 的触达增强，但把鼠标边缘加速降到温和强度。
+    "balanced": {
+        "edge_acceleration_enabled": True,
+        "edge_acceleration_strength": 35,
+        "long_range_enabled": True,
+        "draw_thumb_lift": False,
+        "draw_vote_ratio": 0.60,
+        "adaptive_skip_enabled": False,
+        "geometric_constraint_enabled": False,
+        "temporal_voter_enabled": False,
+    },
+    # 远距演示/板书专项，保持 crop-zoom、人脸引导和预测补帧打开。
+    "long_range": {
+        "edge_acceleration_enabled": True,
+        "edge_acceleration_strength": 60,
+        "long_range_enabled": True,
+        "draw_thumb_lift": False,
+        "draw_vote_ratio": 0.60,
+        "adaptive_skip_enabled": False,
+        "geometric_constraint_enabled": False,
+        "temporal_voter_enabled": False,
+    },
+}
+
+
 _CONFIG_SCHEMA = {
     "target_app": (str, lambda v: v in ("WPS", "PowerPoint"), "WPS"),
-    "detection_engine": (str, lambda v: v == "mediapipe", "mediapipe"),
+    "stability_profile": (
+        str,
+        lambda v: v in _STABILITY_PROFILE_PRESETS,
+        "stable",
+    ),
+    "detection_engine": (str, lambda v: v in ("mediapipe", "hagrid_yolo"), "mediapipe"),
     "camera_index": (int, _is_int_in(0, 9), 0),
     "camera_width": (
         (int, type(None)),
@@ -53,8 +95,8 @@ _CONFIG_SCHEMA = {
     "mouse_sensitivity": (int, _is_int_in(1, 200), 40),
     "pen_width": (int, _is_int_in(1, 100), 15),
     "pen_width_auto_scale": (bool, _is_bool, False),
-    "edge_acceleration_enabled": (bool, _is_bool, True),
-    "edge_acceleration_strength": (int, _is_int_in(0, 500), 100),
+    "edge_acceleration_enabled": (bool, _is_bool, False),
+    "edge_acceleration_strength": (int, _is_int_in(0, 500), 35),
     "edge_y_canvas_enabled": (bool, _is_bool, True),
     "edge_y_canvas_deadzone_bottom": (int, _is_int_in(0, 100), 18),
     "edge_y_canvas_deadzone_top": (int, _is_int_in(0, 100), 10),
@@ -63,7 +105,7 @@ _CONFIG_SCHEMA = {
         lambda v: v in ("Left", "Right", "Auto"),
         "Auto",
     ),
-    "hand_detection_confidence": ((int, float), _is_num_in(0.1, 1.0), 0.4),
+    "hand_detection_confidence": ((int, float), _is_num_in(0.1, 1.0), 0.5),
     "hand_presence_confidence": ((int, float), _is_num_in(0.1, 1.0), 0.5),
     "hand_tracking_confidence": ((int, float), _is_num_in(0.1, 1.0), 0.5),
     "model_type": (str, lambda v: v in ("Heavy", "Lite", "Full"), "Heavy"),
@@ -107,6 +149,9 @@ _CONFIG_SCHEMA = {
     # 推理降采样宽度：高分辨率帧（如 1080p）先缩到此宽度再喂 MediaPipe，坐标归一化无需补偿。
     # 1080p 整帧推理 ~42ms → ~640-720px 后 ~15ms，直接决定"快速移动跟不跟手"。0=不降采样。
     "inference_max_width": (int, _is_int_in(0, 1920), 720),
+    # YOLO 手部检测器置信度阈值（仅 hagrid_yolo 引擎使用）。
+    # 越低检出越多但误检也多；0.25 是 HaGRID v2 推荐值。
+    "yolo_confidence": ((int, float), _is_num_in(0.05, 0.95), 0.25),
     # 远距离 ZOOM 鲁棒性：连续丢帧多少帧才断 ZOOM；人脸检测短边分辨率（越大越能找回远处的手）。
     "zoom_miss_frames": (int, _is_int_in(3, 60), 10),
     "face_detect_short": (int, _is_int_in(240, 1280), 400),
@@ -114,7 +159,7 @@ _CONFIG_SCHEMA = {
     # 这些层是 GLM5.2 强化时叠加的，互相打架反而降低识别率/产生闪烁/断笔/不跟手。
     # 默认关闭 = 回到接近原版 aircontrol 的直管线；需要时单独打开做 A/B 验证。
     "adaptive_skip_enabled": (bool, _is_bool, False),       # 自适应跳帧补帧（冻结→跳变）
-    "long_range_enabled": (bool, _is_bool, True),           # crop-zoom/多尺度/人脸引导远距增强（与 config.json 默认对齐）
+    "long_range_enabled": (bool, _is_bool, False),          # 稳定档默认关闭，远距档位再开启
     "geometric_constraint_enabled": (bool, _is_bool, False),  # 骨长约束滤波（运动时冻结关键点）
     "hand_prediction_enabled": (bool, _is_bool, True),      # 幽灵手/丢手预测补帧（与老版一致，默认开启）
     "temporal_voter_enabled": (bool, _is_bool, False),      # 时序投票器+FSM（阶段2.11默认关闭，回到老版基线）
@@ -123,7 +168,7 @@ _CONFIG_SCHEMA = {
     "mode_switch_release_sec": ((int, float), _is_num_in(0.1, 1.0), 0.25),
     "draw_frontality_gate": ((int, float), _is_num_in(0.0, 3.0), 0.65),
     "draw_record_trace": (bool, _is_bool, False),
-    "draw_thumb_lift": (bool, _is_bool, True),
+    "draw_thumb_lift": (bool, _is_bool, False),
     "draw_two_finger_geom": (bool, _is_bool, False),
     "draw_vote_window_sec": ((int, float), _is_num_in(0.1, 1.0), 0.30),
     "draw_vote_ratio": ((int, float), _is_num_in(0.5, 1.0), 0.60),
@@ -182,6 +227,7 @@ class ConfigManager:
             self.config_file = os.path.join(project_root(), config_file)
         self.default_config = {
             "target_app": "WPS",
+            "stability_profile": "stable",
             "model_type": "Heavy",
             "interaction_mode": "mouse",
             "camera_index": 0,
@@ -194,8 +240,8 @@ class ConfigManager:
             "camera_height": None,
             "camera_force_mjpeg": True,
             "camera_min_fps": 10,
-            "edge_acceleration_enabled": True,
-            "edge_acceleration_strength": 100,
+            "edge_acceleration_enabled": False,
+            "edge_acceleration_strength": 35,
             "edge_y_canvas_enabled": True,
             "edge_y_canvas_deadzone_bottom": 18,
             "edge_y_canvas_deadzone_top": 10,
@@ -210,16 +256,15 @@ class ConfigManager:
             "inference_max_width": 720,
             "zoom_miss_frames": 10,
             "face_detect_short": 400,
-            # 投机式增强层总开关（long_range_enabled 与 config.json 默认对齐为 True，
-            # 支持远距离 crop-zoom/多尺度/人脸引导；其余增强层默认关闭）
+            # 投机式增强层总开关：稳定档默认关闭远距增强，需要时用 long_range 档位开启。
             "adaptive_skip_enabled": False,
-            "long_range_enabled": True,
+            "long_range_enabled": False,
             "geometric_constraint_enabled": False,
             "hand_prediction_enabled": True,
             "temporal_voter_enabled": False,
             "detection_engine": "mediapipe",
             "dominant_hand": "Auto",
-            "hand_detection_confidence": 0.4,
+            "hand_detection_confidence": 0.5,
             "hand_presence_confidence": 0.5,
             "hand_tracking_confidence": 0.5,
             "mode_switch_hold_sec": 1.0,
@@ -227,7 +272,7 @@ class ConfigManager:
             "mode_switch_release_sec": 0.25,
             "draw_frontality_gate": 0.65,
             "draw_record_trace": False,
-            "draw_thumb_lift": True,
+            "draw_thumb_lift": False,
             "draw_two_finger_geom": False,
             "draw_vote_window_sec": 0.30,
             "draw_vote_ratio": 0.60,
@@ -317,6 +362,21 @@ class ConfigManager:
     def set(self, key, value):
         self.config[key] = value
         self.save_config()
+
+    def apply_stability_profile(self, profile):
+        """Apply a named experience profile to the related stability switches."""
+        if profile not in _STABILITY_PROFILE_PRESETS:
+            profile = "stable"
+        with self.batch_update():
+            self.set("stability_profile", profile)
+            for key, value in _STABILITY_PROFILE_PRESETS[profile].items():
+                self.set(key, value)
+
+    def stability_profile_defaults(self, profile):
+        """Return the config values controlled by a stability profile."""
+        if profile not in _STABILITY_PROFILE_PRESETS:
+            profile = "stable"
+        return dict(_STABILITY_PROFILE_PRESETS[profile])
 
     def get_mapping(self, gesture):
         return self.config["gesture_mapping"].get(gesture, "none")

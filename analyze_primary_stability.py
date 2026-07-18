@@ -217,17 +217,25 @@ class PrimarySwitchCounter(logging.Handler):
             self.count += 1
 
 
-def run_redetect(rec_dir):
+def run_redetect(rec_dir, engine=None):
     """用当前代码对录制帧重新跑 find_hands，算指标。
 
     注意：这只反映**当前代码**在原始帧上的表现，不是原始运行时行为。
     原始运行时行为请用 run_from_meta（--from-meta）。
+
+    Args:
+        rec_dir: 录制目录
+        engine: 可选，覆盖 config.json 中的 detection_engine（用于 A/B 对比）
     """
     sys.path.insert(0, os.path.join(PROJECT_ROOT, "app"))
     from services.hand_tracker_factory import create_hand_tracker
 
     with open(os.path.join(PROJECT_ROOT, "config.json"), encoding="utf-8") as f:
         cfg = json.load(f)
+
+    # --engine 覆盖 config.json 中的 detection_engine
+    if engine:
+        cfg["detection_engine"] = engine
 
     counter = PrimarySwitchCounter()
     glog = logging.getLogger("gesture")
@@ -330,6 +338,7 @@ def run_redetect(rec_dir):
     multi_frames = sum(1 for _, ws in all_wrists_history if len(ws) >= 2)
 
     print(f"\n=== 主手稳定性分析 [重新检测模式] ({rec_dir}) ===")
+    print(f"  引擎                {cfg.get('detection_engine', 'mediapipe')}")
     print("  数据源              当前代码重新跑 find_hands（非原始运行时行为）")
     print(f"  frames              {frame_idx}")
     print(f"  multi_hand_frames   {multi_frames} ({multi_frames/frame_idx:.1%})")
@@ -352,6 +361,8 @@ def main():
     ap.add_argument("--render-overlay", action="store_true",
                     help="（仅 --from-meta）把识别点轨迹叠加到原始帧视频，输出 mp4")
     ap.add_argument("--overlay-out", help="overlay 视频输出路径（默认 <rec_dir>/overlay_with_meta.mp4）")
+    ap.add_argument("--engine", choices=["mediapipe", "hagrid_yolo"], default=None,
+                    help="覆盖 config.json 中的 detection_engine，用于 A/B 对比")
     args = ap.parse_args()
 
     if not os.path.isdir(args.rec_dir):
@@ -361,7 +372,7 @@ def main():
         run_from_meta(args.rec_dir, render_overlay=args.render_overlay,
                       overlay_out=args.overlay_out)
     else:
-        run_redetect(args.rec_dir)
+        run_redetect(args.rec_dir, engine=args.engine)
 
 
 if __name__ == "__main__":

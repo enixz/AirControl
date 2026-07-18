@@ -18,6 +18,7 @@ class TestConfigRuntime(unittest.TestCase):
                 json.dump(
                     {
                         "camera_force_mjpeg": "yes",
+                        "stability_profile": "turbo",
                         "draw_vote_ratio": 2.0,
                         "mode_switch_release_sec": 0.0,
                         "record_raw_max_frames": -1,
@@ -26,6 +27,7 @@ class TestConfigRuntime(unittest.TestCase):
                 )
             config = ConfigManager(path)
             self.assertIs(config.get("camera_force_mjpeg"), True)
+            self.assertEqual(config.get("stability_profile"), "stable")
             self.assertEqual(config.get("draw_vote_ratio"), 0.60)
             self.assertEqual(config.get("mode_switch_release_sec"), 0.25)
             self.assertEqual(config.get("record_raw_max_frames"), 2000)

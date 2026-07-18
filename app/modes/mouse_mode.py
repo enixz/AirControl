@@ -178,8 +178,8 @@ class MouseMode(ModeBase):
         landmarks = hands_landmarks[0]
         features = self.recognizer.get_hand_features(landmarks)
         # 先把中指尖归一化坐标经活动区映射拉伸到全屏（远距离也能轻松跨屏），
-        # 再交给 move_to_normalized（启用边缘加速+Y轴虚拟画布，解决屏幕角落和任务栏触达）
-        # 做灵敏度平滑+落点。edge_strength=35 较温和，避免与活动区双重拉伸过度。
+        # 再交给 move_to_normalized 做灵敏度平滑+落点。v1.3.6 稳定档默认不再叠加
+        # 边缘加速，避免“活动区映射 + 边缘加速”双重放大；用户开启边缘加速时才启用。
         # span_floor 按距离分段：近→趋近直接映射（不过敏），远→放大够到全屏。
         # 对 hand_width 做 EMA 平滑 + span_floor 滞回，避免帧间抖动导致灵敏度跳变。
         raw_hand_width = features["hand_width"]
@@ -204,7 +204,8 @@ class MouseMode(ModeBase):
         x_norm = pointer_x / frame_w
         y_norm = pointer_y / frame_h
         nx, ny = self._region_mapper.map(x_norm, y_norm, span_floor=span_floor)
-        screen_x, screen_y = self.mouse.move_to_normalized(nx, ny, apply_accel=True)
+        apply_accel = bool(self.config.get("edge_acceleration_enabled", False)) if self.config else False
+        screen_x, screen_y = self.mouse.move_to_normalized(nx, ny, apply_accel=apply_accel)
         self.cursor_overlay.update_cursor(screen_x, screen_y)
 
         # 2. 滚轮检测（持续滚动：保持剪刀手则持续输出）

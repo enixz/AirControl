@@ -175,7 +175,7 @@ class DrawStateMachineTest(unittest.TestCase):
     def test_frontal_thumb_apart_does_not_lift_when_disabled(self):
         """draw_thumb_lift=False：拇指分开不再抬笔——消除近距正面书写时
         拇指间歇被读成"分开"的笔画中途误断。单指姿势维持落笔，抬笔交给
-        ✌️ / 握拳 / 张掌。（阶段2.12 默认改为 True，此测试改为显式 False 覆盖关闭行为）"""
+        ✌️ / 握拳 / 张掌。（v1.3.6 稳定档默认就是 False，此测试锁定关闭行为）"""
         dm, overlay = make_draw_mode({"draw_thumb_lift": False})
         for _ in range(6):
             self.step(make_hand(), dm=dm)  # warm writing

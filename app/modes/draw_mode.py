@@ -89,8 +89,8 @@ class DrawMode(ModeBase):
 
     # 中央投票笔状态机：决定起落前，时间窗内至少要有 VOTE_MIN 帧证据，
     # 防止窗口刚填充时凭 1-2 帧的比例噪声误触（低帧率下尤甚）。
-    # VOTE_MIN=2：低帧率（15-20fps）下 0.3s 窗口仅 4-6 帧，VOTE_MIN=3 太严。
-    VOTE_MIN = 2
+    # v1.3.6 稳定档回到 v1.3 的保守门槛：宁可起笔慢一两帧，也优先避免断笔。
+    VOTE_MIN = 3
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -111,16 +111,15 @@ class DrawMode(ModeBase):
         # 标定遥测节流
         self._last_telemetry = 0.0
         # 正面度低于此值视为拇指不可观测（侧对相机），冻结笔状态。
-        # 0.65（阶段2.12）：从 0.55 提高到 0.65，配合 draw_thumb_lift=True 默认启用，
-        # 只在手非常正对相机时才信任拇指分开信号，降低侧视/近距噪声误抬。
+        # 0.65 保留为拇指交互的高置信门槛；稳定档默认关闭拇指抬笔。
         self._frontality_gate = (
             float(self.config.get("draw_frontality_gate", 0.65)) if self.config else 0.65
         )
-        # 拇指分开抬笔：阶段2.12 改为默认启用。书写中食指伸出+拇指分开→hover（抬笔），
-        # 比剪刀手 ✌️ 更自然（无需切换手指）。配合 frontality_gate=0.65 降低误抬。
-        # 若实测仍有误抬，可在 config 设 draw_thumb_lift=false 回退到剪刀手停笔。
+        # 拇指分开抬笔：v1.3.6 稳定档默认关闭，吸收 v1.3 的“单指书写优先”
+        # 手感，避免近距正面书写时拇指距离抖动造成 vote_hover 断笔。
+        # 需要旧习惯时可在配置中设 draw_thumb_lift=true。
         self._thumb_lift = (
-            bool(self.config.get("draw_thumb_lift", True)) if self.config else True
+            bool(self.config.get("draw_thumb_lift", False)) if self.config else False
         )
         # ✌️ 双指抬笔的几何兜底：默认关闭。实测（2026-06-13）侧视书写时中指 2D
         # 投影使 mi 频繁 >0.95，单指被误判成双指而中途断笔（一会话 12 次误判
@@ -138,7 +137,7 @@ class DrawMode(ModeBase):
             float(self.config.get("draw_vote_window_sec", 0.30)) if self.config else 0.30
         )
         self._vote_ratio = (
-            float(self.config.get("draw_vote_ratio", 0.50)) if self.config else 0.50
+            float(self.config.get("draw_vote_ratio", 0.60)) if self.config else 0.60
         )
         # 书写中"张掌立即抬笔"的连续帧去抖：is_open_palm 单帧噪声（middle_up &
         # ring_up 偶发同真）此前会绕过投票窗立即 force_lift_pen → 断笔。改为需连续

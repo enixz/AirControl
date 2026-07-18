@@ -294,15 +294,16 @@ def test_ghost_hand_color_unified():
 
 
 def test_draw_vote_threshold_reachable():
-    """测试6: 板书模式投票阈值在低帧率下可达。
+    """测试6: 板书模式稳定档投票阈值保持保守可用。
 
-    模拟 20fps 下 0.3s 窗口 = 6 帧，VOTE_MIN=2, vote_ratio=0.50：
-    4帧 write 即可触发落笔（4/6=0.67 >= 0.50, total=6 >= 2）。
+    模拟 20fps 下 0.3s 窗口 = 6 帧，VOTE_MIN=3, vote_ratio=0.60：
+    4帧 write 可触发落笔（4/6=0.67 >= 0.60, total=6 >= 3），
+    3帧 write 不触发，优先避免误落笔。
     """
-    print("\n=== 测试6: 投票阈值在低帧率下可达 ===")
+    print("\n=== 测试6: 稳定档投票阈值保守可用 ===")
 
-    VOTE_MIN = 2
-    vote_ratio = 0.50
+    VOTE_MIN = 3
+    vote_ratio = 0.60
     vote_window_sec = 0.30
     fps = 20
     frames_in_window = int(fps * vote_window_sec)  # 6 帧
@@ -317,19 +318,13 @@ def test_draw_vote_threshold_reachable():
     print(f"  可触发落笔: {can_start_writing}")
     assert can_start_writing, "4/6 write 应能触发落笔"
 
-    # 旧阈值对比：VOTE_MIN=3, vote_ratio=0.60
-    old_can = (total >= 3) and (n_write >= total * 0.60)
-    print(f"  旧阈值(3/0.60): {n_write}/{total} = {n_write/total:.2f} >= 0.60? {old_can}")
-
-    # 3帧 write 的情况（更常见）
+    # 3帧 write 的情况：稳定档不触发，避免 50% 噪声窗口误落笔
     n_write_3 = 3
-    new_can = (total >= VOTE_MIN) and (n_write_3 >= total * vote_ratio)
-    old_can_3 = (total >= 3) and (n_write_3 >= total * 0.60)
-    print(f"  3/6 write: 新阈值={new_can}, 旧阈值={old_can_3}")
-    assert new_can, "3/6 write 在新阈值下应能触发"
-    assert not old_can_3, "3/6 write 在旧阈值下不应触发（证明旧阈值太严）"
+    stable_can = (total >= VOTE_MIN) and (n_write_3 >= total * vote_ratio)
+    print(f"  3/6 write: 稳定档触发={stable_can}")
+    assert not stable_can, "3/6 write 在稳定档下不应触发"
 
-    print("  PASS: 新投票阈值在低帧率下可达，旧阈值不可达")
+    print("  PASS: 稳定档投票阈值可达且更保守")
 
 
 def test_index_extended_hysteresis():

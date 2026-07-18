@@ -81,6 +81,18 @@ class SettingsDialog(QDialog):
         self.mode_combo.addItems(list(MODE_NAMES))
         self.mode_combo.setCurrentText(self.config.get("interaction_mode"))
 
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItem("稳定优先", "stable")
+        self.profile_combo.addItem("平衡", "balanced")
+        self.profile_combo.addItem("远距增强", "long_range")
+        idx_profile = self.profile_combo.findData(
+            self.config.get("stability_profile", "stable")
+        )
+        if idx_profile >= 0:
+            self.profile_combo.setCurrentIndex(idx_profile)
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        self.profile_combo.setToolTip("切换稳定性与远距离增强的默认策略")
+
         self.cd_spin = QSpinBox()
         self.cd_spin.setRange(500, 3000)
         self.cd_spin.setSingleStep(100)
@@ -197,6 +209,7 @@ class SettingsDialog(QDialog):
         tab_basic.addRow("控制目标软件:", self.app_combo)
         tab_basic.addRow("手势模型精度:", self.model_combo)
         tab_basic.addRow("交互模式:", self.mode_combo)
+        tab_basic.addRow("体验档位:", self.profile_combo)
         w_basic = QWidget()
         w_basic.setLayout(tab_basic)
         tabs.addTab(w_basic, "基础")
@@ -268,10 +281,13 @@ class SettingsDialog(QDialog):
         self.app_combo.setCurrentText(defaults.get("target_app", "WPS"))
         self.model_combo.setCurrentText(defaults.get("model_type", "Heavy"))
         self.mode_combo.setCurrentText(defaults.get("interaction_mode", "mouse"))
+        idx_profile = self.profile_combo.findData(defaults.get("stability_profile", "stable"))
+        if idx_profile >= 0:
+            self.profile_combo.setCurrentIndex(idx_profile)
         self.cd_spin.setValue(int(defaults.get("cooldown", 1.0) * 1000))
         self.sensitivity_spin.setValue(int(defaults.get("mouse_sensitivity", 40)))
-        self.edge_check.setChecked(bool(defaults.get("edge_acceleration_enabled", True)))
-        self.edge_strength_spin.setValue(int(defaults.get("edge_acceleration_strength", 100)))
+        self.edge_check.setChecked(bool(defaults.get("edge_acceleration_enabled", False)))
+        self.edge_strength_spin.setValue(int(defaults.get("edge_acceleration_strength", 35)))
         self.y_canvas_check.setChecked(bool(defaults.get("edge_y_canvas_enabled", True)))
         self.y_dz_bottom_spin.setValue(int(defaults.get("edge_y_canvas_deadzone_bottom", 18)))
         self.y_dz_top_spin.setValue(int(defaults.get("edge_y_canvas_deadzone_top", 10)))
@@ -293,6 +309,13 @@ class SettingsDialog(QDialog):
 
     def _on_edge_toggled(self, state):
         self.edge_strength_spin.setEnabled(state == Qt.CheckState.Checked.value)
+
+    def _on_profile_changed(self, _index=None):
+        preset = self.config.stability_profile_defaults(
+            self.profile_combo.currentData()
+        )
+        self.edge_check.setChecked(bool(preset.get("edge_acceleration_enabled", False)))
+        self.edge_strength_spin.setValue(int(preset.get("edge_acceleration_strength", 35)))
 
     def _enumerate_cameras_worker(self):
         current_idx = self.config.get("camera_index")
@@ -342,6 +365,7 @@ class SettingsDialog(QDialog):
                     self.config.set("camera_index", new_camera_idx)
 
         with self.config.batch_update():
+            self.config.apply_stability_profile(self.profile_combo.currentData())
             self.config.set("target_app", self.app_combo.currentText())
             self.config.set("model_type", self.model_combo.currentText())
             self.config.set("interaction_mode", self.mode_combo.currentText())

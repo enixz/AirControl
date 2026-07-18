@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.3.6 - 2026-07-08
+
+- Absorbed v1.3's conservative interaction defaults into the v1.3.5 tracker
+  base: board writing now defaults to single-finger write stability
+  (draw_thumb_lift=false), VOTE_MIN is back to 3, and the draw vote ratio is
+  consistently 0.60.
+- Reduced mouse-mode over-amplification: active-region mapping remains, but
+  edge acceleration is only applied when the user enables it; the stable
+  default is edge_acceleration_enabled=false with strength 35.
+- Added stability_profile presets (stable / balanced / long_range) and exposed
+  them in settings so far-distance enhancements remain available without
+  affecting the default classroom/whiteboard feel.
+- Stable profile now keeps speculative layers off by default, including
+  long_range_enabled=false, while preserving the v1.3.5 handedness-keyed
+  smoother, recording diagnostics, camera hardening, and expanded tests.
+
 ## v1.3.5 - 2026-07-06
 
 - Reverted to v1.3.0's handedness-keyed smoother architecture, eliminating
