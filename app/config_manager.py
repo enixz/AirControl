@@ -34,6 +34,8 @@ def _is_optional_string(value):
 
 _STABILITY_PROFILE_PRESETS = {
     # v1.3.6 默认档：吸收 v1.3 的可预期手感，优先少误触、少断笔。
+    # v1.7.0：pinch_freeze + pinch_hysteresis 纳入预设（A/B 验证：减少 10% 翻转、
+    # 消除 grace 期内 64px 均值漂移）。thumb_perp 暂不纳入（阈值需标定）。
     "stable": {
         "edge_acceleration_enabled": False,
         "edge_acceleration_strength": 35,
@@ -43,6 +45,8 @@ _STABILITY_PROFILE_PRESETS = {
         "adaptive_skip_enabled": False,
         "geometric_constraint_enabled": False,
         "temporal_voter_enabled": False,
+        "pinch_freeze_enabled": True,
+        "pinch_hysteresis_enabled": True,
     },
     # 保留 1.3.5 的触达增强，但把鼠标边缘加速降到温和强度。
     "balanced": {
@@ -54,6 +58,8 @@ _STABILITY_PROFILE_PRESETS = {
         "adaptive_skip_enabled": False,
         "geometric_constraint_enabled": False,
         "temporal_voter_enabled": False,
+        "pinch_freeze_enabled": True,
+        "pinch_hysteresis_enabled": True,
     },
     # 远距演示/板书专项，保持 crop-zoom、人脸引导和预测补帧打开。
     "long_range": {
@@ -65,6 +71,8 @@ _STABILITY_PROFILE_PRESETS = {
         "adaptive_skip_enabled": False,
         "geometric_constraint_enabled": False,
         "temporal_voter_enabled": False,
+        "pinch_freeze_enabled": True,
+        "pinch_hysteresis_enabled": True,
     },
 }
 
@@ -98,14 +106,16 @@ _CONFIG_SCHEMA = {
     "edge_acceleration_enabled": (bool, _is_bool, False),
     "edge_acceleration_strength": (int, _is_int_in(0, 500), 35),
     # Freeze-on-pinch（实施方案 Phase 3.1）：捏合上升沿冻结光标，grace 期内
-    # 锁定在瞄准点消除漂移；grace 结束后解冻允许 DRAG。默认关闭，A/B 验证后开启。
-    "pinch_freeze_enabled": (bool, _is_bool, False),
+    # 锁定在瞄准点消除漂移；grace 结束后解冻允许 DRAG。
+    # v1.7.0 起默认开启（A/B 验证：grace 期内漂移均值 64px，freeze 可消除）。
+    "pinch_freeze_enabled": (bool, _is_bool, True),
     "pinch_freeze_grace_sec": ((int, float), _is_num_in(0.0, 2.0), 0.3),
     # Pinch 双阈值滞回（实施方案 Phase 3.2）：ENTER/EXIT 双阈值消除边界抖动。
-    # 默认关闭保持旧版单阈值行为；开启后已捏合用 EXIT（更宽松），未捏合用 ENTER（更严格）。
-    "pinch_hysteresis_enabled": (bool, _is_bool, False),
+    # v1.7.0 起默认开启（A/B 验证：翻转次数 -10%，滞回带内 16 帧受益）。
+    "pinch_hysteresis_enabled": (bool, _is_bool, True),
     # thumb_extended 旋转不变判定（实施方案 Phase 3.3）：用拇指 tip 到掌心中轴的
-    # 垂直距离/掌宽 替代旧的 thumb_tip_to_index_mcp 距离。默认关闭，新旧并存对照。
+    # 垂直距离/掌宽 替代旧的 thumb_tip_to_index_mcp 距离。暂默认关闭（A/B 显示
+    # 阈值 0.50 偏低，perp_ratio 实测均值 1.106，需采集内收姿势标定后再开启）。
     "thumb_perp_ratio_enabled": (bool, _is_bool, False),
     "edge_y_canvas_enabled": (bool, _is_bool, True),
     "edge_y_canvas_deadzone_bottom": (int, _is_int_in(0, 100), 18),
@@ -252,9 +262,9 @@ class ConfigManager:
             "camera_min_fps": 10,
             "edge_acceleration_enabled": False,
             "edge_acceleration_strength": 35,
-            "pinch_freeze_enabled": False,
+            "pinch_freeze_enabled": True,
             "pinch_freeze_grace_sec": 0.3,
-            "pinch_hysteresis_enabled": False,
+            "pinch_hysteresis_enabled": True,
             "thumb_perp_ratio_enabled": False,
             "edge_y_canvas_enabled": True,
             "edge_y_canvas_deadzone_bottom": 18,

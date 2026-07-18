@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.7.0 - 2026-07-18
+
+- **Enable Phase 3.1 + 3.2 by default** after A/B validation on local
+  recording `raw_capture/20260705_174137` (1583 frames, 1455 with hands):
+  - `pinch_freeze_enabled`: now `true` by default. A/B showed 10 pinch
+    rising-edges with grace-period fingertip drift mean 63.9px (P95 283px)
+    — freeze eliminates this click-point drift.
+  - `pinch_hysteresis_enabled`: now `true` by default. A/B showed pinch
+    flips 20→18 (-10%), 16 frames in the 0.30-0.40 hysteresis band
+    stabilized (32% of pinch frames).
+- **Consistency fix**: both switches added to all three
+  `stability_profile` presets (stable/balanced/long_range) as `true`, so
+  the profile system remains the single source of truth for stability
+  switches (previously they were unmanaged by profiles, causing an
+  incomplete stability picture on profile switch). Schema defaults and
+  `default_config` updated to match.
+- `thumb_perp_ratio_enabled` remains `false` — A/B showed the 0.50
+  threshold is far below the measured perp_ratio mean (1.106); needs
+  thumb-tucked calibration recording before enabling.
+- No code logic changes (Phase 3.1-3.3 implementations unchanged); this
+  release only flips validated defaults and aligns the profile system.
+
 ## v1.6.0 - 2026-07-18
 
 - **Phase 3.3 (实施方案)**: Rotation-invariant `thumb_extended` via
