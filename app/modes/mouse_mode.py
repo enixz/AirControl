@@ -43,6 +43,11 @@ class MouseMode(ModeBase):
         # _last_span_floor 记录上一帧使用的 span_floor，新值与之差异超过阈值才更新。
         self._last_span_floor = None
         self._span_floor_hysteresis = 0.08  # 滞回带宽
+        # Freeze-on-pinch 状态（实施方案 Phase 3.1）：grace 期内光标锁定在
+        # 捏合上升沿的瞄准点，消除捏合瞬间手腕连带微动导致的点击漂移。
+        # None = 未冻结；(screen_x, screen_y) = 冻结位置
+        self._frozen_pos = None
+        self._freeze_start = None  # time.time() 冻结起始时刻
 
     # 守护线程：handle() 静默超过该秒数且 _is_left_holding=True，认为主线程被
     # DefWindowProc 模态循环堵住（典型场景：手势 LEFTDOWN 落在某对话框标题栏触发
@@ -61,6 +66,9 @@ class MouseMode(ModeBase):
         # 重置 hand_width 平滑和 span_floor 滞回状态
         self._hand_width_ema = None
         self._last_span_floor = None
+        # 重置 freeze-on-pinch 状态
+        self._frozen_pos = None
+        self._freeze_start = None
         self.cursor_overlay.show_fullscreen()
         # 新增：状态机初始化
         self._is_left_holding = False
@@ -95,6 +103,9 @@ class MouseMode(ModeBase):
             self._is_left_holding = False
             self.cursor_overlay.set_left_hold(False)
         self._is_right_pinching = False
+        # 清除 freeze-on-pinch 状态
+        self._frozen_pos = None
+        self._freeze_start = None
         self.mouse.reset()
         self.cursor_overlay.hide_cursor()
         self.cursor_overlay.hide()
@@ -164,6 +175,9 @@ class MouseMode(ModeBase):
             # 手丢失也清掉 watchdog 锁定，下次进入捏合视为新的操作
             self._left_hold_blocked_until_release = False
             self._is_right_pinching = False
+            # 清除 freeze-on-pinch 状态
+            self._frozen_pos = None
+            self._freeze_start = None
             self.mouse.reset()
             self.cursor_overlay.hide_cursor()
             # 重置 hand_width 平滑和 span_floor 滞回状态
@@ -205,7 +219,26 @@ class MouseMode(ModeBase):
         y_norm = pointer_y / frame_h
         nx, ny = self._region_mapper.map(x_norm, y_norm, span_floor=span_floor)
         apply_accel = bool(self.config.get("edge_acceleration_enabled", False)) if self.config else False
-        screen_x, screen_y = self.mouse.move_to_normalized(nx, ny, apply_accel=apply_accel)
+
+        # === Freeze-on-pinch（实施方案 Phase 3.1）===
+        # 借鉴 Air-Cursor freeze-on-fist，本地化为 pinch（AC-trae 点击手势是捏合）。
+        # grace 期内光标锁在捏合上升沿的瞄准点，消除捏合瞬间手腕连带微动+landmark
+        # 抖动导致的点击漂移。grace 结束后解冻，恢复正常移动（DRAG）。
+        # 参考 draw_mode.py:355-360 的 freeze 先例（书写中冻结活动区映射）。
+        pinch_freeze_enabled = bool(self.config.get("pinch_freeze_enabled", False)) if self.config else False
+        if (pinch_freeze_enabled and self._is_left_holding
+                and self._frozen_pos is not None):
+            grace_sec = float(self.config.get("pinch_freeze_grace_sec", 0.3)) if self.config else 0.3
+            if time.time() - self._freeze_start < grace_sec:
+                # grace 期内：光标锁定在冻结位置，跳过 move_to_normalized
+                screen_x, screen_y = self._frozen_pos
+            else:
+                # grace 结束：解冻，恢复 DRAG 移动
+                self._frozen_pos = None
+                self._freeze_start = None
+                screen_x, screen_y = self.mouse.move_to_normalized(nx, ny, apply_accel=apply_accel)
+        else:
+            screen_x, screen_y = self.mouse.move_to_normalized(nx, ny, apply_accel=apply_accel)
         self.cursor_overlay.update_cursor(screen_x, screen_y)
 
         # 2. 滚轮检测（持续滚动：保持剪刀手则持续输出）
@@ -230,6 +263,11 @@ class MouseMode(ModeBase):
                 self.mouse.left_down()
                 self._is_left_holding = True
                 self.cursor_overlay.set_left_hold(True)
+                # Freeze-on-pinch: 在上升沿记录瞄准点为冻结位置
+                # （screen_x/y 已由上方 move_to_normalized 计算得出）
+                if pinch_freeze_enabled:
+                    self._frozen_pos = (screen_x, screen_y)
+                    self._freeze_start = time.time()
             # 按住期间继续移动光标，每帧返回 HOLD 状态
             return ModeResult(
                 gesture="LEFT_HOLD",
@@ -243,6 +281,9 @@ class MouseMode(ModeBase):
                 self.cursor_overlay.set_left_hold(False)
             # 用户松开捏合 → 解除 watchdog 锁定，下次捏合可正常 LEFTDOWN
             self._left_hold_blocked_until_release = False
+            # 松开捏合也清除 freeze 状态（grace 是上限，pinch 释放立即解冻）
+            self._frozen_pos = None
+            self._freeze_start = None
 
         # 4. 右键单击（单次触发：使用 recognizer 的 pinch 特征）
         if features["thumb_middle_pinch"]:

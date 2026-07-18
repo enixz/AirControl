@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.4.0 - 2026-07-18
+
+- **Phase 3.1 (实施方案)**: Freeze-on-pinch cursor stabilization. When the
+  user pinches (thumb-index), the cursor locks at the aimed position for a
+  configurable grace period (`pinch_freeze_grace_sec`, default 0.3s), then
+  releases for normal drag. Eliminates click-point drift caused by wrist
+  micro-motion and landmark jitter during the pinch gesture.
+- Borrowed from Air-Cursor's `freeze-on-fist` design, localized to pinch
+  (AC-trae's click gesture is thumb-index pinch, not fist). Follows the
+  existing freeze precedent in `draw_mode.py` (freeze active-region mapping
+  during writing).
+- New config switches (default off for reversibility): `pinch_freeze_enabled`
+  (bool) and `pinch_freeze_grace_sec` (0.0–2.0s). Set `pinch_freeze_enabled`
+  to `true` in `config.json` to enable.
+- 8 new unit tests covering the state machine: rising-edge record, grace-period
+  lock, post-grace release, pinch-release clear, hand-lost clear, on_exit clear.
+
 ## v1.3.6 - 2026-07-08
 
 - Absorbed v1.3's conservative interaction defaults into the v1.3.5 tracker
