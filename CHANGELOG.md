@@ -1,5 +1,23 @@
 # Changelog
 
+## v1.5.0 - 2026-07-18
+
+- **Phase 3.2 (实施方案)**: Pinch dual-threshold hysteresis. Adds
+  `PINCH_ENTER_RATIO=0.30` (stricter) and `PINCH_EXIT_RATIO=0.40` (lenient)
+  to eliminate pinch-state flicker at the threshold boundary. When already
+  pinching, the EXIT threshold keeps the state stable until the distance
+  exceeds 0.40×hand_width; when not pinching, the ENTER threshold requires
+  the distance to drop below 0.30×hand_width.
+- Calibration anchors documented in code: real pinch ≈ 0.15–0.25×hand_width,
+  fist ≈ 0.50+×hand_width, so EXIT=0.40 stays well below fist (fist never
+  misfires as pinch-release). This matches Air-Cursor's lesson that
+  finger-extension guards are unreliable and distance thresholds alone
+  provide clean separation.
+- New config switch `pinch_hysteresis_enabled` (default off for
+  reversibility). Telemetry extended to log `idx_ratio`/`mid_ratio` for
+  real-world calibration.
+- 8 new unit tests: ENTER/EXIT boundaries, full hysteresis cycle, state reset.
+
 ## v1.4.0 - 2026-07-18
 
 - **Phase 3.1 (实施方案)**: Freeze-on-pinch cursor stabilization. When the

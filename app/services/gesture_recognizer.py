@@ -32,7 +32,18 @@ class GestureRecognizer:
     FRONTALITY_GATE = 0.45
 
     # —— 单手手势阈值（均按掌宽比例，距离自适应）——
-    PINCH_RATIO = 0.35              # 捏合：拇指尖↔食指尖 < 掌宽×0.35
+    PINCH_RATIO = 0.35              # 捏合：拇指尖↔食指尖 < 掌宽×0.35（单阈值，兼容旧版）
+    # 双阈值滞回（实施方案 Phase 3.2）：借鉴 Air-Cursor gestures.py 的滞回设计。
+    # ENTER 更严格（距离更小才进入捏合），EXIT 更宽松（距离更大才退出），
+    # 滞回带 = EXIT - ENTER = 0.10，与 Air-Cursor 归一化值一致。
+    # 标定锚点（文档化，供后人调参）：
+    #   - 真实捏合 thumb-index ≈ 掌宽×0.15-0.25（实测）→ ENTER_RATIO=0.30 仍高于真实捏合
+    #   - 握拳时 thumb-index ≈ 掌宽×0.50+（fist 距离）→ EXIT_RATIO=0.40 远低于 fist
+    #   - 因此握拳永远不会被误判为 pinch 释放，与 Air-Cursor 的教训一致
+    #   （Air-Cursor 教训：finger-extension guard 不可靠，距离阈值单独做分离即可。
+    #    AC-trae 本就没用 finger-extension guard，这点已做对，缺的是滞回+标定文档）
+    PINCH_ENTER_RATIO = 0.30        # 进入捏合：距离 < 掌宽×0.30（比单阈值 0.35 更严格）
+    PINCH_EXIT_RATIO = 0.40         # 退出捏合：距离 > 掌宽×0.40（比单阈值 0.35 更宽松）
     INDEX_EXTEND_RATIO = 0.60       # 食指伸出（进入）：食指长 > 掌宽×0.60
     INDEX_EXTEND_EXIT_RATIO = 0.50  # 食指伸出（退出）：食指长 > 掌宽×0.50（滞回，防闪烁）
     THUMB_TUCK_ENTER = 0.62         # 拇指内收进入：拇指尖↔食指 MCP < 掌宽×0.62
@@ -81,6 +92,11 @@ class GestureRecognizer:
         self._was_tucked = False
         # 食指伸出滞回状态：避免远距离下关键点抖动导致 index_extended 闪烁
         self._was_index_extended = False
+        # pinch 双阈值滞回状态（实施方案 Phase 3.2）：避免边界附近逐帧跳变
+        self._was_thumb_index_pinch = False
+        self._was_thumb_middle_pinch = False
+        # pinch 滞回开关：由 orchestrator 从 config 设置，默认关闭保持旧版行为
+        self.pinch_hysteresis_enabled = False
         # THUMB_DOWN 滞回状态 + 帧数确认：避免几何阈值边缘抖动导致每秒误触发
         self._was_thumbs_down = False
         self._thumbs_down_confirm_frames = 0
@@ -121,7 +137,25 @@ class GestureRecognizer:
         pinky_up = landmarks[20][2] < landmarks[18][2]
         thumb_index = math.hypot(landmarks[4][1] - landmarks[8][1], landmarks[4][2] - landmarks[8][2])
         thumb_middle = math.hypot(landmarks[4][1] - landmarks[12][1], landmarks[4][2] - landmarks[12][2])
-        pinch_threshold = hand_width * self.PINCH_RATIO
+        # pinch 判定：单阈值（旧版兼容）或双阈值滞回（实施方案 Phase 3.2）
+        # 滞回：已捏合时用 EXIT（更宽松的保持），未捏合时用 ENTER（更严格的进入）
+        if getattr(self, 'pinch_hysteresis_enabled', False):
+            idx_thresh = hand_width * (
+                self.PINCH_EXIT_RATIO if self._was_thumb_index_pinch
+                else self.PINCH_ENTER_RATIO
+            )
+            mid_thresh = hand_width * (
+                self.PINCH_EXIT_RATIO if self._was_thumb_middle_pinch
+                else self.PINCH_ENTER_RATIO
+            )
+            thumb_index_pinch = thumb_index < idx_thresh
+            thumb_middle_pinch = thumb_middle < mid_thresh
+        else:
+            pinch_threshold = hand_width * self.PINCH_RATIO
+            thumb_index_pinch = thumb_index < pinch_threshold
+            thumb_middle_pinch = thumb_middle < pinch_threshold
+        self._was_thumb_index_pinch = thumb_index_pinch
+        self._was_thumb_middle_pinch = thumb_middle_pinch
 
         fingers_close = self._check_fingers_close(landmarks, hand_width)
         # 正面度门控 + 滞回：高正面度时用掌宽比例判定（精确）；低正面度时
@@ -209,8 +243,8 @@ class GestureRecognizer:
             "pinky_up": pinky_up,
             "index_only": index_up and not middle_up and not ring_up and not pinky_up,
             "index_drawing": index_up and not ring_up and not pinky_up,
-            "thumb_index_pinch": thumb_index < pinch_threshold,
-            "thumb_middle_pinch": thumb_middle < pinch_threshold,
+            "thumb_index_pinch": thumb_index_pinch,
+            "thumb_middle_pinch": thumb_middle_pinch,
             "is_fist": four_fingers_down and thumb_folded,
             "is_open_palm": index_up and middle_up and ring_up,
             "thumb_tucked": thumb_tucked,
@@ -250,6 +284,9 @@ class GestureRecognizer:
         self._pose_broken_frames = 0
         # 清理残留状态，防止模式切换后误触发
         self._was_tucked = False
+        # 清理 pinch 滞回状态（实施方案 Phase 3.2）
+        self._was_thumb_index_pinch = False
+        self._was_thumb_middle_pinch = False
         if hasattr(self, '_scissor_frames'):
             self._scissor_frames = 0
         if hasattr(self, '_scroll_direction'):

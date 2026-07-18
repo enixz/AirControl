@@ -101,6 +101,9 @@ _CONFIG_SCHEMA = {
     # 锁定在瞄准点消除漂移；grace 结束后解冻允许 DRAG。默认关闭，A/B 验证后开启。
     "pinch_freeze_enabled": (bool, _is_bool, False),
     "pinch_freeze_grace_sec": ((int, float), _is_num_in(0.0, 2.0), 0.3),
+    # Pinch 双阈值滞回（实施方案 Phase 3.2）：ENTER/EXIT 双阈值消除边界抖动。
+    # 默认关闭保持旧版单阈值行为；开启后已捏合用 EXIT（更宽松），未捏合用 ENTER（更严格）。
+    "pinch_hysteresis_enabled": (bool, _is_bool, False),
     "edge_y_canvas_enabled": (bool, _is_bool, True),
     "edge_y_canvas_deadzone_bottom": (int, _is_int_in(0, 100), 18),
     "edge_y_canvas_deadzone_top": (int, _is_int_in(0, 100), 10),
@@ -248,6 +251,7 @@ class ConfigManager:
             "edge_acceleration_strength": 35,
             "pinch_freeze_enabled": False,
             "pinch_freeze_grace_sec": 0.3,
+            "pinch_hysteresis_enabled": False,
             "edge_y_canvas_enabled": True,
             "edge_y_canvas_deadzone_bottom": 18,
             "edge_y_canvas_deadzone_top": 10,

@@ -157,10 +157,16 @@ class MouseMode(ModeBase):
                 thumb_middle = math.hypot(landmarks[4][1] - landmarks[12][1], landmarks[4][2] - landmarks[12][2])
                 hand_width = features.get("hand_width", 40.0)
                 pinch_threshold = hand_width * 0.35
+                # Phase 3.2: 记录 pinch 比值（距离/掌宽），用于标定 ENTER/EXIT 阈值
+                idx_ratio = thumb_index / hand_width if hand_width > 0 else 0.0
+                mid_ratio = thumb_middle / hand_width if hand_width > 0 else 0.0
+                hyst_on = getattr(self.recognizer, 'pinch_hysteresis_enabled', False)
                 logger.info(
                     "[MouseMode] pinch telemetry: thumb_idx=%.1f, thumb_mid=%.1f, hand_w=%.1f, thresh=%.1f, "
+                    "idx_ratio=%.3f, mid_ratio=%.3f, hyst=%s, "
                     "left_pinch=%s, mid_pinch=%s, hold=%s, blocked=%s",
                     thumb_index, thumb_middle, hand_width, pinch_threshold,
+                    idx_ratio, mid_ratio, hyst_on,
                     features.get("thumb_index_pinch"), features.get("thumb_middle_pinch"),
                     self._is_left_holding, self._left_hold_blocked_until_release
                 )
