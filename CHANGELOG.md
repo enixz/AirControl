@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.6.0 - 2026-07-18
+
+- **Phase 3.3 (实施方案)**: Rotation-invariant `thumb_extended` via
+  perpendicular-distance ratio. Adds `_thumb_perp_ratio()` computing the
+  thumb tip's perpendicular distance to the palm axis (wrist→middle MCP),
+  normalized by palm width. This is rotation-invariant: the ratio stays
+  stable when the hand rotates, unlike the old `thumb_tip_to_index_mcp`
+  distance which varies with hand orientation.
+- **Parallel coexistence**: both old (`thumb_tip_to_index_mcp > 0.9×hw`)
+  and new (`thumb_perp_ratio > 0.5`) features are always computed and
+  output to the features dict (`thumb_extended`, `thumb_extended_new`,
+  `thumb_perp_ratio`). Telemetry logs all three for A/B calibration.
+- New config switch `thumb_perp_ratio_enabled` (default off). When enabled,
+  `thumb_extended` follows the new rotation-invariant logic; when disabled,
+  the old distance-based logic is used (fully reversible).
+- Threshold `THUMB_PERP_RATIO_THRESHOLD=0.5` is an initial value requiring
+  real-world calibration (anchored: extended ≈ 0.5+×palm_width, tucked ≈
+  0.2×palm_width). Rotation-invariance verified by unit test: ratio stays
+  within 20% across 0°/45°/90°/135° rotations.
+- 10 new unit tests: perp_ratio computation, rotation invariance, feature
+  output, config switch behavior.
+
 ## v1.5.0 - 2026-07-18
 
 - **Phase 3.2 (实施方案)**: Pinch dual-threshold hysteresis. Adds

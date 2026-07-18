@@ -104,6 +104,9 @@ _CONFIG_SCHEMA = {
     # Pinch 双阈值滞回（实施方案 Phase 3.2）：ENTER/EXIT 双阈值消除边界抖动。
     # 默认关闭保持旧版单阈值行为；开启后已捏合用 EXIT（更宽松），未捏合用 ENTER（更严格）。
     "pinch_hysteresis_enabled": (bool, _is_bool, False),
+    # thumb_extended 旋转不变判定（实施方案 Phase 3.3）：用拇指 tip 到掌心中轴的
+    # 垂直距离/掌宽 替代旧的 thumb_tip_to_index_mcp 距离。默认关闭，新旧并存对照。
+    "thumb_perp_ratio_enabled": (bool, _is_bool, False),
     "edge_y_canvas_enabled": (bool, _is_bool, True),
     "edge_y_canvas_deadzone_bottom": (int, _is_int_in(0, 100), 18),
     "edge_y_canvas_deadzone_top": (int, _is_int_in(0, 100), 10),
@@ -252,6 +255,7 @@ class ConfigManager:
             "pinch_freeze_enabled": False,
             "pinch_freeze_grace_sec": 0.3,
             "pinch_hysteresis_enabled": False,
+            "thumb_perp_ratio_enabled": False,
             "edge_y_canvas_enabled": True,
             "edge_y_canvas_deadzone_bottom": 18,
             "edge_y_canvas_deadzone_top": 10,

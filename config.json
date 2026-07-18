@@ -18,6 +18,7 @@
     "pinch_freeze_enabled": false,
     "pinch_freeze_grace_sec": 0.3,
     "pinch_hysteresis_enabled": false,
+    "thumb_perp_ratio_enabled": false,
     "edge_y_canvas_enabled": true,
     "edge_y_canvas_deadzone_bottom": 18,
     "edge_y_canvas_deadzone_top": 10,

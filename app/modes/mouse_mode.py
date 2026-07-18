@@ -161,12 +161,19 @@ class MouseMode(ModeBase):
                 idx_ratio = thumb_index / hand_width if hand_width > 0 else 0.0
                 mid_ratio = thumb_middle / hand_width if hand_width > 0 else 0.0
                 hyst_on = getattr(self.recognizer, 'pinch_hysteresis_enabled', False)
+                # Phase 3.3: 记录 thumb_perp_ratio（旋转不变特征），用于标定阈值
+                thumb_perp = features.get("thumb_perp_ratio", 0.0)
+                ext_old = features.get("thumb_extended", False)
+                ext_new = features.get("thumb_extended_new", False)
+                perp_on = getattr(self.recognizer, 'thumb_perp_ratio_enabled', False)
                 logger.info(
                     "[MouseMode] pinch telemetry: thumb_idx=%.1f, thumb_mid=%.1f, hand_w=%.1f, thresh=%.1f, "
                     "idx_ratio=%.3f, mid_ratio=%.3f, hyst=%s, "
+                    "thumb_perp=%.3f, ext_old=%s, ext_new=%s, perp_on=%s, "
                     "left_pinch=%s, mid_pinch=%s, hold=%s, blocked=%s",
                     thumb_index, thumb_middle, hand_width, pinch_threshold,
                     idx_ratio, mid_ratio, hyst_on,
+                    thumb_perp, ext_old, ext_new, perp_on,
                     features.get("thumb_index_pinch"), features.get("thumb_middle_pinch"),
                     self._is_left_holding, self._left_hold_blocked_until_release
                 )

@@ -171,6 +171,10 @@ class AirControlOrchestrator(QObject):
         self.recognizer.pinch_hysteresis_enabled = bool(
             self.config.get("pinch_hysteresis_enabled", False)
         )
+        # Phase 3.3: thumb_extended 旋转不变判定开关（默认关闭，新旧并存对照）
+        self.recognizer.thumb_perp_ratio_enabled = bool(
+            self.config.get("thumb_perp_ratio_enabled", False)
+        )
         # 时序投票器：在 MediaPipe 单帧输出和规则识别器之间插入滞回层，
         # 稳定远距离下的手势标签抖动。CPU纯算法，<0.1ms/帧。
         # 阶段1：temporal_voter_enabled=False 时旁路（见 _stabilize_gestures），

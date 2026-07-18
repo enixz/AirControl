@@ -50,6 +50,11 @@ class GestureRecognizer:
     THUMB_TUCK_EXIT = 0.75          # 拇指内收退出：拇指尖↔食指 MCP < 掌宽×0.75（滞后）
     THUMB_EXTEND_RATIO = 0.9        # 拇指伸出：拇指尖↔食指 MCP > 掌宽×0.9
     THUMB_FOLD_RATIO = 0.7          # 拇指折叠辅助判定：< 掌宽×0.7
+    # 旋转不变的拇指伸出判定（实施方案 Phase 3.3）：拇指 tip 到掌心中轴的垂直距离
+    # / 掌宽。借鉴 opencv-example hand_direction.py 的 perp 设计。
+    # 标定锚点：拇指张开时 perp ≈ 0.5+×掌宽，内收横跨掌心时 perp ≈ 0.2×掌宽。
+    # 阈值 0.5 为初始值，需实测标定（新旧并存期间用 telemetry 对照）。
+    THUMB_PERP_RATIO_THRESHOLD = 0.5
     SCISSOR_SPREAD_RATIO = 0.28     # 剪刀手：食指↔中指间距 > 掌宽×0.28
     MIDDLE_INDEX_RATIO = 0.95       # 中指伸出：中指长/食指长 > 0.95
     FINGERS_CLOSE_RATIO = 0.6       # 手指并拢：相邻指尖 dx < 掌宽×0.6
@@ -97,6 +102,10 @@ class GestureRecognizer:
         self._was_thumb_middle_pinch = False
         # pinch 滞回开关：由 orchestrator 从 config 设置，默认关闭保持旧版行为
         self.pinch_hysteresis_enabled = False
+        # thumb_extended 旋转不变判定开关（实施方案 Phase 3.3）：默认关闭，
+        # 开启后 thumb_extended 使用 perp_ratio 替代旧的 thumb_tip_to_index_mcp 距离。
+        # 新旧特征都计算并输出到 features dict，便于 telemetry 并存对照。
+        self.thumb_perp_ratio_enabled = False
         # THUMB_DOWN 滞回状态 + 帧数确认：避免几何阈值边缘抖动导致每秒误触发
         self._was_thumbs_down = False
         self._thumbs_down_confirm_frames = 0
@@ -184,7 +193,17 @@ class GestureRecognizer:
         else:
             thumb_tucked = thumb_tip_to_index_mcp < hand_width * self.THUMB_TUCK_ENTER
         self._was_tucked = thumb_tucked
-        thumb_extended = thumb_tip_to_index_mcp > hand_width * self.THUMB_EXTEND_RATIO
+        # thumb_extended 双路判定（实施方案 Phase 3.3）：新旧并存对照
+        # 旧特征：thumb_tip_to_index_mcp 距离（依赖拇指与食指 MCP 的绝对距离）
+        # 新特征：_thumb_perp_ratio（旋转不变，拇指 tip 到掌心中轴的垂直距离/掌宽）
+        thumb_extended_old = thumb_tip_to_index_mcp > hand_width * self.THUMB_EXTEND_RATIO
+        thumb_perp_ratio = self._thumb_perp_ratio(landmarks)
+        thumb_extended_new = thumb_perp_ratio > self.THUMB_PERP_RATIO_THRESHOLD
+        # config 开关决定 thumb_extended 最终用哪个（默认旧版，可回退）
+        if getattr(self, 'thumb_perp_ratio_enabled', False):
+            thumb_extended = thumb_extended_new
+        else:
+            thumb_extended = thumb_extended_old
 
         thumb_folded = thumb_tucked or (not thumb_up and not thumb_extended) or \
                       (not thumb_up and thumb_tip_to_index_mcp < hand_width * self.THUMB_FOLD_RATIO)
@@ -249,6 +268,9 @@ class GestureRecognizer:
             "is_open_palm": index_up and middle_up and ring_up,
             "thumb_tucked": thumb_tucked,
             "thumb_extended": thumb_extended,
+            # Phase 3.3: 旋转不变新特征（始终输出，供 telemetry 并存对照）
+            "thumb_perp_ratio": thumb_perp_ratio,
+            "thumb_extended_new": thumb_extended_new,
             "thumb_writing": index_extended and not middle_up and not ring_up and not pinky_up and not thumb_extended,
             "index_drawing_pose": index_extended and not middle_up and not ring_up and not pinky_up,
             "index_extended": index_extended,
@@ -276,6 +298,38 @@ class GestureRecognizer:
         is_close2 = dx2 < 60 or dx2 < hand_width * self.FINGERS_CLOSE_RATIO
         is_close3 = dx3 < 60 or dx3 < hand_width * self.FINGERS_CLOSE_RATIO
         return is_close1 and is_close2 and is_close3
+
+    def _thumb_perp_ratio(self, landmarks):
+        """拇指 tip 到掌心中轴的垂直距离（归一化到掌宽）——旋转不变判定。
+
+        借鉴 opencv-example hand_direction.py 的 perp 设计（实施方案 Phase 3.3）：
+        - 掌心中轴：wrist(0) → middle MCP(9)
+        - 垂直距离：thumb tip(4) 到该中轴的垂线距离
+        - 归一化：除以掌宽（landmark 5↔17 距离）
+
+        优势：
+        - 旋转不变：不管手怎么转，拇指张开时 tip 总偏离中轴
+        - 区分内收vs张开：拇指内收横跨掌心时 tip 在中轴附近，perp 小
+        - 归一化到掌宽：距离自适应，不依赖固定像素
+        """
+        w_x, w_y = landmarks[0][1], landmarks[0][2]
+        mcp_x, mcp_y = landmarks[9][1], landmarks[9][2]
+        t_x, t_y = landmarks[4][1], landmarks[4][2]
+        # 掌心中轴方向向量
+        dx = mcp_x - w_x
+        dy = mcp_y - w_y
+        axis_len = math.hypot(dx, dy)
+        if axis_len < 1e-6:
+            return 0.0
+        # 垂直距离 = |(t-w) × axis_dir| / |axis_dir|
+        # （叉积的绝对值 = 平行四边形面积 / 底边 = 高 = 垂直距离）
+        perp = abs((t_x - w_x) * dy - (t_y - w_y) * dx) / axis_len
+        # 归一化到掌宽
+        palm_width = max(20.0, math.hypot(
+            landmarks[5][1] - landmarks[17][1],
+            landmarks[5][2] - landmarks[17][2]
+        ))
+        return perp / palm_width
 
     def _reset_state(self):
         self.last_action_time = time.time()
