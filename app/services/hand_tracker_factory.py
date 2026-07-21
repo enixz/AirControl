@@ -56,7 +56,7 @@ def _create_mediapipe_tracker(**kwargs):
 def _create_hagrid_yolo_tracker(**kwargs):
     """创建 HaGRID YOLO + MediaPipe HandLandmarker 混合追踪器。
 
-    ⚠️ 实验性引擎，用于 A/B 验证。需要 models/yolov10n_hands.onnx。
+    ⚠️ 实验性引擎。默认检测器 models/hand_yolov8n.onnx 随仓库与安装包分发。
     """
     from .hagrid_yolo_hand_tracker import HagridYoloHandTracker
 

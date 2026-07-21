@@ -55,8 +55,8 @@ _hf.json
 # SenseVoice ASR 模型 model.int8.onnx 单文件 239MB，超 GitHub 100MB 单文件硬限。
 # 用户按 README 指引手动下载到 models/sense-voice/
 models/sense-voice/
-# HaGRID YOLO 手部检测器权重（detection_engine=hagrid_yolo 时按需下载）
-models/hand_yolov8n.onnx
+# HaGRID YOLO 手部检测器：hand_yolov8n.onnx（12MB）已入仓库，供打包与 CI 冒烟；
+# .pt 权重仅重新导出 ONNX 时需要，仍不入库。
 models/hand_yolov8n.pt
 
 # Claude Code 工作目录（包含 worktree、隔离副本等内部产物）

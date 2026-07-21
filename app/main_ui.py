@@ -1089,17 +1089,24 @@ def main():
             ),
             resource_path("models", "kws-zh-wenetspeech", "tokens.txt"),
             resource_path("app", "voice_keywords", "keywords.txt"),
+            # hagrid_yolo 引擎自检：模型随安装包分发，缺失说明打包遗漏。
+            resource_path("models", "hand_yolov8n.onnx"),
         ]
         missing = [path for path in required_files if not os.path.isfile(path)]
         if missing:
             return 2
         try:
             from services.hand_tracker import HandTracker
+            from services.hand_tracker_factory import create_hand_tracker
             from services.voice_command import VoiceCommandService
 
             config = ConfigManager()
             tracker = HandTracker(static_image_mode=True, config=config)
             tracker.close()
+
+            # hagrid_yolo 引擎自检：验证 ONNX 模型可解析、推理会话可创建。
+            yolo_tracker = create_hand_tracker(engine="hagrid_yolo", config=config)
+            yolo_tracker.close()
 
             voice = VoiceCommandService(config)
             voice._current_mode = config.get("interaction_mode", "mouse")

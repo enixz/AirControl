@@ -1,25 +1,27 @@
 """HaGRID YOLO + MediaPipe HandLandmarker 混合手部追踪器。
 
-用 HaGRID v2 预训练的 YOLOv10n 手部检测器替代 MediaPipe 的 BlazePalm
-检测头，检测到手部 bbox 后裁剪放大，再用 MediaPipe HandLandmarker 提取
-21 关键点。设计目的是 A/B 验证 YOLO 检测器是否在远距离场景比 BlazePalm
-有更高召回率。
+用 HaGRID 预训练的 YOLO 手部检测器（默认 hand_yolov8n.onnx）替代
+MediaPipe 的 BlazePalm 检测头，检测到手部 bbox 后裁剪放大，再用
+MediaPipe HandLandmarker 提取 21 关键点。设计目的是 A/B 验证 YOLO
+检测器是否在远距离场景比 BlazePalm 有更高召回率。
 
 ⚠️ 这是一个实验性引擎，用于离线 A/B 对比验证，不代表 YOLO 一定比
 MediaPipe 更强。请配合 analyze_primary_stability.py 使用。
 
 依赖：
   - onnxruntime（已在 requirements.txt 中）
-  - models/yolov10n_hands.onnx（需自行导出，见下方说明）
+  - models/hand_yolov8n.onnx（默认检测器，随仓库与安装包分发）
   - models/hand_landmarker.task（项目已有）
 
-模型准备：
+模型替换（可选）：默认模型已入仓库并在 AirControl.spec 中打包，无需
+手动准备。若要换用其他 HaGRID YOLO 权重（如 YOLOv10n_hands）：
   1. 下载 HaGRID v2 预训练权重：
      https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/YOLOv10n_hands.pt
   2. 导出为 ONNX（需安装 ultralytics）：
      pip install ultralytics
      yolo export model=YOLOv10n_hands.pt format=onnx opset=13 simplify
-  3. 将导出的 yolov10n_hands.onnx 放到 models/ 目录下。
+  3. 将导出的 ONNX 放到 models/ 目录下；_resolve_yolo_model 按候选
+     文件名顺序查找，hand_yolov8n.onnx 优先。
 """
 
 import logging
@@ -35,7 +37,7 @@ from .base_hand_tracker import BaseHandTracker
 
 _logger = logging.getLogger("gesture")
 
-# YOLOv10n 输入尺寸
+# YOLO 输入尺寸
 _YOLO_INPUT_SIZE = 640
 # YOLO 置信度阈值（可由 config 的 yolo_confidence 覆盖）
 _DEFAULT_YOLO_CONF = 0.25
@@ -48,10 +50,10 @@ _MIN_CROP_SIZE = 48
 
 
 class HagridYoloHandTracker(BaseHandTracker):
-    """YOLOv10n 手部检测 + MediaPipe HandLandmarker 关键点混合引擎。
+    """HaGRID YOLO 手部检测 + MediaPipe HandLandmarker 关键点混合引擎。
 
     检测流程：
-      1. YOLOv10n 全帧检测手部 bbox
+      1. YOLO 全帧检测手部 bbox
       2. 对每个 bbox 裁剪 + padding + 放大到 256x256
       3. MediaPipe HandLandmarker 在裁剪区域提取 21 关键点 + handedness
       4. 坐标映射回原帧
