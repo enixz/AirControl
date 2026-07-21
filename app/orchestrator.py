@@ -417,10 +417,11 @@ class AirControlOrchestrator(QObject):
             return None
 
     def toggle_recording(self):
-        """F5 热切换原始帧录制：未录则开始，录中则停止并落盘。
+        """热切换原始帧录制：未录则开始，录中则停止并落盘。
 
-        供开发测试专用——按 F5 即可录一段真实画面到 raw_capture/<时间戳>/，
-        然后用 replay_video.py 离线回放做 A/B 对比，免去每次真人摆姿势实测。
+        供开发测试专用——按 F8（全局热键，无需窗口焦点）或在悬浮窗聚焦时按
+        F5，即可录一段真实画面到 raw_capture/<时间戳>/，然后用 replay_video.py
+        离线回放做 A/B 对比，免去每次真人摆姿势实测。
 
         Returns:
             (now_recording: bool, path: str|None)  # True=刚开始录制, False=刚停止

@@ -436,6 +436,14 @@ class FloatingWindow(QMainWindow):
         self._last_hint_text = ""   # 缓存 hint_label 文本，避免每帧 setText
         self.drag_pos = None
 
+        # 全局录像热键（F8）：F5 只在悬浮窗有键盘焦点时生效，站远操作够不到窗口。
+        # 用 QTimer 轮询 GetAsyncKeyState，任何窗口焦点下都能启停原始帧录制。
+        # 不选 F5：它是 PPT 放映键（ppt_controller 会注入 F5），全局占用会冲突。
+        self._rec_hotkey_held = False
+        self._rec_hotkey_timer = QTimer(self)
+        self._rec_hotkey_timer.timeout.connect(self._poll_rec_hotkey)
+        self._rec_hotkey_timer.start(150)
+
     def init_ui(self):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
@@ -1025,8 +1033,32 @@ class FloatingWindow(QMainWindow):
         Qt.Key.Key_F4: "draw",
     }
 
+    def _toggle_recording_ui(self):
+        """启停原始帧录制并更新窗口标题（F5 焦点热键与 F8 全局热键共用）。
+
+        标题栏 [REC: <目录名>] 即录制中——悬浮窗始终置顶，站远也能看到。
+        """
+        now_recording, path = self.orchestrator.toggle_recording()
+        if now_recording:
+            self.setWindowTitle(f"AirControl v{__version__} [REC: {os.path.basename(path)}]")
+            logger.info("录制开始 -> %s", path)
+        else:
+            self.setWindowTitle(f"AirControl v{__version__}")
+            logger.info("录制停止 -> %s", path)
+
+    def _poll_rec_hotkey(self):
+        """轮询 F8（VK 0x77）全局按键状态，按下沿触发录制启停。"""
+        try:
+            import win32api
+            down = bool(win32api.GetAsyncKeyState(0x77) & 0x8000)
+        except Exception:
+            return
+        if down and not self._rec_hotkey_held:
+            self._toggle_recording_ui()
+        self._rec_hotkey_held = down
+
     def keyPressEvent(self, event):
-        """键盘快捷键：F1 调试覆盖层，F2/F3/F4 切换模式，F5 录制/停止。"""
+        """键盘快捷键：F1 调试覆盖层，F2/F3/F4 切换模式，F5 录制/停止（需窗口焦点）。"""
         key = event.key()
         if key == Qt.Key.Key_F1:
             if hasattr(self.orchestrator, "inference_worker"):
@@ -1039,13 +1071,7 @@ class FloatingWindow(QMainWindow):
             event.accept()
             return
         if key == Qt.Key.Key_F5:
-            now_recording, path = self.orchestrator.toggle_recording()
-            if now_recording:
-                self.setWindowTitle(f"AirControl v{__version__} [REC: {os.path.basename(path)}]")
-                logger.info("F5 录制开始 -> %s", path)
-            else:
-                self.setWindowTitle(f"AirControl v{__version__}")
-                logger.info("F5 录制停止 -> %s", path)
+            self._toggle_recording_ui()
             event.accept()
             return
         super().keyPressEvent(event)
