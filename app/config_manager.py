@@ -35,7 +35,7 @@ def _is_optional_string(value):
 # 与 services/truth_event_logger.py 的 MARKER_VK 保持同步。
 _TRUTH_MARKERS = {
     "space", "enter", "shift", "ctrl", "alt", "tab", "x", "z",
-    "rbutton", "mbutton", "pageup", "pagedown",
+    "rbutton", "mbutton", "xbutton1", "xbutton2", "pageup", "pagedown",
 }
 
 

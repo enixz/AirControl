@@ -102,7 +102,8 @@ class TestTruthEventLogger(unittest.TestCase):
 class TestMarkerChannels(unittest.TestCase):
     def test_remote_channels_exist(self):
         """远距标记通道（无线鼠标/翻页笔）必须有键码映射。"""
-        for name in ("rbutton", "mbutton", "pageup", "pagedown"):
+        for name in ("rbutton", "mbutton", "xbutton1", "xbutton2",
+                     "pageup", "pagedown"):
             self.assertIn(name, MARKER_VK)
 
     def test_normalize_markers(self):
