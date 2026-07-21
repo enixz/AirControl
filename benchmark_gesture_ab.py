@@ -11,6 +11,11 @@
   - freeze 指标不把松手帧计入，并使用 MouseMode 的混合指针而非单一食指尖
   - 无人工点击/拖拽真值时只报告观察结果，不自动建议默认开启
 
+带真值模式（评估报告 P1-1）：若录像目录存在 truth_events.jsonl（录制时
+用另一只手点按/按住空格标记意图点击/拖拽所生成，见
+services/truth_event_logger.py），额外输出检出率/漏检率/误报/onset 延迟
+等量化指标，并据此给出"默认开/关"的建议。
+
 用法：
   python benchmark_gesture_ab.py raw_capture/20260705_174137
   python benchmark_gesture_ab.py raw_capture/20260705_174137 --max-frames 300
@@ -95,6 +100,24 @@ def _cache_landmarks(rec_dir, cfg, max_frames=None):
     with_hand = sum(1 for h in cached if h)
     print(f"  缓存完成: {len(cached)} 帧, 有手 {with_hand} 帧, 耗时 {elapsed:.1f}s")
     return cached
+
+
+def _load_truth_context(rec_dir, n_frames):
+    """加载逐帧时间戳与真值区间；缺 meta.jsonl 时按 30fps 合成时间戳并告警。"""
+    from services.truth_ab import load_frame_times, load_truth_intervals
+
+    meta_path = os.path.join(rec_dir, "meta.jsonl")
+    if os.path.exists(meta_path):
+        times = load_frame_times(meta_path)
+    else:
+        print("  [WARN] 未找到 meta.jsonl，按 30fps 合成帧时间戳（延迟指标准确性下降）")
+        times = [i / 30.0 for i in range(n_frames)]
+    if len(times) > n_frames:
+        times = times[:n_frames]
+
+    truth_path = os.path.join(rec_dir, "truth_events.jsonl")
+    truth = load_truth_intervals(truth_path) if os.path.exists(truth_path) else []
+    return times, truth
 
 
 def _count_flips(states):
@@ -229,6 +252,14 @@ def _analyze_config(cached_landmarks, pinch_hyst, thumb_perp):
     return result
 
 
+def _fmt_pct(value):
+    return "-" if value is None else f"{value:.1%}"
+
+
+def _fmt_ms(value):
+    return "-" if value is None else f"{value:.0f}ms"
+
+
 def _print_compare_table(results, labels):
     """打印 4 种配置的对比表。"""
     keys = [
@@ -256,11 +287,69 @@ def _print_compare_table(results, labels):
     for key, fmt, desc in keys:
         vals = [fmt.format(results[i].get(key, 0)) for i in range(4)]
         print(f"{key:<32} {desc:<28} {vals[0]:>{w}} {vals[1]:>{w}} {vals[2]:>{w}} {vals[3]:>{w}}")
+
+    if results[0].get("truth"):
+        print("-" * 100)
+        print("真值量化指标（意图点击/拖拽 vs 检测 pinch 事件）")
+        truth_rows = [
+            ("truth_recall", "检出率 recall（↑好）", "recall", _fmt_pct),
+            ("truth_miss_rate", "漏检率（↓好）", "miss_rate", _fmt_pct),
+            ("truth_precision", "准确率 precision（↑好）", "precision", _fmt_pct),
+            ("truth_false_alarms", "误报次数（↓好）", "false_alarms", str),
+            ("truth_onset_mean", "onset 延迟均值", "onset_delay_mean_ms", _fmt_ms),
+            ("truth_onset_p95", "onset 延迟 P95", "onset_delay_p95_ms", _fmt_ms),
+        ]
+        for label, desc, mkey, fmt in truth_rows:
+            vals = [fmt(results[i]["truth"][mkey]) for i in range(4)]
+            print(f"{label:<32} {desc:<28} {vals[0]:>{w}} {vals[1]:>{w}} {vals[2]:>{w}} {vals[3]:>{w}}")
     print("=" * 100)
 
 
-def _print_conclusions(results):
-    """打印结论分析。"""
+def _truth_line(metrics):
+    return (
+        f"检出 {_fmt_pct(metrics['recall'])}, 漏检 {_fmt_pct(metrics['miss_rate'])}, "
+        f"误报 {metrics['false_alarms']}, onsetP95 {_fmt_ms(metrics['onset_delay_p95_ms'])}"
+    )
+
+
+def _print_truth_recommendation(results):
+    """基于真值指标给出默认开/关的量化建议。
+
+    判据（保守）：漏检率不升（容差 1pp）、误报不增、onset P95 增幅 < 50ms，
+    且至少一项核心指标改善（漏检降 / 误报减 / pinch 翻转降 ≥30%）。
+    """
+    print("\n[真值量化结论] pinch 点击/拖拽（意图真值 vs 检测事件）:")
+    base = results[0]["truth"]
+    print(f"  baseline(全关): {_truth_line(base)}")
+    for idx, name in ((1, "+hyst"), (2, "+perp"), (3, "+both")):
+        print(f"  {name:<16}: {_truth_line(results[idx]['truth'])}")
+
+    base_flips = results[0]["pinch_flips"]
+    for idx, name in ((1, "+hyst"), (3, "+both")):
+        m = results[idx]["truth"]
+        flip_cut = (
+            (base_flips - results[idx]["pinch_flips"]) / base_flips
+            if base_flips else 0.0
+        )
+        miss_ok = (m["miss_rate"] or 0) <= (base["miss_rate"] or 0) + 0.01
+        fa_ok = m["false_alarms"] <= base["false_alarms"]
+        lat_ok = (m["onset_delay_p95_ms"] or 0) <= (base["onset_delay_p95_ms"] or 0) + 50
+        improved = (
+            (m["miss_rate"] or 0) < (base["miss_rate"] or 0)
+            or m["false_alarms"] < base["false_alarms"]
+            or flip_cut >= 0.3
+        )
+        ok = miss_ok and fa_ok and lat_ok and improved
+        verdict = "建议默认开启" if ok else "建议继续关闭"
+        detail = (
+            f"漏检{'OK' if miss_ok else 'X'}, 误报{'OK' if fa_ok else 'X'}, "
+            f"延迟{'OK' if lat_ok else 'X'}, 有改善{'OK' if improved else 'X'}"
+        )
+        print(f"  {name}: {verdict}（{detail}）")
+
+
+def _print_conclusions(results, has_truth=False):
+    """打印结论分析。has_truth=True 时附真值量化建议。"""
     print("\n" + "=" * 100)
     print("结论分析")
     print("=" * 100)
@@ -276,7 +365,10 @@ def _print_conclusions(results):
           f"(减少 {flip_reduction} 次, -{flip_pct:.1f}%)")
     print(f"  滞回带候选帧数: {base['pinch_in_hysteresis_band']} 帧")
     print(f"  相对基线实际改变: {hyst['pinch_changed_frames_vs_baseline']} 帧")
-    print("  → 无人工点击真值，翻转减少不等同于准确率提高，不能据此自动开启默认值")
+    if has_truth:
+        print("  → 翻转次数仅供参考，默认开/关建议见下方真值量化结论")
+    else:
+        print("  → 无人工点击真值，翻转减少不等同于准确率提高，不能据此自动开启默认值")
 
     # Phase 3.3: thumb_perp 旋转不变
     perp = results[2]
@@ -298,7 +390,10 @@ def _print_conclusions(results):
             f"均值 {base['freeze_event_max_drift_mean_px']:.1f}px, "
             f"P95 {base['freeze_event_max_drift_p95_px']:.1f}px"
         )
-        print("  → 这是录像像素的观察指标；仍需实际屏幕点击/拖拽真值决定默认值")
+        if has_truth:
+            print("  → 漂移观察 + 真值量化结论（见下）共同决定 freeze 默认值")
+        else:
+            print("  → 这是录像像素的观察指标；仍需实际屏幕点击/拖拽真值决定默认值")
     else:
         print("  → 没有持续至少两个帧的 pinch 事件，无法评估 freeze")
 
@@ -307,6 +402,9 @@ def _print_conclusions(results):
     print(f"  idx_ratio 均值 {base['idx_ratio_mean']:.3f}, 标准差 {base['idx_ratio_std']:.3f}")
     print("  → 真实捏合 idx_ratio 应 < 0.30（ENTER 阈值），")
     print("     握拳 idx_ratio 应 > 0.40（EXIT 阈值）。若均值落在 0.30-0.40 说明录像多为边界状态")
+
+    if has_truth:
+        _print_truth_recommendation(results)
 
 
 def main():
@@ -331,6 +429,13 @@ def main():
     print("\n[1/2] 缓存录像帧 landmarks（只跑一次检测）...")
     cached = _cache_landmarks(args.rec_dir, cfg, max_frames=args.max_frames)
 
+    # 真值上下文（可选）：逐帧时间戳 + 意图点击/拖拽区间
+    frame_times, truth_intervals = _load_truth_context(args.rec_dir, len(cached))
+    if truth_intervals:
+        print(f"  真值事件 {len(truth_intervals)} 个 → 输出检出率/漏检率/延迟量化指标")
+    else:
+        print("  无 truth_events.jsonl → 仅观察性指标（录制时按住空格可采集真值）")
+
     print("\n[2/2] 对比 4 种配置的手势指标...")
     configs = [
         (False, False, "baseline(全关)"),  # = v1.3.6 行为
@@ -352,9 +457,16 @@ def main():
             old != new for old, new in zip(baseline_states, states, strict=True)
         )
 
+    if truth_intervals:
+        from services.truth_ab import compute_metrics, states_to_intervals
+
+        for result, states in zip(results, state_sequences, strict=True):
+            detected = states_to_intervals(states, frame_times)
+            result["truth"] = compute_metrics(truth_intervals, detected)
+
     labels = [c[2] for c in configs]
     _print_compare_table(results, labels)
-    _print_conclusions(results)
+    _print_conclusions(results, has_truth=bool(truth_intervals))
 
     # 保存结果
     out_path = os.path.join(args.rec_dir, "gesture_ab_result.json")
@@ -365,7 +477,8 @@ def main():
                 "methodology": {
                     "freeze_pointer": "MouseMode blended pointer in source-video pixels",
                     "release_frame_excluded": True,
-                    "has_click_drag_ground_truth": False,
+                    "has_click_drag_ground_truth": bool(truth_intervals),
+                    "truth_onset_tolerance_sec": 0.5,
                 },
                 "configs": labels,
                 "results": results,

@@ -409,6 +409,8 @@ class AirControlOrchestrator(QObject):
                 max_frames=int(self.config.get("record_raw_max_frames") or 2000),
                 max_seconds=float(self.config.get("record_raw_max_seconds") or 120.0),
                 codec=str(self.config.get("record_raw_codec") or "mp4v"),
+                record_truth=bool(self.config.get("record_truth_events", True)),
+                truth_marker=str(self.config.get("record_truth_marker") or "space"),
             )
         except Exception as e:
             logger.warning("原始帧录制初始化失败: %s", e)
@@ -445,6 +447,8 @@ class AirControlOrchestrator(QObject):
                 max_frames=int(self.config.get("record_raw_max_frames") or 2000),
                 max_seconds=float(self.config.get("record_raw_max_seconds") or 120.0),
                 codec=str(self.config.get("record_raw_codec") or "mp4v"),
+                record_truth=bool(self.config.get("record_truth_events", True)),
+                truth_marker=str(self.config.get("record_truth_marker") or "space"),
             )
         except Exception:
             logger.exception("启动录制失败")

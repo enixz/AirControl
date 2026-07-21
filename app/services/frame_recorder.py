@@ -11,6 +11,11 @@ raw_capture/<时间戳>/，供 replay_video.py 离线回放：用同一段真实
 默认关闭：仅当 config record_raw_video=true 时由 orchestrator 创建。写入永不抛异常
 打断推理线程；自带帧数/时长上限防止填满磁盘；atexit 保证进程退出时正确收尾
 （mkv 索引需要 release() 才写入）。
+
+可选真值采集（评估报告 P1-1）：record_truth=True 时同步启动 TruthEventLogger，
+把"意图标记键"（默认空格，config record_truth_marker 可换）的 down/up 跳变写入
+truth_events.jsonl（与 meta.jsonl 同一 epoch 时钟）。录制时边做捏合边用另一只手
+点按/按住标记键，离线回放即可算出检出率/漏检率/误报/延迟，替代纯观察性指标。
 """
 import atexit
 import json
@@ -28,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 class FrameRecorder:
     def __init__(self, out_root="raw_capture", max_frames=2000, max_seconds=120.0,
-                 codec="mp4v"):
+                 codec="mp4v", record_truth=False, truth_marker="space"):
         if not os.path.isabs(out_root):
             out_root = data_path(out_root)
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -59,6 +64,16 @@ class FrameRecorder:
             "原始帧录制 -> %s (上限 %d 帧 / %.0fs, codec=%s)",
             self.dir, self.max_frames, self.max_seconds, self._codec,
         )
+        self._truth_logger = None
+        if record_truth:
+            try:
+                from .truth_event_logger import TruthEventLogger
+
+                self._truth_logger = TruthEventLogger(
+                    self.dir, markers=(truth_marker,),
+                )
+            except Exception as e:
+                logger.warning("真值事件采集启动失败（不影响录帧）: %s", e)
 
     def _ensure_writer(self, w, h):
         if self._writer is not None or self._use_png:
@@ -142,6 +157,11 @@ class FrameRecorder:
         if self._closed:
             return
         self._closed = True
+        try:
+            if self._truth_logger is not None:
+                self._truth_logger.close()
+        except Exception:
+            logger.exception("真值事件采集收尾失败")
         try:
             self._queue.put(None, timeout=1.0)
         except queue.Full:

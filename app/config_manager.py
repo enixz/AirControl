@@ -207,6 +207,12 @@ _CONFIG_SCHEMA = {
         lambda v: v in ("mp4v", "ffv1"),
         "mp4v",
     ),
+    "record_truth_events": (bool, _is_bool, True),
+    "record_truth_marker": (
+        str,
+        lambda v: v in ("space", "shift", "ctrl", "alt", "tab", "enter", "x", "z"),
+        "space",
+    ),
     "wps_exe_path": ((str, type(None)), _is_optional_string, None),
     "powerpoint_exe_path": ((str, type(None)), _is_optional_string, None),
 }
@@ -311,6 +317,8 @@ class ConfigManager:
             "record_raw_max_frames": 2000,
             "record_raw_max_seconds": 120.0,
             "record_raw_codec": "mp4v",
+            "record_truth_events": True,
+            "record_truth_marker": "space",
             "debug_overlay": False,
             "floating_window_scale": 1.5,
             "wps_exe_path": None,
