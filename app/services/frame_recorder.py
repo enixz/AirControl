@@ -70,7 +70,7 @@ class FrameRecorder:
                 from .truth_event_logger import TruthEventLogger
 
                 self._truth_logger = TruthEventLogger(
-                    self.dir, markers=(truth_marker,),
+                    self.dir, markers=truth_marker,
                 )
             except Exception as e:
                 logger.warning("真值事件采集启动失败（不影响录帧）: %s", e)

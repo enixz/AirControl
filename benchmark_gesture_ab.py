@@ -12,9 +12,9 @@
   - 无人工点击/拖拽真值时只报告观察结果，不自动建议默认开启
 
 带真值模式（评估报告 P1-1）：若录像目录存在 truth_events.jsonl（录制时
-用另一只手点按/按住空格标记意图点击/拖拽所生成，见
-services/truth_event_logger.py），额外输出检出率/漏检率/误报/onset 延迟
-等量化指标，并据此给出"默认开/关"的建议。
+点按/按住意图标记键所生成——近距用键盘空格；3–5 米远距用拿在手里的
+无线鼠标中键或翻页笔，见 services/truth_event_logger.py），额外输出
+检出率/漏检率/误报/onset 延迟等量化指标，并据此给出"默认开/关"的建议。
 
 用法：
   python benchmark_gesture_ab.py raw_capture/20260705_174137

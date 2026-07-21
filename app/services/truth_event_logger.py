@@ -1,17 +1,26 @@
 """真值输入事件采集器（原始帧录制配套）。
 
-录像期间用独立线程轮询"意图标记键"（默认空格）的物理按键状态，把 down/up
-跳变连同 epoch 时间戳写入 truth_events.jsonl（与 meta.jsonl 同目录、同
-time.time() 时钟）。离线回放据此把"用户真实意图的点击/拖拽"与检测到的
-pinch 事件对齐，算出检出率/漏检率/误报/延迟——评估报告 P1-1 要求的正是
-这种带真值的量化指标，用来决定高级特性默认开还是关。
+录像期间用独立线程轮询"意图标记键"的物理按键状态，把 down/up 跳变连同
+epoch 时间戳写入 truth_events.jsonl（与 meta.jsonl 同目录、同 time.time()
+时钟）。离线回放据此把"用户真实意图的点击/拖拽"与检测到的 pinch 事件对
+齐，算出检出率/漏检率/误报/延迟——评估报告 P1-1 要求的正是这种带真值
+的量化指标，用来决定高级特性默认开还是关。
 
-录制时用法：做手势（捏合）的同时用另一只手操作标记键——
+录制时用法：做手势（捏合）的同时操作标记键——
   - 点按一次 = 意图点击一次；
   - 按住不放 = 意图拖拽中，松开 = 拖拽结束。
 
-只监听标记键、不监听鼠标左键：应用自身会注入合成点击，GetAsyncKeyState
-无法区分物理事件与合成事件，标记键（默认空格）不受此污染。
+近距离录像可直接按键盘空格（默认）。远距离（3–5 米）够不到键盘，用拿在
+另一只手里的无线设备做标记通道（config record_truth_marker 切换，支持
+逗号分隔多个同时生效）：
+  - 无线鼠标【中键】（"mbutton"）：应用从不注入中键，绝对干净，首选；
+  - 翻页笔（"pagedown" / "pageup"）：应用不注入任何键盘事件，干净；
+  - 无线小键盘 Enter/空格（"enter"/"space"）：干净；
+  - 无线鼠标右键（"rbutton"）：应用存在右键手势（拇指-中指捏合触发），
+    录制期间不做该手势才可用。
+
+只监听标记键、不监听鼠标左键：应用自身会注入合成左键点击，
+GetAsyncKeyState 无法区分物理事件与合成事件，标记通道必须避开左键。
 
 非 Windows 或无 pywin32 时构造即抛错，由 FrameRecorder 捕获降级（录帧主
 流程永不受影响）。测试中可注入 get_state 回调摆脱对 win32 的依赖。
@@ -24,16 +33,22 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# 标记键名 → Windows 虚拟键码（与 config 的 record_truth_marker 取值一一对应）
+# 标记键名 → Windows 虚拟键码（与 config 的 record_truth_marker 取值一一对应；
+# 新增取值时同步 config_manager 的 _is_marker_list）
 MARKER_VK = {
     "space": 0x20,
+    "enter": 0x0D,
     "shift": 0x10,
     "ctrl": 0x11,
     "alt": 0x12,
     "tab": 0x09,
-    "enter": 0x0D,
     "x": 0x58,
     "z": 0x5A,
+    # 远程标记通道（无线鼠标/翻页笔，供 3–5 米录像使用）
+    "rbutton": 0x02,     # 鼠标右键（应用可注入右键：拇指-中指捏合手势，录制时勿做）
+    "mbutton": 0x04,     # 鼠标中键（应用从不注入，绝对干净）
+    "pageup": 0x21,      # 翻页笔上页（应用不注入键盘事件）
+    "pagedown": 0x22,    # 翻页笔下页
 }
 
 
@@ -41,6 +56,13 @@ def _win32_get_state(vk):
     """默认按键状态源：Windows GetAsyncKeyState（pywin32）。"""
     import win32api
     return bool(win32api.GetAsyncKeyState(vk) & 0x8000)
+
+
+def normalize_markers(markers):
+    """把 "space" 或 "pagedown,pageup" 或 ("space",) 统一成标记键名元组。"""
+    if isinstance(markers, str):
+        markers = tuple(m.strip() for m in markers.split(","))
+    return tuple(m.strip().lower() for m in markers if m and m.strip())
 
 
 class TruthEventLogger:
@@ -56,11 +78,10 @@ class TruthEventLogger:
 
         self._path = os.path.join(out_dir, "truth_events.jsonl")
         self._markers = {}
-        for name in markers:
-            key = str(name).lower()
+        for key in normalize_markers(markers):
             vk = MARKER_VK.get(key)
             if vk is None:
-                logger.warning("未知真值标记键 %r，已跳过", name)
+                logger.warning("未知真值标记键 %r，已跳过", key)
                 continue
             self._markers[key] = vk
         self._get_state = get_state

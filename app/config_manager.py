@@ -32,6 +32,21 @@ def _is_optional_string(value):
     return value is None or isinstance(value, str)
 
 
+# 与 services/truth_event_logger.py 的 MARKER_VK 保持同步。
+_TRUTH_MARKERS = {
+    "space", "enter", "shift", "ctrl", "alt", "tab", "x", "z",
+    "rbutton", "mbutton", "pageup", "pagedown",
+}
+
+
+def _is_marker_list(value):
+    """record_truth_marker：逗号分隔的标记键名列表（至少一个有效值）。"""
+    if not isinstance(value, str):
+        return False
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    return bool(parts) and all(p in _TRUTH_MARKERS for p in parts)
+
+
 _STABILITY_PROFILE_PRESETS = {
     # v1.3.6 默认档：吸收 v1.3 的可预期手感，优先少误触、少断笔。
     # v1.4.0：三个 pinch 实验开关均不纳入默认档；离线录像没有点击/拖拽真值，
@@ -210,7 +225,7 @@ _CONFIG_SCHEMA = {
     "record_truth_events": (bool, _is_bool, True),
     "record_truth_marker": (
         str,
-        lambda v: v in ("space", "shift", "ctrl", "alt", "tab", "enter", "x", "z"),
+        lambda v: _is_marker_list(v),
         "space",
     ),
     "wps_exe_path": ((str, type(None)), _is_optional_string, None),
