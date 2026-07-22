@@ -468,6 +468,17 @@ class FloatingWindow(QMainWindow):
         self.video_label.setStyleSheet("background-color: black; border-radius: 10px;")
         self.setCentralWidget(self.video_label)
 
+        # 录制指示：无边框窗口没有标题栏，REC 状态必须画在窗体上（F8/F5 启停时显隐）。
+        self.rec_label = QLabel("● REC", self)
+        self.rec_label.setStyleSheet(
+            "color: white; background-color: rgba(220, 40, 40, 200);"
+            "padding: 2px 8px; border-radius: 4px; font-weight: bold;"
+        )
+        self.rec_label.adjustSize()
+        self.rec_label.move(10, 10)
+        self.rec_label.raise_()
+        self.rec_label.hide()
+
         # Use absolute positioning via layouts to allow stretch and elasticity
         main_layout = QVBoxLayout(self.video_label)
         main_layout.setContentsMargins(s(10), s(10), s(10), s(8))
@@ -1034,16 +1045,20 @@ class FloatingWindow(QMainWindow):
     }
 
     def _toggle_recording_ui(self):
-        """启停原始帧录制并更新窗口标题（F5 焦点热键与 F8 全局热键共用）。
+        """启停原始帧录制并更新录制指示（F5 焦点热键与 F8 全局热键共用）。
 
-        标题栏 [REC: <目录名>] 即录制中——悬浮窗始终置顶，站远也能看到。
+        无边框窗口不显示标题栏，REC 红点画在窗体左上角——悬浮窗始终置顶，
+        站远也能看到。
         """
         now_recording, path = self.orchestrator.toggle_recording()
         if now_recording:
             self.setWindowTitle(f"AirControl v{__version__} [REC: {os.path.basename(path)}]")
+            self.rec_label.show()
+            self.rec_label.raise_()
             logger.info("录制开始 -> %s", path)
         else:
             self.setWindowTitle(f"AirControl v{__version__}")
+            self.rec_label.hide()
             logger.info("录制停止 -> %s", path)
 
     def _poll_rec_hotkey(self):
