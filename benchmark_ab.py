@@ -4,7 +4,10 @@
 
 用法：
     python benchmark_ab.py raw_capture/20260705_174137
+    python benchmark_ab.py raw_capture/20260722_145659 --engines mediapipe \
+        --set long_range_enabled=true --out result.json
 """
+import argparse
 import json
 import os
 import sys
@@ -14,6 +17,38 @@ import cv2
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app"))
+
+
+def _coerce_value(raw):
+    """--set 值自动转型：true/false → bool，none/null → None，数字 → int/float。"""
+    lowered = raw.lower()
+    if lowered in ("true", "false"):
+        return lowered == "true"
+    if lowered in ("none", "null"):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
+def _parse_overrides(pairs):
+    """解析 --set key=value 覆盖项为 dict（供离线 A/B 临时打开 config 开关）。"""
+    overrides = {}
+    for pair in pairs or []:
+        if "=" not in pair:
+            raise ValueError(f"--set 参数格式应为 key=value: {pair!r}")
+        key, raw = pair.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--set 参数 key 不能为空: {pair!r}")
+        overrides[key] = _coerce_value(raw.strip())
+    return overrides
 
 
 def run_engine(engine_name, video_path, cfg):
@@ -35,6 +70,7 @@ def run_engine(engine_name, video_path, cfg):
     total = 0
     detected = 0
     multi_hand = 0
+    zoom_on = 0
     jerks = []
     prev_wrist = None
     timestamps = []
@@ -54,6 +90,8 @@ def run_engine(engine_name, video_path, cfg):
             detected += 1
         if n >= 2:
             multi_hand += 1
+        if getattr(tracker, "_crop_zoom_mode", False):
+            zoom_on += 1
 
         # wrist jerk
         if n > 0:
@@ -84,6 +122,7 @@ def run_engine(engine_name, video_path, cfg):
         "detect_rate": detected / max(total, 1),
         "multi_hand_frames": multi_hand,
         "multi_hand_rate": multi_hand / max(total, 1),
+        "zoom_on_frames": zoom_on,
         "jerk_mean_px": jerk_mean,
         "jerk_p95_px": jerk_p95,
         "latency_mean_ms": latency_mean,
@@ -92,41 +131,11 @@ def run_engine(engine_name, video_path, cfg):
     }
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("用法: python benchmark_ab.py <rec_dir>")
-        sys.exit(1)
-
-    rec_dir = sys.argv[1]
-    mkv = os.path.join(rec_dir, "frames.mkv")
-    mp4 = os.path.join(rec_dir, "frames.mp4")
-    video = mkv if os.path.exists(mkv) else mp4
-    if not os.path.exists(video):
-        print(f"未找到视频: {mkv} 或 {mp4}")
-        sys.exit(1)
-
-    with open(os.path.join(PROJECT_ROOT, "config.json"), encoding="utf-8") as f:
-        cfg = json.load(f)
-
-    print(f"=== A/B 对比测试 ===")
-    print(f"视频: {video}")
-    print()
-
-    results = {}
-    for engine in ["mediapipe", "hagrid_yolo"]:
-        print(f"--- 运行引擎: {engine} ---")
-        result = run_engine(engine, video, cfg)
-        results[engine] = result
-        print(f"  完成: {result['total_frames']} 帧, 检出 {result['detected_frames']} ({result['detect_rate']:.1%})")
-        print()
-
-    # 对比表
+def _print_comparison(mp, yo):
+    """双引擎对比表（保持原有输出格式）。"""
     print("=" * 70)
     print(f"{'指标':<25} {'MediaPipe':>20} {'HaGRID YOLO':>20}")
     print("=" * 70)
-
-    mp = results["mediapipe"]
-    yo = results["hagrid_yolo"]
 
     rows = [
         ("总帧数", mp["total_frames"], yo["total_frames"], ""),
@@ -151,6 +160,73 @@ def main():
     latency_diff = yo["latency_p95_ms"] - mp["latency_p95_ms"]
     print(f"\n结论: HaGRID YOLO 检出率{'高' if detect_diff > 0 else '低'} {abs(detect_diff):.1f}%, "
           f"延迟P95 {'快' if latency_diff < 0 else '慢'} {abs(latency_diff):.1f}ms")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="手部检测引擎 A/B 对比")
+    parser.add_argument("rec_dir", help="录制目录（含 frames.mkv/frames.mp4）")
+    parser.add_argument(
+        "--engines", default="mediapipe,hagrid_yolo",
+        help="逗号分隔的引擎列表（默认 mediapipe,hagrid_yolo）",
+    )
+    parser.add_argument(
+        "--set", dest="overrides", action="append", default=[],
+        metavar="key=value",
+        help="覆盖 config 项（可多次），如 --set long_range_enabled=true",
+    )
+    parser.add_argument("--out", default=None, help="把结果 JSON 存到该路径")
+    args = parser.parse_args(argv)
+
+    rec_dir = args.rec_dir
+    mkv = os.path.join(rec_dir, "frames.mkv")
+    mp4 = os.path.join(rec_dir, "frames.mp4")
+    video = mkv if os.path.exists(mkv) else mp4
+    if not os.path.exists(video):
+        print(f"未找到视频: {mkv} 或 {mp4}")
+        sys.exit(1)
+
+    with open(os.path.join(PROJECT_ROOT, "config.json"), encoding="utf-8") as f:
+        cfg = json.load(f)
+    overrides = _parse_overrides(args.overrides)
+    cfg.update(overrides)
+
+    engines = [e.strip() for e in args.engines.split(",") if e.strip()]
+    if not engines:
+        print("--engines 不能为空")
+        sys.exit(1)
+
+    print("=== A/B 对比测试 ===")
+    print(f"视频: {video}")
+    if overrides:
+        print(f"config 覆盖: {overrides}")
+    print()
+
+    results = {}
+    for engine in engines:
+        print(f"--- 运行引擎: {engine} ---")
+        result = run_engine(engine, video, cfg)
+        results[engine] = result
+        print(f"  完成: {result['total_frames']} 帧, 检出 {result['detected_frames']} "
+              f"({result['detect_rate']:.1%}), zoom_on {result['zoom_on_frames']} 帧")
+        print()
+
+    if "mediapipe" in results and "hagrid_yolo" in results:
+        _print_comparison(results["mediapipe"], results["hagrid_yolo"])
+    else:
+        for engine, result in results.items():
+            print(f"--- {engine} 指标 ---")
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    if args.out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        payload = {
+            "video": video,
+            "config_overrides": overrides,
+            "results": results,
+        }
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        print(f"\n结果已保存: {args.out}")
 
 
 if __name__ == "__main__":
