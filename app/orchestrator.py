@@ -12,7 +12,12 @@ from mode_manager import ModeManager
 from modes import MODE_NAME_ZH, DrawMode, MouseMode, PresentationMode
 from PyQt6.QtCore import QObject, pyqtSignal
 from services.camera import CameraService, list_available_cameras
-from services.engine_auto_switcher import EngineAutoSwitcher
+from services.engine_auto_switcher import (
+    ENGINE_HAGRID_YOLO,
+    STATE_CAPTURE,
+    STATE_FAR_TRACK,
+    EngineAutoSwitcher,
+)
 from services.geometric_classifier import WeightedVoteClassifier
 from services.gesture_recognizer import GestureRecognizer
 from services.hand_tracker_factory import create_hand_tracker
@@ -90,10 +95,14 @@ class AirControlOrchestrator(QObject):
         self._voice_keyword_time = 0.0
 
         # 远距引擎自动切换（config engine_auto_switch，默认关闭）：
+        # 三态闭环 NEAR/CAPTURE/FAR_TRACK（见 services/engine_auto_switcher.py）。
         # _engine_override 是 FSM 的运行时引擎覆盖，只存在内存里、不写 config.json；
         # 用户手动改 detection_engine 时清除覆盖并重置状态机（见 apply_config）。
         self._engine_override = None
         self._engine_switcher = EngineAutoSwitcher()
+        self._fsm_far_track_active = False    # 当前 tracker 是否带 long_range 运行时覆盖
+        self._engine_switch_pending = False   # FSM 发起的 tracker 重建是否在途
+        self._pending_far_track_seed = False  # 下次重建落地后要播种 crop-zoom 交接 hint
         _configured_engine = self.config.get("detection_engine", "mediapipe")
         self._last_config_engine = (
             _configured_engine if isinstance(_configured_engine, str) else "mediapipe"
@@ -262,8 +271,16 @@ class AirControlOrchestrator(QObject):
             self.config.get("hand_smoothing_beta", 0.015),
         )
 
-    def _create_tracker(self, signature=None):
+    def _create_tracker(self, signature=None, config_overrides=None):
         signature = signature or self._tracker_signature()
+        config = self.config
+        if config_overrides:
+            # FAR_TRACK 等运行时覆盖：把 ConfigManager 底层 dict 拷一份改键，
+            # 只影响本次创建的 tracker，不写回、不落盘 config.json。
+            merged = dict(getattr(self.config, "config", {}) or {})
+            if merged:
+                merged.update(config_overrides)
+                config = merged
         return create_hand_tracker(
             engine=signature[0],
             max_num_hands=2,
@@ -272,7 +289,7 @@ class AirControlOrchestrator(QObject):
             min_tracking_confidence=signature[5],
             preferred_model_type=signature[1],
             dominant_hand=signature[2],
-            config=self.config,
+            config=config,
         )
 
     def _configure_engine_switcher(self):
@@ -280,38 +297,100 @@ class AirControlOrchestrator(QObject):
         self._engine_switcher.configure(
             enabled=self.config.get("engine_auto_switch", False) is True,
             no_hand_frames=self.config.get("engine_auto_switch_no_hand_frames", 60),
-            hand_frames=self.config.get("engine_auto_switch_hand_frames", 90),
+            hand_frames=self.config.get("engine_auto_switch_hand_frames", 30),
+            near_frames=self.config.get("engine_auto_switch_near_frames", 90),
+            near_bbox_ratio=self.config.get("engine_auto_switch_near_bbox_ratio", 0.04),
             cooldown_sec=self.config.get("engine_auto_switch_cooldown_sec", 5.0),
         )
 
-    def _maybe_auto_switch_engine(self, hands_landmarks):
-        """远距引擎自动切换：逐帧喂检出结果给 FSM，判定后发起 tracker 重建。
+    def _maybe_auto_switch_engine(self, hands_landmarks, hand_bbox_ratio=0.0):
+        """远距三态自动切换：逐帧喂检出结果给 FSM，按目标态执行迁移。
 
         仅主流程生效；AIRCONTROL_ENGINE 环境变量强制引擎时（自检/回放类场景）
-        不介入。切换复用既有 _request_tracker_rebuild 后台重建路径，平滑器与
-        crop-zoom 状态由 migrate_state_from 迁移，体验连续。覆盖只落在内存，
-        不写 config.json——重启后仍从用户配置的引擎起步。
+        不介入。引擎重建复用既有 _request_tracker_rebuild 后台路径，平滑器与
+        crop-zoom 状态由 migrate_state_from 迁移；覆盖只落内存，不写 config.json。
         """
         switcher = self._engine_switcher
         if not switcher.enabled or os.environ.get("AIRCONTROL_ENGINE"):
             return
-        signature = getattr(self, "_tracker_config_signature", None)
-        if not signature:
+        if not getattr(self, "_tracker_config_signature", None):
             return
-        current = signature[0]
-        # 上一次自动切换的 tracker 仍在后台重建：等其落地，避免重复发起
-        if self._engine_override is not None and self._engine_override != current:
+        # FSM 发起的 tracker 重建仍在途：等其落地，避免重复发起
+        if self._engine_switch_pending:
             return
-        target = switcher.update(current, len(hands_landmarks or []))
-        if target is None or target == current:
+        target = switcher.update(len(hands_landmarks or []), hand_bbox_ratio)
+        if target is None:
             return
-        logger.info("引擎自动切换: %s → %s（%s）", current, target, switcher.last_reason)
-        self._engine_override = target
-        self._request_tracker_rebuild(self._tracker_signature())
-        self.status_text = f"检测引擎已自动切换: {current} → {target}"
+        logger.info("引擎自动切换: 目标态 %s（%s）", target, switcher.last_reason)
+        self._apply_fsm_state(target)
+
+    # 三态 → 用户可见状态提示（中文）
+    _FSM_STATE_STATUS = {
+        STATE_CAPTURE: "远距捕获中：hagrid_yolo 全帧找手",
+        STATE_FAR_TRACK: "远距跟踪中：ZOOM 已接管",
+    }
+
+    def _apply_fsm_state(self, target):
+        """执行 FSM 目标态：CAPTURE/FAR_TRACK 走引擎重建，NEAR 撤覆盖回配置档。"""
+        if target == STATE_CAPTURE:
+            self._engine_override = ENGINE_HAGRID_YOLO
+            self._fsm_far_track_active = False
+            self._request_fsm_rebuild(seed=False)
+        elif target == STATE_FAR_TRACK:
+            self._engine_override = "mediapipe"
+            self._fsm_far_track_active = True
+            # CAPTURE→FAR_TRACK 总是 yolo→mediapipe 的引擎变化，必走重建；
+            # 落地时把 YOLO 最后的手部 hint 播种给新 MP tracker 的 crop-zoom。
+            self._request_fsm_rebuild(seed=True)
+        else:  # STATE_NEAR：撤掉 FSM 覆盖，回到用户配置档
+            self._engine_override = None
+            was_far = self._fsm_far_track_active
+            self._fsm_far_track_active = False
+            config_engine = self.config.get("detection_engine", "mediapipe")
+            if self._tracker_config_signature[0] != config_engine:
+                # 引擎要变（如 yolo → 配置引擎）：走重建
+                self._request_fsm_rebuild(seed=False)
+            elif was_far:
+                # 引擎同为 mediapipe：运行时撤 long_range 覆盖即可，无需重建
+                self._set_tracker_long_range(
+                    bool(self.config.get("long_range_enabled", False))
+                )
+            self.status_text = "回到近距模式：mediapipe"
+            self.status_color = (0, 255, 255)
+            self.status_timer = time.time()
+            self.status_updated.emit(self.status_text, self.status_color)
+
+    def _request_fsm_rebuild(self, seed):
+        """以 FSM 目标态发起 tracker 后台重建（FAR_TRACK 附带 long_range 覆盖）。"""
+        signature = self._tracker_signature()
+        overrides = {"long_range_enabled": True} if self._fsm_far_track_active else None
+        if signature == self._tracker_config_signature and overrides is None and not seed:
+            # 目标引擎已在运行（如用户手动 yolo + FSM 判 CAPTURE）：只更新簿记
+            logger.info("引擎自动切换: 目标引擎 %s 已在运行，无需重建", signature[0])
+            return
+        self._pending_far_track_seed = bool(seed)
+        self._engine_switch_pending = True
+        self._request_tracker_rebuild(signature, config_overrides=overrides)
+        self.status_text = self._FSM_STATE_STATUS.get(
+            self._engine_switcher.state, "检测引擎自动切换中"
+        )
         self.status_color = (0, 255, 255)
         self.status_timer = time.time()
         self.status_updated.emit(self.status_text, self.status_color)
+
+    def _set_tracker_long_range(self, enabled):
+        """运行时翻转当前 tracker 的 long_range 开关（在 worker 锁内，免重建）。"""
+        tracker = getattr(self, "tracker", None)
+        setter = getattr(tracker, "set_long_range_enabled", None)
+        if not callable(setter):
+            return
+        worker = getattr(self, "inference_worker", None)
+        lock = getattr(worker, "lock", None)
+        if lock is not None:
+            with lock:
+                setter(enabled)
+        else:
+            setter(enabled)
 
     def _current_voice_kws_signature(self):
         return (self.config.get("voice_command_threshold", 0.25),)
@@ -566,17 +645,40 @@ class AirControlOrchestrator(QObject):
             )
             self._last_config_engine = config_engine
             self._engine_override = None
+            self._engine_switch_pending = False
+            self._pending_far_track_seed = False
+            if self._fsm_far_track_active:
+                self._fsm_far_track_active = False
+                # 引擎不变（同为 mediapipe）时不会触发重建，需运行时撤掉
+                # long_range 覆盖；引擎不同则随重建自然回到 config 档位。
+                if self._tracker_config_signature[0] == config_engine:
+                    self._set_tracker_long_range(
+                        bool(self.config.get("long_range_enabled", False))
+                    )
             self._engine_switcher.reset()
         self._configure_engine_switcher()
         # 用户关闭了自动切换但当前跑在 FSM 覆盖的引擎上：回到 config 配置的引擎。
         if not self._engine_switcher.enabled and self._engine_override is not None:
             logger.info("引擎自动切换已关闭，回到配置引擎 %s", config_engine)
             self._engine_override = None
+            self._engine_switch_pending = False
+            self._pending_far_track_seed = False
+            if self._fsm_far_track_active:
+                self._fsm_far_track_active = False
+                if self._tracker_config_signature[0] == config_engine:
+                    self._set_tracker_long_range(
+                        bool(self.config.get("long_range_enabled", False))
+                    )
             self._engine_switcher.reset()
 
         signature = self._tracker_signature()
         if signature != self._tracker_config_signature:
-            self._request_tracker_rebuild(signature)
+            # FAR_TRACK 期间的常规签名变化（如平滑参数）：重建需保留 long_range
+            # 覆盖，否则 FSM 还在 FAR_TRACK 态但 ZOOM 链路被悄悄撤掉。
+            overrides = (
+                {"long_range_enabled": True} if self._fsm_far_track_active else None
+            )
+            self._request_tracker_rebuild(signature, config_overrides=overrides)
 
         voice_signature = self._current_voice_kws_signature()
         if voice_signature != self._voice_kws_signature:
@@ -588,7 +690,7 @@ class AirControlOrchestrator(QObject):
             self.set_mode(new_mode)
         logger.info("配置已更新: 模式 -> %s / 目标软件 -> %s", new_mode, self.ppt.target_app)
 
-    def _request_tracker_rebuild(self, signature):
+    def _request_tracker_rebuild(self, signature, config_overrides=None):
         self._tracker_request_id += 1
         request_id = self._tracker_request_id
 
@@ -596,7 +698,7 @@ class AirControlOrchestrator(QObject):
             tracker = None
             error = ""
             try:
-                tracker = self._create_tracker(signature)
+                tracker = self._create_tracker(signature, config_overrides=config_overrides)
             except Exception as exc:
                 logger.exception("后台重建 tracker 失败")
                 error = str(exc)
@@ -630,6 +732,9 @@ class AirControlOrchestrator(QObject):
                     self._engine_override, error,
                 )
                 self._engine_override = None
+                self._fsm_far_track_active = False
+                self._pending_far_track_seed = False
+                self._engine_switch_pending = False
                 self._engine_switcher.reset()
             self.status_text = f"模型更新失败: {error}"
             self.status_color = (255, 0, 0)
@@ -644,8 +749,20 @@ class AirControlOrchestrator(QObject):
                 migrate(old_tracker)
             except Exception:
                 logger.exception("tracker 状态迁移失败（非致命，继续使用新 tracker）")
+        # CAPTURE→FAR_TRACK 交接：迁移完成后把 YOLO 最后的手部 hint 播种给
+        # 新 MP tracker 的 crop-zoom，ZOOM 直接锁住交接点（无 hint 则退回
+        # 人脸引导/多尺度捕获，long_range 链路自带）。
+        if self._pending_far_track_seed:
+            self._pending_far_track_seed = False
+            seed = getattr(tracker, "seed_crop_zoom_from_hint", None)
+            seeded = seed() if callable(seed) else False
+            logger.info(
+                "CAPTURE→FAR_TRACK 交接: crop-zoom 种子%s",
+                "已播种（YOLO hint → MP ZOOM）" if seeded else "无 hint，靠人脸引导捕获",
+            )
         self.tracker = tracker
         self._tracker_config_signature = signature
+        self._engine_switch_pending = False
         self.inference_worker.update_tracker(tracker)
         logger.info("tracker 已在后台完成更新")
 
@@ -840,9 +957,15 @@ class AirControlOrchestrator(QObject):
     def _process_frame_results(self, frame, hands_landmarks, hands_gestures):
         frame_h, frame_w = frame.shape[:2]
 
-        # 远距引擎自动切换：逐帧喂检出结果（回放/benchmark 不经过这里，不受影响）。
-        # 注意 hands_landmarks 可能含 ≤5 帧的幽灵手预测补帧，60/90 帧阈值下影响可忽略。
-        self._maybe_auto_switch_engine(hands_landmarks)
+        # 远距三态自动切换：逐帧喂检出结果（回放/benchmark 不经过这里，不受影响）。
+        # hand_bbox_ratio 供 FAR_TRACK 判"手变大/走近"；幽灵手预测补帧 bbox_area=0，
+        # 不会虚增该比值；≤5 帧的幽灵手在 60/90 帧阈值下影响可忽略。
+        hand_bbox_ratio = 0.0
+        if hands_gestures:
+            hand_bbox_ratio = max(
+                float(g.get("bbox_area", 0.0)) for g in hands_gestures
+            ) / float(max(frame_w * frame_h, 1))
+        self._maybe_auto_switch_engine(hands_landmarks, hand_bbox_ratio)
 
         # 全局模式切换手势必须在时序稳定化之前判断。TemporalGestureVoter 的
         # FSM 会把 ILoveYou 延迟/过滤为 None/OTHER，导致 ModeManager 看不到

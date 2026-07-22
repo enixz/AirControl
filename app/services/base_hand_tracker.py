@@ -245,6 +245,54 @@ class BaseHandTracker(ABC):
         self._last_wrist_pos = dict(old_tracker._last_wrist_pos)
         logging.info("%s tracker 状态已从旧实例迁移", self.engine_name)
 
+    def seed_crop_zoom_from_hint(self):
+        """用迁移来的 _last_hint_* 播种 crop-zoom 视口（引擎交接用）。
+
+        三态自动切换 CAPTURE→FAR_TRACK 时，YOLO 侧最后的手部 hint 已随
+        migrate_state_from 复制过来；但 _compute_crop_viewport 只在
+        _crop_zoom_mode=True 时才采用 hint（base_hand_tracker.py:342），
+        而 ZOOM ON 正常路径要求"先检到手"（:707）——新 MP tracker 在远距
+        裸检抓不到手，永远等不到这个前提。本方法直接翻转 _crop_zoom_mode
+        并清空 _current_crop_*，下一帧 _compute_crop_viewport 用 hint 一步
+        落位（_current_crop_center is None 分支），crop-zoom 立即锁住交接点。
+
+        Returns:
+            True 表示已播种；False 表示无可用 hint（调用方退回人脸引导捕获）
+        """
+        if self._last_hint_center is None or self._last_hint_size <= 0:
+            return False
+        self._crop_zoom_mode = True
+        self._current_crop_center = None  # 下一帧用 hint 一步落位，避免从满幅爬回
+        self._current_crop_size = None
+        logging.info(
+            "%s crop-zoom 已由交接 hint 播种: center=%s size=%.0f",
+            self.engine_name, self._last_hint_center, self._last_hint_size,
+        )
+        return True
+
+    def set_long_range_enabled(self, enabled):
+        """运行时开关远距增强链路（crop-zoom/超分/人脸引导/多尺度）。
+
+        三态自动切换 FAR_TRACK→NEAR 时用于撤掉 long_range 运行时覆盖，
+        不重建 tracker。关闭时同时复位 crop-zoom 状态，避免视口残留。
+        线程安全由调用方保证（orchestrator 在 inference_worker.lock 内调用）。
+        """
+        enabled = bool(enabled)
+        if enabled == self._long_range_enabled:
+            return
+        self._long_range_enabled = enabled
+        if not enabled:
+            self._crop_zoom_mode = False
+            self._sr.reset_tier()
+            self._far_streak = 0
+            self._near_streak = 0
+            self._zoom_miss_streak = 0
+            self._last_hint_center = None
+            self._last_hint_size = 0
+            self._current_crop_center = None
+            self._current_crop_size = None
+        logging.info("%s long_range_enabled 运行时切换为 %s", self.engine_name, enabled)
+
     def _should_skip_frame(self):
         """判断当前帧是否应该跳过推理（自适应推理频率）。
 

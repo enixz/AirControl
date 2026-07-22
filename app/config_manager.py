@@ -100,12 +100,22 @@ _CONFIG_SCHEMA = {
         "stable",
     ),
     "detection_engine": (str, lambda v: v in ("mediapipe", "hagrid_yolo"), "mediapipe"),
-    # 远距引擎自动切换（默认关闭，不打扰现有用户）：mediapipe 连续无手 →
-    # hagrid_yolo；hagrid_yolo 连续稳定单手 → 切回 mediapipe；冷却防抖。
+    # 远距引擎三态自动切换（默认关闭，不打扰现有用户），闭环：
+    #   NEAR(mediapipe 裸检) --连续无手--> CAPTURE(hagrid_yolo 全帧捕获)
+    #   CAPTURE --连续稳定单手--> FAR_TRACK(mediapipe + ZOOM 运行时覆盖)
+    #   FAR_TRACK --手变大/走近持续--> NEAR；--再次连续无手--> CAPTURE
     # 状态机见 services/engine_auto_switcher.py，仅主流程运行时生效。
     "engine_auto_switch": (bool, _is_bool, False),
+    # 连续无手多少帧 → 进 CAPTURE（NEAR/FAR_TRACK 共用，丢手即让 YOLO 抓）
     "engine_auto_switch_no_hand_frames": (int, _is_int_in(5, 600), 60),
-    "engine_auto_switch_hand_frames": (int, _is_int_in(5, 600), 90),
+    # CAPTURE 态连续稳定单手多少帧 → 交接 FAR_TRACK（多手误检帧不计入）
+    "engine_auto_switch_hand_frames": (int, _is_int_in(5, 600), 30),
+    # FAR_TRACK→NEAR：单手 bbox 占全帧比 ≥ 该阈值视为"手变大/走近"。
+    # 与 zoom_near_threshold 同量级（4%）；宁慢勿错，配合 near_frames 持续判据。
+    "engine_auto_switch_near_bbox_ratio": ((int, float), _is_num_in(0.01, 0.30), 0.04),
+    # "手变大/走近"需持续多少帧才回 NEAR（防瞬时大手误触发撤覆盖）
+    "engine_auto_switch_near_frames": (int, _is_int_in(5, 600), 90),
+    # 任意迁移后的冷却秒数：期间不计帧不迁移（新引擎/新链路预热 + 防抖）
     "engine_auto_switch_cooldown_sec": ((int, float), _is_num_in(0.5, 60.0), 5.0),
     "camera_index": (int, _is_int_in(0, 9), 0),
     "camera_width": (
@@ -317,7 +327,9 @@ class ConfigManager:
             "detection_engine": "mediapipe",
             "engine_auto_switch": False,
             "engine_auto_switch_no_hand_frames": 60,
-            "engine_auto_switch_hand_frames": 90,
+            "engine_auto_switch_hand_frames": 30,
+            "engine_auto_switch_near_bbox_ratio": 0.04,
+            "engine_auto_switch_near_frames": 90,
             "engine_auto_switch_cooldown_sec": 5.0,
             "dominant_hand": "Auto",
             "hand_detection_confidence": 0.5,
