@@ -1,5 +1,59 @@
 # Changelog
 
+## Unreleased
+
+- **Long-range (3–5 m) engine A/B with ground truth, 2026-07-22**
+  (`raw_capture/20260722_145659`, 2000 frames, 18 truth events): MediaPipe
+  detects hands in 42.7% of frames vs HaGRID YOLO 92.8%, but YOLO costs ~2.5x
+  latency (P95 81 ms vs 35 ms), ~4x jitter and a 58.1% multi-hand rate at
+  conf 0.25. Conclusion: keep `mediapipe` as the default engine; pursue
+  automatic switching instead of a global default.
+- **Head-to-head: crop-zoom/SR vs YOLO at 3–5 m** (`benchmark_ab.py --set
+  long_range_enabled=true`): with the long-range chain engaged, MediaPipe
+  reaches 88.1% detection with only 1.4% multi-hand, half the jitter and
+  ~10 ms lower P95 latency than YOLO — the better *tracker*. But zoom can
+  only engage after a hand is already detected
+  (`base_hand_tracker.py:707-709` returns early when no hand is present), so
+  it structurally cannot solve initial acquisition at distance. YOLO is the
+  better *catcher*; the two are complementary, not alternatives.
+- **Engine auto-switch** (`engine_auto_switch`, default off): when MediaPipe
+  sees no hand for ~60 consecutive frames the tracker switches to
+  `hagrid_yolo`; after ~90 consecutive stable single-hand frames it switches
+  back. A 5 s cooldown prevents oscillation, multi-hand frames (a YOLO
+  false-positive signature) do not count toward switching back, and a manual
+  `detection_engine` choice always stays authoritative. Runtime override
+  lives in memory only; restart still honors the configured engine.
+- **Ground-truth A/B verdict for the three gesture features, 2026-07-22**:
+  near-range B-group (`raw_capture/20260722_164055`, 1846 frames, 99% hand
+  frames, 14 labeled click/drag groups) — pinch hysteresis cuts false alarms
+  10 → 3 and pinch flips -43%, but recall drops 64.3% → 57.1% and onset P95
+  worsens 1402 → 4011 ms; `thumb_perp` has no labeled poses for calibration;
+  freeze drift observations do not justify a default change. **All three
+  features remain off by default**; an asymmetric EXIT-only hysteresis is
+  noted as the future direction.
+- **Fix: "app crashed during recording" was Space clicking the focused
+  button** (`e5bb295`). Qt activates a focused QPushButton on Space release,
+  and the floating window's close button had keyboard focus while the user
+  tapped Space as the truth marker — an orderly `closeEvent` that looked like
+  a crash (no WER report, no faulthandler dump; shutdown began 16 ms after
+  the Space-up event). All floating-window buttons and every draw-toolbar
+  button/slider are now `NoFocus`, with regression tests.
+- **Ground-truth recording framework** (2026-07-21/22): `TruthEventLogger`
+  writes `truth_events.jsonl` from a configurable marker key (space for near
+  range; wireless-mouse middle/side buttons or presenter PageUp/PageDown for
+  3–5 m; comma-separated multi-key supported);
+  `benchmark_gesture_ab.py` reports recall / miss rate / false alarms /
+  onset-offset latency against truth with conservative default on/off
+  criteria. F8 is a global record hotkey and a REC dot is painted on the
+  frameless floating window while recording.
+- **HaGRID YOLO engine finishing** (2026-07-21, `ceed13b`): 12 MB
+  `hand_yolov8n.onnx` now ships in the repo and the PyInstaller spec, the
+  packaged build self-test verifies engine init, and model-filename wording
+  is unified. Near-range A/B showed parity detection at 2.3–2.7x latency, so
+  `mediapipe` stays default.
+- `benchmark_ab.py` gained `--engines`, `--set key=value` (config overrides
+  for offline experiments) and `--out`; new metrics include `zoom_on_frames`.
+
 ## v1.4.0 - 2026-07-18
 
 AirControl 1.4 consolidates the locally iterated pinch-stability work into a
