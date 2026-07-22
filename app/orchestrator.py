@@ -12,6 +12,7 @@ from mode_manager import ModeManager
 from modes import MODE_NAME_ZH, DrawMode, MouseMode, PresentationMode
 from PyQt6.QtCore import QObject, pyqtSignal
 from services.camera import CameraService, list_available_cameras
+from services.engine_auto_switcher import EngineAutoSwitcher
 from services.geometric_classifier import WeightedVoteClassifier
 from services.gesture_recognizer import GestureRecognizer
 from services.hand_tracker_factory import create_hand_tracker
@@ -88,6 +89,16 @@ class AirControlOrchestrator(QObject):
         self._voice_keyword_flash = None
         self._voice_keyword_time = 0.0
 
+        # 远距引擎自动切换（config engine_auto_switch，默认关闭）：
+        # _engine_override 是 FSM 的运行时引擎覆盖，只存在内存里、不写 config.json；
+        # 用户手动改 detection_engine 时清除覆盖并重置状态机（见 apply_config）。
+        self._engine_override = None
+        self._engine_switcher = EngineAutoSwitcher()
+        _configured_engine = self.config.get("detection_engine", "mediapipe")
+        self._last_config_engine = (
+            _configured_engine if isinstance(_configured_engine, str) else "mediapipe"
+        )
+
         self.init_services()
         self._init_modes()
 
@@ -162,6 +173,7 @@ class AirControlOrchestrator(QObject):
 
         self._tracker_config_signature = self._tracker_signature()
         self.tracker = self._create_tracker()
+        self._configure_engine_switcher()
 
         self.recognizer = GestureRecognizer(
             cooldown=self.config.get("cooldown"),
@@ -237,7 +249,9 @@ class AirControlOrchestrator(QObject):
 
     def _tracker_signature(self):
         return (
+            # 引擎优先级：环境变量（自检/回放强制）> FSM 运行时覆盖 > config 配置
             os.environ.get("AIRCONTROL_ENGINE")
+            or getattr(self, "_engine_override", None)
             or self.config.get("detection_engine", "mediapipe"),
             self.config.get("model_type"),
             self.config.get("dominant_hand", "Right"),
@@ -260,6 +274,44 @@ class AirControlOrchestrator(QObject):
             dominant_hand=signature[2],
             config=self.config,
         )
+
+    def _configure_engine_switcher(self):
+        """按 config 刷新远距引擎自动切换状态机的参数（参数变更即重置计帧）。"""
+        self._engine_switcher.configure(
+            enabled=self.config.get("engine_auto_switch", False) is True,
+            no_hand_frames=self.config.get("engine_auto_switch_no_hand_frames", 60),
+            hand_frames=self.config.get("engine_auto_switch_hand_frames", 90),
+            cooldown_sec=self.config.get("engine_auto_switch_cooldown_sec", 5.0),
+        )
+
+    def _maybe_auto_switch_engine(self, hands_landmarks):
+        """远距引擎自动切换：逐帧喂检出结果给 FSM，判定后发起 tracker 重建。
+
+        仅主流程生效；AIRCONTROL_ENGINE 环境变量强制引擎时（自检/回放类场景）
+        不介入。切换复用既有 _request_tracker_rebuild 后台重建路径，平滑器与
+        crop-zoom 状态由 migrate_state_from 迁移，体验连续。覆盖只落在内存，
+        不写 config.json——重启后仍从用户配置的引擎起步。
+        """
+        switcher = self._engine_switcher
+        if not switcher.enabled or os.environ.get("AIRCONTROL_ENGINE"):
+            return
+        signature = getattr(self, "_tracker_config_signature", None)
+        if not signature:
+            return
+        current = signature[0]
+        # 上一次自动切换的 tracker 仍在后台重建：等其落地，避免重复发起
+        if self._engine_override is not None and self._engine_override != current:
+            return
+        target = switcher.update(current, len(hands_landmarks or []))
+        if target is None or target == current:
+            return
+        logger.info("引擎自动切换: %s → %s（%s）", current, target, switcher.last_reason)
+        self._engine_override = target
+        self._request_tracker_rebuild(self._tracker_signature())
+        self.status_text = f"检测引擎已自动切换: {current} → {target}"
+        self.status_color = (0, 255, 255)
+        self.status_timer = time.time()
+        self.status_updated.emit(self.status_text, self.status_color)
 
     def _current_voice_kws_signature(self):
         return (self.config.get("voice_command_threshold", 0.25),)
@@ -504,6 +556,24 @@ class AirControlOrchestrator(QObject):
                 bool(self.config.get("debug_overlay"))
             )
 
+        # --- 远距引擎自动切换的调和（必须先于 tracker 签名比较）---
+        # 用户手动改 detection_engine：尊重手动选择，清掉 FSM 运行时覆盖并重置计帧。
+        config_engine = self.config.get("detection_engine", "mediapipe")
+        if config_engine != self._last_config_engine:
+            logger.info(
+                "检测引擎被手动切换: %s → %s，自动切换状态机已重置",
+                self._last_config_engine, config_engine,
+            )
+            self._last_config_engine = config_engine
+            self._engine_override = None
+            self._engine_switcher.reset()
+        self._configure_engine_switcher()
+        # 用户关闭了自动切换但当前跑在 FSM 覆盖的引擎上：回到 config 配置的引擎。
+        if not self._engine_switcher.enabled and self._engine_override is not None:
+            logger.info("引擎自动切换已关闭，回到配置引擎 %s", config_engine)
+            self._engine_override = None
+            self._engine_switcher.reset()
+
         signature = self._tracker_signature()
         if signature != self._tracker_config_signature:
             self._request_tracker_rebuild(signature)
@@ -552,6 +622,15 @@ class AirControlOrchestrator(QObject):
                 close()
             return
         if tracker is None:
+            # 自动切换发起的重建失败：回退运行时覆盖并重置 FSM，否则
+            # _engine_override != 当前签名 会让自动切换永久停摆。
+            if self._engine_override is not None and signature[0] == self._engine_override:
+                logger.warning(
+                    "自动切换到 %s 失败（%s），回退引擎覆盖",
+                    self._engine_override, error,
+                )
+                self._engine_override = None
+                self._engine_switcher.reset()
             self.status_text = f"模型更新失败: {error}"
             self.status_color = (255, 0, 0)
             self.status_updated.emit(self.status_text, self.status_color)
@@ -760,6 +839,10 @@ class AirControlOrchestrator(QObject):
 
     def _process_frame_results(self, frame, hands_landmarks, hands_gestures):
         frame_h, frame_w = frame.shape[:2]
+
+        # 远距引擎自动切换：逐帧喂检出结果（回放/benchmark 不经过这里，不受影响）。
+        # 注意 hands_landmarks 可能含 ≤5 帧的幽灵手预测补帧，60/90 帧阈值下影响可忽略。
+        self._maybe_auto_switch_engine(hands_landmarks)
 
         # 全局模式切换手势必须在时序稳定化之前判断。TemporalGestureVoter 的
         # FSM 会把 ILoveYou 延迟/过滤为 None/OTHER，导致 ModeManager 看不到

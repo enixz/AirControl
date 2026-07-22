@@ -100,6 +100,13 @@ _CONFIG_SCHEMA = {
         "stable",
     ),
     "detection_engine": (str, lambda v: v in ("mediapipe", "hagrid_yolo"), "mediapipe"),
+    # 远距引擎自动切换（默认关闭，不打扰现有用户）：mediapipe 连续无手 →
+    # hagrid_yolo；hagrid_yolo 连续稳定单手 → 切回 mediapipe；冷却防抖。
+    # 状态机见 services/engine_auto_switcher.py，仅主流程运行时生效。
+    "engine_auto_switch": (bool, _is_bool, False),
+    "engine_auto_switch_no_hand_frames": (int, _is_int_in(5, 600), 60),
+    "engine_auto_switch_hand_frames": (int, _is_int_in(5, 600), 90),
+    "engine_auto_switch_cooldown_sec": ((int, float), _is_num_in(0.5, 60.0), 5.0),
     "camera_index": (int, _is_int_in(0, 9), 0),
     "camera_width": (
         (int, type(None)),
@@ -308,6 +315,10 @@ class ConfigManager:
             "hand_prediction_enabled": True,
             "temporal_voter_enabled": False,
             "detection_engine": "mediapipe",
+            "engine_auto_switch": False,
+            "engine_auto_switch_no_hand_frames": 60,
+            "engine_auto_switch_hand_frames": 90,
+            "engine_auto_switch_cooldown_sec": 5.0,
             "dominant_hand": "Auto",
             "hand_detection_confidence": 0.5,
             "hand_presence_confidence": 0.5,
