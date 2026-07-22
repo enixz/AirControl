@@ -553,6 +553,11 @@ class FloatingWindow(QMainWindow):
         """)
         self.btn_close.clicked.connect(self.close)
 
+        # 空格是真值标记键：悬浮窗按钮一律不吃键盘焦点，否则录像时敲空格
+        # 会在松开瞬间激活焦点按钮（X = 直接退出程序，2026-07-22 实录"崩溃"）。
+        for _btn in (self.btn_settings, self.btn_minimize, self.btn_close):
+            _btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
         top_row.addWidget(self.btn_settings)
         top_row.addWidget(self.mode_label, 1)
         top_row.addWidget(self.btn_minimize)

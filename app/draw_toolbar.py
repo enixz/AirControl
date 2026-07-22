@@ -178,6 +178,11 @@ class DrawToolbar(QWidget):
 
         self.setFixedWidth(200)
 
+        # 空格是真值标记键：按钮/滑条不吃键盘焦点，避免录像时敲空格在松开
+        # 瞬间误触发清空/撤销/改笔粗（与悬浮窗 NoFocus 同一修复，2026-07-22）。
+        for _w in self.findChildren(QPushButton) + self.findChildren(QSlider):
+            _w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
     def _on_color_clicked(self):
         btn = self.sender()
         if not isinstance(btn, ColorButton):
