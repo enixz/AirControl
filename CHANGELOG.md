@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Experimental `person_pose_hand` engine + A4000/DirectML GPU fix, 2026-07-26**
+  (branch `experiment/person-pose-hand-crop`): new capture engine
+  框人→yolov8-pose 拿手腕→框手→（小手超分）→HandLandmarker 关键点, selectable
+  via `detection_engine=person_pose_hand` or as the CAPTURE-state engine via
+  `engine_auto_switch_capture_engine`. Far-range A/B (`raw_capture/20260722_145659`,
+  2000 frames): detect 91.6% (≈ hagrid_yolo 92.8%) but multi-hand 29.6% vs 58.1%
+  (wrist anchoring rejects false hands); enabling SR on small hands improves all
+  four metrics (detect↑/multi↓/jerk↓/latency↓). `models/yolov8n-pose.onnx` is
+  NOT committed (Ultralytics AGPL; see MODEL_PROVENANCE.md) and must be exported
+  locally. **GPU fix**: removed the conflicting plain `onnxruntime` package that
+  shadowed `onnxruntime-directml`, restoring `DmlExecutionProvider` on the
+  RTX A4000 — YOLO+pose now run on DirectML, cutting single-frame `_detect` to
+  ~27 ms @720p (the benchmark's residual latency is per-crop HandLandmarker +
+  MediaPipe ops that fall back to CPU). Experimental; defaults unchanged.
+
 - **Long-range (3–5 m) engine A/B with ground truth, 2026-07-22**
   (`raw_capture/20260722_145659`, 2000 frames, 18 truth events): MediaPipe
   detects hands in 42.7% of frames vs HaGRID YOLO 92.8%, but YOLO costs ~2.5x
