@@ -133,17 +133,42 @@ class PoseMatrixRecorder:
                 self.done.pop()
         logger.info("↺ 重录 [%s]", self.segments[self.idx])
 
-    def run(self):
-        cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+    def _open_camera(self, index):
+        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         if not cap.isOpened():
-            logger.error("打不开摄像头 index=%d", self.camera_index)
-            return 2
+            cap.release()
+            return None
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        return cap
+
+    @staticmethod
+    def _detect_cameras(max_index=6):
+        """探测可用摄像头索引列表。"""
+        found = []
+        for i in range(max_index + 1):
+            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                found.append(i)
+            cap.release()
+        return found
+
+    def run(self):
+        cams = self._detect_cameras()
+        if self.camera_index not in cams:
+            cams.append(self.camera_index)
+            cams = sorted(set(cams))
+        cam_pos = cams.index(self.camera_index) if self.camera_index in cams else 0
+
+        cap = self._open_camera(self.camera_index)
+        if cap is None:
+            logger.error("打不开摄像头 index=%d", self.camera_index)
+            return 2
 
         win = "Pose Matrix Recorder"
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-        logger.info("就绪。共 %d 段。空格=开始/停止  N=下一段  B=重录  Q=退出", len(self.segments))
+        logger.info("就绪。共 %d 段。空格=开始/停止  N=下一段  B=重录  C=切换摄像头  Q=退出", len(self.segments))
+        logger.info("检测到摄像头: %s（当前 %d，按 C 切换）", cams, self.camera_index)
 
         while self.idx < len(self.segments):
             ok, frame = cap.read()
@@ -170,6 +195,8 @@ class PoseMatrixRecorder:
             disp = frame.copy()
             cv2.rectangle(disp, (0, 0), (disp.shape[1], 44), (0, 0, 0), -1)
             cv2.putText(disp, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            cv2.putText(disp, f"CAM {self.camera_index}", (disp.shape[1] - 110, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             cv2.putText(disp, _hint(segment), (10, disp.shape[0] - 14),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
             cv2.imshow(win, disp)
@@ -189,6 +216,17 @@ class PoseMatrixRecorder:
                     break
             elif key == ord("b"):
                 self.redo_segment()
+            elif key == ord("c"):
+                # 循环切换摄像头（录制中也允许：换源后继续当前段）
+                cam_pos = (cam_pos + 1) % len(cams)
+                self.camera_index = cams[cam_pos]
+                new_cap = self._open_camera(self.camera_index)
+                if new_cap is not None:
+                    cap.release()
+                    cap = new_cap
+                    logger.info("切换到摄像头 %d", self.camera_index)
+                else:
+                    logger.warning("摄像头 %d 打不开，仍用当前", self.camera_index)
 
         if self.recording:
             self.stop_segment()
