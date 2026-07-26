@@ -96,6 +96,11 @@ class MouseMode(ModeBase):
             self._watchdog_stop.set()
         if hasattr(self, "_watchdog_thread"):
             self._watchdog_thread.join(timeout=1.0)
+            watchdog_stopped = not self._watchdog_thread.is_alive()
+            if not watchdog_stopped:
+                logger.error("鼠标模式 watchdog 未能在关闭期限内退出")
+        else:
+            watchdog_stopped = True
 
         # 必须释放左键
         if getattr(self, '_is_left_holding', False):
@@ -109,6 +114,7 @@ class MouseMode(ModeBase):
         self.mouse.reset()
         self.cursor_overlay.hide_cursor()
         self.cursor_overlay.hide()
+        return watchdog_stopped
 
     def _watchdog_loop(self):
         """后台线程：检测主线程是否被某个 Win32 模态循环堵住。

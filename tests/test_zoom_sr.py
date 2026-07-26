@@ -38,6 +38,16 @@ class TestZoomSR(unittest.TestCase):
             os.remove(self.config_path)
         os.rmdir(self.tmpdir)
 
+    def _make_tracker(self, gpu_available=False):
+        """Create an auto-SR tracker without consulting host files/providers."""
+        config = ConfigManager(config_file=self.config_path)
+        tracker = DummyHandTracker(config=config)
+        tracker._sr._realesrgan_gpu_available = bool(gpu_available)
+        tracker._sr._realesrgan_gpu_provider = (
+            "DmlExecutionProvider" if gpu_available else None
+        )
+        return tracker
+
     def test_missing_sr_key_uses_default(self):
         """若 config.json 缺少 zoom_sr_engine，默认使用 auto"""
         old_config = {
@@ -75,8 +85,7 @@ class TestZoomSR(unittest.TestCase):
         # 强制使得模型文件不存，保证加载报错被捕获/优雅处理
         mock_exists.return_value = False
 
-        cm = ConfigManager(config_file=self.config_path)
-        tracker = DummyHandTracker(config=cm)
+        tracker = self._make_tracker()
 
         # 初始时，未初始化
         self.assertFalse(tracker._sr._sr_initialized)
@@ -94,8 +103,7 @@ class TestZoomSR(unittest.TestCase):
         旧 bug：crop_size 在调用处被钳制到 >=240，而 auto 门控却用 `crop_size < 160`，
         两者互斥导致超分永远不触发（死代码）。此测试锁死该回归。
         """
-        cm = ConfigManager(config_file=self.config_path)
-        tracker = DummyHandTracker(config=cm)
+        tracker = self._make_tracker()
         target = tracker._crop_target_size  # 384
         # 远距离：裁剪框被钳到下限 240 < 384 → 在放大 → 必须启用 espcn（而非 none）
         self.assertEqual(tracker._sr.resolve("auto", 240, target), "espcn")
@@ -107,8 +115,7 @@ class TestZoomSR(unittest.TestCase):
         裁剪框可一路缩小到机械下限 _crop_min_size，超分一路放大，
         因此 64 这种小裁剪框也必须走 espcn 而非 none。
         """
-        cm = ConfigManager(config_file=self.config_path)
-        tracker = DummyHandTracker(config=cm)
+        tracker = self._make_tracker()
         target = tracker._crop_target_size
         self.assertLess(tracker._crop_min_size, 240)  # 不再有 240 人为下限
         for cs in (tracker._crop_min_size, 64, 120, 239):
@@ -121,8 +128,7 @@ class TestZoomSR(unittest.TestCase):
         1000~1300px 远大于 384px 目标）。因此 crop_size >= target 时 auto 返回 none，
         把算力还给帧率；只有 crop_size < target（上采样放大小/远手）才用 ESPCN。
         """
-        cm = ConfigManager(config_file=self.config_path)
-        tracker = DummyHandTracker(config=cm)
+        tracker = self._make_tracker()
         target = tracker._crop_target_size
         # 下采样（手较近）→ 关闭超分
         self.assertEqual(tracker._sr.resolve("auto", target, target), "none")
@@ -131,6 +137,15 @@ class TestZoomSR(unittest.TestCase):
         self.assertEqual(
             tracker._sr.resolve("auto", int(target * 0.89), target),
             "espcn",
+        )
+
+    def test_auto_prefers_realesrgan_when_gpu_model_is_available(self):
+        tracker = self._make_tracker(gpu_available=True)
+        target = tracker._crop_target_size
+
+        self.assertEqual(
+            tracker._sr.resolve("auto", target - 1, target),
+            "realesrgan_gpu",
         )
 
     def test_explicit_engine_is_respected(self):
@@ -143,8 +158,7 @@ class TestZoomSR(unittest.TestCase):
             self.assertEqual(tracker._sr.resolve(eng, target + 100, target), eng)
 
     def test_auto_uses_hysteresis_near_target(self):
-        cm = ConfigManager(config_file=self.config_path)
-        tracker = DummyHandTracker(config=cm)
+        tracker = self._make_tracker()
         target = tracker._crop_target_size
 
         self.assertEqual(

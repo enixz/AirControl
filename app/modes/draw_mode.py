@@ -20,6 +20,7 @@ class _TraceWriter:
     def __init__(self, path):
         self._queue = queue.Queue(maxsize=512)
         self._closed = False
+        self._sentinel_queued = False
         self._thread = threading.Thread(
             target=self._run,
             args=(path,),
@@ -49,19 +50,26 @@ class _TraceWriter:
         except OSError:
             logger.exception("无法写入板书轨迹: %s", path)
 
-    def close(self):
-        if self._closed:
-            return
+    def close(self, timeout_sec=1.5):
+        if not self._thread.is_alive():
+            return True
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
         self._closed = True
-        try:
-            self._queue.put(None, timeout=0.5)
-        except queue.Full:
+        if not self._sentinel_queued:
             try:
-                self._queue.get_nowait()
-                self._queue.put_nowait(None)
-            except (queue.Empty, queue.Full):
-                return
-        self._thread.join(timeout=1.0)
+                self._queue.put(
+                    None,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
+                self._sentinel_queued = True
+            except queue.Full:
+                logger.error("板书轨迹队列未排空；保留待写记录并延后收尾")
+                return False
+        self._thread.join(max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            logger.error("板书轨迹写入线程未能在关闭期限内退出")
+            return False
+        return True
 
 
 class DrawMode(ModeBase):
@@ -180,9 +188,11 @@ class DrawMode(ModeBase):
             self.recognizer._reset_state()
 
     def on_exit(self):
+        trace_stopped = True
         if self._trace_writer is not None:
-            self._trace_writer.close()
-            self._trace_writer = None
+            trace_stopped = self._trace_writer.close() is not False
+            if trace_stopped:
+                self._trace_writer = None
         self.overlay.hide()
         self.overlay.setGeometry(-100, -100, 0, 0)
         self.overlay.force_lift_pen()
@@ -199,6 +209,7 @@ class DrawMode(ModeBase):
         self._two_finger_hovering = False
         self._thumb_apart_frames = 0
         self._open_palm_lift_frames = 0
+        return trace_stopped
 
     def _position_toolbar(self):
         sw = self.overlay.width()

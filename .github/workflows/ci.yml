@@ -30,10 +30,10 @@ jobs:
         run: python -m pip check
 
       - name: Compile Python sources
-        run: python -m compileall -q app tests benchmark_gesture_ab.py build.py selftest.py
+        run: python -m compileall -q .
 
       - name: Lint Python sources
-        run: python -m ruff check app tests benchmark_gesture_ab.py build.py selftest.py
+        run: python -m ruff check .
 
       - name: Run tests with coverage
         env:
@@ -47,11 +47,23 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
-      - name: Build Windows release bundle
+      - name: Verify release gate rejects unapproved model
         if: matrix.python-version == '3.12'
-        run: python build.py
+        shell: pwsh
+        run: |
+          python build.py --release
+          $releaseExitCode = $LASTEXITCODE
+          if ($releaseExitCode -eq 0) {
+            throw "Release build unexpectedly bypassed the model provenance gate"
+          }
+          Write-Host "Release gate correctly rejected the unapproved model"
+          $global:LASTEXITCODE = 0
 
-      - name: Verify packaged release bundle
+      - name: Build non-distributable Windows development bundle
+        if: matrix.python-version == '3.12'
+        run: python build.py --development
+
+      - name: Verify packaged development bundle
         if: matrix.python-version == '3.12'
         shell: pwsh
         run: |

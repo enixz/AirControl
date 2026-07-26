@@ -92,6 +92,7 @@ class TruthEventLogger:
         self._stop = threading.Event()
         self._held = set()
         self._closed = False
+        self._finalized = False
         self._file = open(self._path, "w", encoding="utf-8", buffering=1)
         self._write({
             "type": "header",
@@ -149,14 +150,17 @@ class TruthEventLogger:
                         self._held.discard(name)
             self._stop.wait(self._poll)
 
-    def close(self):
+    def close(self, timeout_sec=2.0):
         """停止轮询；仍按住的键补一条 synthetic up，保证区间良构。"""
-        if self._closed:
-            return
+        if self._finalized:
+            return True
         self._closed = True
         self._stop.set()
         if self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=max(0.0, float(timeout_sec)))
+        if self._thread.is_alive():
+            logger.error("真值事件线程未能在关闭期限内退出；保留事件文件句柄")
+            return False
         now = time.time()
         for name in sorted(self._held):
             self._write({
@@ -168,3 +172,5 @@ class TruthEventLogger:
             self._file.close()
         except Exception:
             pass
+        self._finalized = True
+        return True

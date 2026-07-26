@@ -10,6 +10,7 @@
 """
 
 import logging
+import threading
 import time
 
 import cv2
@@ -27,6 +28,8 @@ _RESOLUTION_CANDIDATES = [
 
 # 同进程多个 CameraService 共用探测结果
 _PROBE_CACHE = {}
+_PROBE_CACHE_LOCK = threading.Lock()
+_PROBE_CACHE_TTL_SEC = 60.0
 
 # 探测（开/关同一设备）后、正式重开同一设备前的"沉淀"时间。Windows DSHOW 的设备
 # 释放是异步的：探测很快命中（如 1080p 首档即达标，仅 ~1s）时，probe 的 release()
@@ -35,26 +38,92 @@ _PROBE_CACHE = {}
 _DEVICE_SETTLE_SEC = 0.5
 
 
+def _release_capture(cap):
+    if cap is None:
+        return
+    try:
+        cap.release()
+    except Exception:
+        logger.debug("释放摄像头句柄失败", exc_info=True)
+
+
+def _create_open_capture(index, backend=None):
+    """Create an opened capture or deterministically release a failed handle."""
+    cap = None
+    try:
+        cap = (
+            cv2.VideoCapture(index)
+            if backend is None
+            else cv2.VideoCapture(index, backend)
+        )
+        if cap.isOpened():
+            return cap
+    except Exception:
+        logger.debug(
+            "打开摄像头 %d (backend=%s) 异常",
+            index,
+            backend,
+            exc_info=True,
+        )
+    _release_capture(cap)
+    return None
+
+
+def _open_capture_with_fallback(index, preferred_backend=None):
+    candidates = []
+    if preferred_backend is not None:
+        candidates.append(preferred_backend)
+    candidates.extend(_preferred_backends())
+    attempted = set()
+    for backend in candidates:
+        if backend in attempted:
+            continue
+        attempted.add(backend)
+        cap = _create_open_capture(index, backend)
+        if cap is not None:
+            return cap, backend
+    return None, None
+
+
+def _probe_cache_key(camera_index, min_fps, force_mjpeg, preferred_backend):
+    return (
+        int(camera_index),
+        float(min_fps),
+        bool(force_mjpeg),
+        preferred_backend,
+    )
+
+
+def invalidate_probe_cache(camera_index=None):
+    """Invalidate cached capability data after release, failure, or replug."""
+    with _PROBE_CACHE_LOCK:
+        if camera_index is None:
+            _PROBE_CACHE.clear()
+            return
+        camera_index = int(camera_index)
+        stale = [key for key in _PROBE_CACHE if key[0] == camera_index]
+        for key in stale:
+            _PROBE_CACHE.pop(key, None)
+
+
 def _try_open_camera(index, backend=None):
     """尝试用指定后端打开摄像头并读取一帧。
 
     backend 为 None 时使用 OpenCV 默认后端。
     返回 (cap, ok) 元组；ok 为 True 表示成功打开并能读到帧。
     """
-    cap = None
+    cap = _create_open_capture(index, backend)
+    if cap is None:
+        return None, False
     try:
-        if backend is None:
-            cap = cv2.VideoCapture(index)
-        else:
-            cap = cv2.VideoCapture(index, backend)
-        if not cap.isOpened():
-            return None, False
         ok, _ = cap.read()
         if not ok:
+            _release_capture(cap)
             return None, False
         return cap, True
     except Exception:
         logger.debug("枚举摄像头 %d (backend=%s) 异常", index, backend, exc_info=True)
+        _release_capture(cap)
         return None, False
 
 
@@ -112,11 +181,7 @@ def list_available_cameras(max_probe=4, exclude_index=None):
                 "backend": used_backend,
             })
 
-        if cap is not None:
-            try:
-                cap.release()
-            except Exception:
-                pass
+        _release_capture(cap)
     return results
 
 
@@ -131,6 +196,86 @@ def _backend_name(backend):
     return str(backend)
 
 
+def _measure_max_resolution(cap, camera_index, min_fps, force_mjpeg):
+    """Measure one already-open capture; the caller owns and releases it."""
+    if force_mjpeg:
+        mjpg_fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+        cap.set(cv2.CAP_PROP_FOURCC, mjpg_fourcc)
+        actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        actual_fourcc_str = "".join(
+            chr((actual_fourcc >> 8 * i) & 0xFF) for i in range(4)
+        )
+        logger.info("  尝试设置 MJPG，实际 fourcc=%s", actual_fourcc_str)
+
+    chosen = None
+    last_accepted = None
+    for w, h in _RESOLUTION_CANDIDATES:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        if force_mjpeg:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if actual_w != w or actual_h != h:
+            logger.debug(
+                "  探测 %dx%d 驱动拒绝（实际 %dx%d）",
+                w,
+                h,
+                actual_w,
+                actual_h,
+            )
+            continue
+
+        ok_frames = 0
+        started = time.perf_counter()
+        for _ in range(15):
+            ok, _ = cap.read()
+            if ok:
+                ok_frames += 1
+        elapsed = time.perf_counter() - started
+        real_fps = ok_frames / elapsed if elapsed > 0 else 0
+        actual_fourcc_val = int(cap.get(cv2.CAP_PROP_FOURCC))
+        actual_fourcc_str = "".join(
+            chr((actual_fourcc_val >> 8 * i) & 0xFF) for i in range(4)
+        )
+        logger.info(
+            "  探测 %dx%d → 实测 %.1f fps (%d/15 帧, fourcc=%s)",
+            w,
+            h,
+            real_fps,
+            ok_frames,
+            actual_fourcc_str,
+        )
+        last_accepted = (w, h)
+        if real_fps >= min_fps and ok_frames >= 12:
+            chosen = (w, h)
+            break
+
+    result = chosen or last_accepted
+    if chosen:
+        logger.info(
+            "摄像头 %d 选定: %dx%d (满足 ≥%d fps)",
+            camera_index,
+            *result,
+            min_fps,
+        )
+    elif last_accepted:
+        logger.warning(
+            "摄像头 %d 没有分辨率达到 %d fps，回退到 %dx%d",
+            camera_index,
+            min_fps,
+            *result,
+        )
+    else:
+        logger.error(
+            "摄像头 %d 探测失败，所有候选分辨率都被驱动拒绝",
+            camera_index,
+        )
+    return result
+
+
 def probe_max_resolution(camera_index, min_fps=20, force_mjpeg=True, use_cache=True, preferred_backend=None):
     """探测摄像头能稳定跑到 min_fps 的最高分辨率，返回 (w, h) 或 None。
 
@@ -138,101 +283,49 @@ def probe_max_resolution(camera_index, min_fps=20, force_mjpeg=True, use_cache=T
     若所有候选都达不到帧率要求，回退到"驱动接受的最低分辨率"作 best-effort。
     优先使用调用方指定的后端；未指定时按 DSHOW → MSMF → 默认后端顺序尝试。
     """
-    if use_cache and camera_index in _PROBE_CACHE:
-        return _PROBE_CACHE[camera_index]
+    cache_key = _probe_cache_key(
+        camera_index,
+        min_fps,
+        force_mjpeg,
+        preferred_backend,
+    )
+    if use_cache:
+        with _PROBE_CACHE_LOCK:
+            cached = _PROBE_CACHE.get(cache_key)
+            if cached is not None:
+                cached_at, result = cached
+                if time.monotonic() - cached_at <= _PROBE_CACHE_TTL_SEC:
+                    return result
+                _PROBE_CACHE.pop(cache_key, None)
 
-    cap = None
-    opened_backend = None
-    if preferred_backend is not None:
-        cap = cv2.VideoCapture(camera_index, preferred_backend)
-        if cap.isOpened():
-            opened_backend = preferred_backend
-
-    if cap is None or not cap.isOpened():
-        for backend in _preferred_backends():
-            cap = cv2.VideoCapture(camera_index, backend) if backend is not None else cv2.VideoCapture(camera_index)
-            if cap.isOpened():
-                opened_backend = backend
-                break
-
-    if cap is None or not cap.isOpened():
+    cap, opened_backend = _open_capture_with_fallback(
+        camera_index,
+        preferred_backend,
+    )
+    if cap is None:
         logger.warning("摄像头 %d 所有后端均无法打开，跳过分辨率探测", camera_index)
         return None
-
-    logger.info("摄像头 %d 分辨率探测使用后端: %s", camera_index, _backend_name(opened_backend))
-
-    if force_mjpeg:
-        # 在所有后端下都尝试设置 MJPG。DSHOW 下行为最稳定；MSMF/默认后端下
-        # 某些驱动也会接受 MJPG，能显著提升高分辨率帧率（YUY2 在 1080p 下带宽不够）。
-        # 即使设置失败也不会报错，只是保持驱动默认格式。
-        mjpg_fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-        cap.set(cv2.CAP_PROP_FOURCC, mjpg_fourcc)
-        actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-        actual_fourcc_str = "".join(chr((actual_fourcc >> 8 * i) & 0xFF) for i in range(4))
-        logger.info("  尝试设置 MJPG，实际 fourcc=%s", actual_fourcc_str)
-
-    chosen = None
-    last_accepted = None  # 用作 "没有任何分辨率达到帧率" 时的兜底
-
-    for w, h in _RESOLUTION_CANDIDATES:
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        # 变更分辨率后再次设置 MJPG：部分 Windows 驱动（DSHOW/MSMF）在 width/height
-        # 改变时会复位 FOURCC 为默认值（通常 YUY2），导致 1080p/720p 因带宽不足
-        # 达不到 min_fps、一路回退到 480p。这里在每档分辨率后补一次 MJPG，并校验
-        # 实际生效的 FOURCC 用于日志诊断。
-        if force_mjpeg:
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-
-        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        if actual_w != w or actual_h != h:
-            logger.debug("  探测 %dx%d 驱动拒绝（实际 %dx%d）", w, h, actual_w, actual_h)
-            continue
-
-        # 驱动接受了——抓 15 帧测真实帧率
-        ok_frames = 0
-        t0 = time.time()
-        for _ in range(15):
-            ok, _ = cap.read()
-            if ok:
-                ok_frames += 1
-        elapsed = time.time() - t0
-        real_fps = ok_frames / elapsed if elapsed > 0 else 0
-
-        # 读取实际生效的 FOURCC：用于诊断"驱动接受了分辨率但实际仍以 YUY2 跑"
-        # 的情况（MJPG 没设上 → 高分辨率带宽不够 → fps 不达标）。
-        actual_fourcc_val = int(cap.get(cv2.CAP_PROP_FOURCC))
-        actual_fourcc_str = "".join(
-            chr((actual_fourcc_val >> 8 * i) & 0xFF) for i in range(4)
+    logger.info(
+        "摄像头 %d 分辨率探测使用后端: %s",
+        camera_index,
+        _backend_name(opened_backend),
+    )
+    try:
+        result = _measure_max_resolution(
+            cap,
+            camera_index,
+            min_fps,
+            force_mjpeg,
         )
-        logger.info(
-            "  探测 %dx%d → 实测 %.1f fps (%d/15 帧, fourcc=%s)",
-            w, h, real_fps, ok_frames, actual_fourcc_str,
-        )
+    except Exception:
+        logger.exception("摄像头 %d 分辨率探测异常", camera_index)
+        result = None
+    finally:
+        _release_capture(cap)
 
-        last_accepted = (w, h)
-        if real_fps >= min_fps and ok_frames >= 12:
-            chosen = (w, h)
-            break  # 找到最高合格分辨率，提前结束
-
-    cap.release()
-
-    result = chosen or last_accepted
-    if chosen:
-        logger.info("摄像头 %d 选定: %dx%d (满足 ≥%d fps)", camera_index, *result, min_fps)
-    elif last_accepted:
-        logger.warning(
-            "摄像头 %d 没有分辨率达到 %d fps，回退到 %dx%d",
-            camera_index, min_fps, *result,
-        )
-    else:
-        logger.error("摄像头 %d 探测失败，所有候选分辨率都被驱动拒绝", camera_index)
-
-    if use_cache:
-        _PROBE_CACHE[camera_index] = result
+    if use_cache and result is not None:
+        with _PROBE_CACHE_LOCK:
+            _PROBE_CACHE[cache_key] = (time.monotonic(), result)
     return result
 
 
@@ -309,48 +402,59 @@ class CameraService:
             self.camera_index, self.width or 0, self.height or 0,
             _backend_name(self._backend),
         )
-        self.cap = cv2.VideoCapture(self.camera_index, self._backend) if self._backend is not None else cv2.VideoCapture(self.camera_index)
-        if not self.cap.isOpened():
-            logger.warning(
-                "摄像头 %d 后端 %s 打开失败，尝试其他后端",
-                self.camera_index, _backend_name(self._backend),
-            )
-            for backend in _preferred_backends():
-                if backend == self._backend:
-                    continue
-                self.cap = cv2.VideoCapture(self.camera_index, backend) if backend is not None else cv2.VideoCapture(self.camera_index)
-                if self.cap.isOpened():
-                    self._backend = backend
-                    logger.info("摄像头 %d 使用回退后端: %s", self.camera_index, _backend_name(backend))
-                    break
-
-        if not self.cap.isOpened():
-            raise RuntimeError(f"无法打开摄像头 {self.camera_index}")
-
-        if self.force_mjpeg:
-            # 在所有后端下都尝试设置 MJPG（与 probe_max_resolution 保持一致）。
-            # DSHOW 下行为最稳定；MSMF/默认后端下某些驱动也会接受，能显著提升
-            # 高分辨率帧率。设置失败不会报错，保持驱动默认格式。
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        # 变更分辨率后再次设置 MJPG：部分驱动在 width/height 改变时会复位 FOURCC，
-        # 导致实际仍以 YUY2 跑、高分辨率帧率上不去。与 probe_max_resolution 保持一致。
-        if self.force_mjpeg:
-            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-
-        # 3. 回报实际生效参数
-        actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
-        fourcc_val = int(self.cap.get(cv2.CAP_PROP_FOURCC))
-        fourcc_str = "".join(chr((fourcc_val >> 8 * i) & 0xFF) for i in range(4))
-        logger.info(
-            "摄像头 %d 启动: %dx%d@%.1ffps (%s)",
-            self.camera_index, actual_w, actual_h, actual_fps, fourcc_str,
+        requested_backend = self._backend
+        self.cap, opened_backend = _open_capture_with_fallback(
+            self.camera_index,
+            requested_backend,
         )
+        if self.cap is None:
+            raise RuntimeError(f"无法打开摄像头 {self.camera_index}")
+        self._backend = opened_backend
+        if requested_backend != opened_backend:
+            logger.info(
+                "摄像头 %d 使用后端: %s",
+                self.camera_index,
+                _backend_name(opened_backend),
+            )
+
+        try:
+            if self.force_mjpeg:
+                self.cap.set(
+                    cv2.CAP_PROP_FOURCC,
+                    cv2.VideoWriter_fourcc(*"MJPG"),
+                )
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if self.force_mjpeg:
+                self.cap.set(
+                    cv2.CAP_PROP_FOURCC,
+                    cv2.VideoWriter_fourcc(*"MJPG"),
+                )
+
+            actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if actual_w > 0 and actual_h > 0:
+                self.width, self.height = actual_w, actual_h
+            actual_fps = self.cap.get(cv2.CAP_PROP_FPS)
+            fourcc_val = int(self.cap.get(cv2.CAP_PROP_FOURCC))
+            fourcc_str = "".join(
+                chr((fourcc_val >> 8 * i) & 0xFF) for i in range(4)
+            )
+            logger.info(
+                "摄像头 %d 启动: %dx%d@%.1ffps (%s)",
+                self.camera_index,
+                actual_w,
+                actual_h,
+                actual_fps,
+                fourcc_str,
+            )
+        except Exception:
+            _release_capture(self.cap)
+            self.cap = None
+            invalidate_probe_cache(self.camera_index)
+            raise
 
     def read_frame(self):
         if self.cap is None or not self.cap.isOpened():
@@ -393,6 +497,7 @@ class CameraService:
                 self._consecutive_failures,
             )
             self._disconnected = True
+            invalidate_probe_cache(self.camera_index)
 
         try:
             # 释放旧句柄
@@ -458,10 +563,10 @@ class CameraService:
             self._reconnecting = False
 
     def release(self):
-        if self.cap:
-            self.cap.release()
+        _release_capture(self.cap)
         # 复位状态，避免 release 后 read_frame 误判为"cap 存在但未打开"而触发重连
         self.cap = None
         self._disconnected = False
         self._consecutive_failures = 0
         self._reconnect_backoff = 1.0
+        invalidate_probe_cache(self.camera_index)

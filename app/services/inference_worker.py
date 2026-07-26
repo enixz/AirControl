@@ -20,6 +20,8 @@ class InferenceWorker(QThread):
     error_occurred = pyqtSignal(str)
     fps_updated = pyqtSignal(float)
     performance_updated = pyqtSignal(object)
+    # worker, active tracker, caller context, migration/seed result
+    tracker_swapped = pyqtSignal(object, object, object, object)
 
     def __init__(self, camera, tracker, max_fps=30, parent=None, debug_overlay=False,
                  frame_recorder=None):
@@ -27,6 +29,11 @@ class InferenceWorker(QThread):
         self.camera = camera
         self.tracker = tracker
         self._pending_tracker = None
+        self._pending_tracker_context = None
+        self._pending_tracker_seed_crop_zoom = False
+        self._pending_tracker_lock = threading.Lock()
+        self._retired_pending_trackers = []
+        self._accept_tracker_updates = True
         self.frame_recorder = frame_recorder  # 可选：原始帧无损录制（默认 None）
         self.running = False
         self.lock = threading.Lock()
@@ -38,6 +45,7 @@ class InferenceWorker(QThread):
         self._processed_sequence = 0
         self._result_lock = threading.Lock()
         self._result_pending = False
+        self._recorder_lock = threading.Lock()
         self._frame_count = 0
         self._fps_start_time = time.time()
         self._current_fps = 0.0
@@ -78,7 +86,14 @@ class InferenceWorker(QThread):
             with self._capture_condition:
                 self._capture_condition.notify_all()
             if self._capture_thread and self._capture_thread.is_alive():
-                self._capture_thread.join(timeout=3.0)
+                # VideoCapture.read() may still be inside a native backend call.
+                # Returning from run() while that thread is alive lets the caller
+                # release the same native handle concurrently, which can crash
+                # OpenCV/COM.  The capture thread owns camera access, so wait for
+                # it to leave read_frame() and observe _capture_stop before the
+                # QThread is allowed to finish.
+                logger.info("等待摄像头采集线程退出")
+                self._capture_thread.join()
             logger.info("InferenceWorker 停止")
 
     def _capture_loop(self):
@@ -131,24 +146,62 @@ class InferenceWorker(QThread):
 
         # 原始帧录制：find_hands(draw=True) 会原地绘制叠层污染 frame，故先 copy 一份
         # 干净帧；待 find_hands 完成后再写入（带检测元数据），保证 meta 与 frame 对齐。
-        record_frame = frame.copy() if self.frame_recorder is not None else None
+        with self._recorder_lock:
+            recorder = self.frame_recorder
+        record_frame = frame.copy() if recorder is not None else None
 
         inference_started = time.perf_counter()
         # Hold the lock through native inference so an old detector cannot be
         # closed while MediaPipe is still using it.
+        with self._pending_tracker_lock:
+            pending_tracker = self._pending_tracker
+            pending_context = self._pending_tracker_context
+            seed_crop_zoom = self._pending_tracker_seed_crop_zoom
+            self._pending_tracker = None
+            self._pending_tracker_context = None
+            self._pending_tracker_seed_crop_zoom = False
+            retired_pending = self._retired_pending_trackers
+            self._retired_pending_trackers = []
         with self.lock:
             # 在执行推理前安全替换 _pending_tracker，消除主线程的 lock 阻塞
-            if self._pending_tracker is not None:
+            for retired in retired_pending:
+                self._close_tracker(retired, "关闭被替换的 pending tracker 失败")
+            if pending_tracker is not None:
                 old_tracker = self.tracker
-                self.tracker = self._pending_tracker
-                self._pending_tracker = None
+                migrate = getattr(pending_tracker, "migrate_state_from", None)
+                if callable(migrate) and old_tracker is not None:
+                    try:
+                        migrate(old_tracker)
+                    except Exception:
+                        logger.exception(
+                            "tracker 状态迁移失败（非致命，继续使用新 tracker）"
+                        )
+                seeded = False
+                if seed_crop_zoom:
+                    seed = getattr(
+                        pending_tracker,
+                        "seed_crop_zoom_from_hint",
+                        None,
+                    )
+                    try:
+                        seeded = bool(seed()) if callable(seed) else False
+                    except Exception:
+                        logger.exception("tracker crop-zoom 种子播种失败")
+                self.tracker = pending_tracker
                 if old_tracker is not self.tracker:
-                    close = getattr(old_tracker, "close", None)
-                    if callable(close):
-                        try:
-                            close()
-                        except Exception:
-                            logger.exception("关闭旧 tracker 失败")
+                    self._close_tracker(old_tracker, "关闭旧 tracker 失败")
+                # This signal is emitted by the same worker that emits frame_ready.
+                # Therefore queued old-frame results are delivered before the swap
+                # commit, and new-frame results after it.
+                self.tracker_swapped.emit(
+                    self,
+                    pending_tracker,
+                    pending_context,
+                    {
+                        "seed_requested": bool(seed_crop_zoom),
+                        "seeded": seeded,
+                    },
+                )
                 logger.info("InferenceWorker: tracker 已异步更新完成")
 
             frame, hands_landmarks, hands_gestures = self.tracker.find_hands(
@@ -157,9 +210,9 @@ class InferenceWorker(QThread):
         inference_ms = (time.perf_counter() - inference_started) * 1000.0
 
         # 原始帧 + 检测元数据一起写入（meta 让 replay/analyze 能重建原始运行时识别点轨迹）
-        if self.frame_recorder is not None and record_frame is not None:
+        if recorder is not None and record_frame is not None:
             meta = self._collect_record_meta(hands_landmarks, hands_gestures)
-            self.frame_recorder.write(record_frame, meta=meta)
+            recorder.write(record_frame, meta=meta)
 
         # 计算FPS
         self._update_fps()
@@ -222,18 +275,51 @@ class InferenceWorker(QThread):
             self._frame_count = 0
             self._fps_start_time = current_time
 
-    def update_tracker(self, new_tracker):
-        """线程安全地异步更新tracker：不立即抢锁，而是提交给 worker 在下一个推理循环时替换"""
-        with self.lock:
-            if self._pending_tracker is not None and self._pending_tracker is not new_tracker:
-                close = getattr(self._pending_tracker, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        logger.warning("关闭旧 pending tracker 失败，忽略", exc_info=True)
-            self._pending_tracker = new_tracker
+    def update_tracker(self, new_tracker, context=None, seed_crop_zoom=False):
+        """Queue an atomic worker-owned migration and tracker swap."""
+        close_immediately = None
+        with self._pending_tracker_lock:
+            if not self._accept_tracker_updates:
+                close_immediately = new_tracker
+            else:
+                # A rapid A -> B -> A sequence must not leave A in the retired
+                # list and then promote the already-closed instance.
+                self._retired_pending_trackers = [
+                    tracker for tracker in self._retired_pending_trackers
+                    if tracker is not new_tracker
+                ]
+                if (
+                    self._pending_tracker is not None
+                    and self._pending_tracker is not new_tracker
+                    and all(
+                        tracker is not self._pending_tracker
+                        for tracker in self._retired_pending_trackers
+                    )
+                ):
+                    self._retired_pending_trackers.append(
+                        self._pending_tracker
+                    )
+            if self._accept_tracker_updates:
+                self._pending_tracker = new_tracker
+                self._pending_tracker_context = context
+                self._pending_tracker_seed_crop_zoom = bool(seed_crop_zoom)
+        if close_immediately is not None:
+            self._close_tracker(
+                close_immediately,
+                "worker 已停止，关闭新 tracker 失败",
+            )
+            return False
         logger.info("InferenceWorker: tracker 异步更新已挂起")
+        return True
+
+    @staticmethod
+    def _close_tracker(tracker, error_message):
+        close = getattr(tracker, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                logger.exception(error_message)
 
     def _claim_result_slot(self):
         with self._result_lock:
@@ -255,10 +341,9 @@ class InferenceWorker(QThread):
     def set_frame_recorder(self, recorder):
         """线程安全替换原始帧录制器（F5 热切换）。
 
-        _process_frame 在 self.lock 之外读 self.frame_recorder，故这里也用同一把锁
-        保护赋值，避免热切换时 worker 线程拿到半初始化对象。
+        每帧开始时在 _recorder_lock 下取得一致快照；后续该帧始终写入同一实例。
         """
-        with self.lock:
+        with self._recorder_lock:
             self.frame_recorder = recorder
 
     def _collect_record_meta(self, hands_landmarks, hands_gestures):
@@ -332,7 +417,7 @@ class InferenceWorker(QThread):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1,
             )
 
-    def stop(self):
+    def stop(self, timeout_ms=3000):
         """停止线程。
 
         若 update_tracker() 提交了 _pending_tracker 但 worker 在下次推理前就被
@@ -343,23 +428,37 @@ class InferenceWorker(QThread):
         """
         self.running = False
         self._capture_stop.set()
+        with self._pending_tracker_lock:
+            self._accept_tracker_updates = False
         with self._capture_condition:
             self._capture_condition.notify_all()
-        if not self.wait(5000):
-            logger.warning("InferenceWorker 5 秒内未能停止")
+        if self.isRunning():
+            # A native camera backend can block forever in VideoCapture.read().
+            # Keep shutdown bounded, but never let the caller release the camera
+            # or active tracker unless this wait succeeds.
+            timeout_ms = max(0, int(timeout_ms))
+            if not self.wait(timeout_ms):
+                logger.error(
+                    "InferenceWorker 未能在 %.1f 秒内停止；"
+                    "保留摄像头和 tracker 句柄，禁止并发释放",
+                    timeout_ms / 1000.0,
+                )
+                return False
         # flush 未被消费的 pending tracker，避免句柄泄漏
-        with self.lock:
+        with self._pending_tracker_lock:
             pending = self._pending_tracker
             self._pending_tracker = None
-        if pending is not None:
-            close = getattr(pending, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    logger.exception("关闭 pending tracker 失败")
+            self._pending_tracker_context = None
+            self._pending_tracker_seed_crop_zoom = False
+            retired_pending = self._retired_pending_trackers
+            self._retired_pending_trackers = []
+        for tracker in [*retired_pending, pending]:
+            if tracker is not None:
+                self._close_tracker(tracker, "关闭 pending tracker 失败")
+        if pending is not None or retired_pending:
             logger.info("InferenceWorker: 已 flush 未消费的 pending tracker")
         logger.info("InferenceWorker: 已停止")
+        return True
 
     def get_fps(self):
         """获取当前FPS"""

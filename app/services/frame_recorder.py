@@ -52,6 +52,10 @@ class FrameRecorder:
             os.path.join(self.dir, "meta.jsonl"), "w", encoding="utf-8", buffering=1
         )
         self._closed = False
+        self._finalized = False
+        self._sentinel_queued = False
+        self._truth_closed = False
+        self._state_lock = threading.Lock()
         self._queue = queue.Queue(maxsize=8)
         self._thread = threading.Thread(
             target=self._writer_loop,
@@ -106,25 +110,28 @@ class FrameRecorder:
         meta: 可选 dict，记录该帧的检测元数据（Primary wrist、手数、是否切换等），
               会合并到 meta.jsonl 的对应行。用于离线回放重建原始运行时识别点轨迹。
         """
-        if self._closed or frame is None:
+        if frame is None:
             return
         try:
-            now = time.time()
-            if self._start is None:
-                self._start = now
-            if (
-                self._submitted >= self.max_frames
-                or (now - self._start) >= self.max_seconds
-            ):
-                return
-            # meta 浅拷贝避免外部继续修改同一 dict
+            frame_copy = frame.copy()
             meta_copy = dict(meta) if meta else None
-            item = (self._submitted, now, frame.copy(), meta_copy)
-            self._submitted += 1
-            try:
-                self._queue.put_nowait(item)
-            except queue.Full:
-                self._dropped += 1
+            now = time.time()
+            with self._state_lock:
+                if self._closed:
+                    return
+                if self._start is None:
+                    self._start = now
+                if (
+                    self._submitted >= self.max_frames
+                    or (now - self._start) >= self.max_seconds
+                ):
+                    return
+                item = (self._submitted, now, frame_copy, meta_copy)
+                self._submitted += 1
+                try:
+                    self._queue.put_nowait(item)
+                except queue.Full:
+                    self._dropped += 1
         except Exception:
             logger.exception("录帧入队失败")
 
@@ -153,25 +160,54 @@ class FrameRecorder:
                 logger.exception("录帧失败")
                 return
 
-    def close(self):
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            if self._truth_logger is not None:
-                self._truth_logger.close()
-        except Exception:
-            logger.exception("真值事件采集收尾失败")
-        try:
-            self._queue.put(None, timeout=1.0)
-        except queue.Full:
+    def close(self, timeout_sec=3.0):
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        with self._state_lock:
+            if self._finalized:
+                return True
+            # Holding the same lock used by write() guarantees that no frame can
+            # be queued after the shutdown sentinel.
+            self._closed = True
+        if not self._truth_closed:
             try:
-                self._queue.get_nowait()
-                self._queue.put_nowait(None)
-            except (queue.Empty, queue.Full):
-                pass
+                if self._truth_logger is not None:
+                    truth_result = self._truth_logger.close(
+                        timeout_sec=max(0.0, deadline - time.monotonic())
+                    )
+                    self._truth_closed = truth_result is not False
+                else:
+                    self._truth_closed = True
+            except Exception:
+                logger.exception("真值事件采集收尾失败")
+        if self._thread.is_alive() and not self._sentinel_queued:
+            try:
+                self._queue.put(
+                    None,
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
+                self._sentinel_queued = True
+            except queue.Full:
+                # Never evict a submitted frame merely to make room for the
+                # sentinel. A later close() retry can enqueue it after the
+                # writer has drained the backlog.
+                logger.error(
+                    "录像队列未能在关闭期限内排空；保留全部待写帧并延后收尾"
+                )
+                return False
         if self._thread.is_alive():
-            self._thread.join(timeout=3.0)
+            # The writer owns _writer and _meta until it has consumed the
+            # sentinel. Closing those resources after a timeout caused the live
+            # thread to write into already-closed handles.
+            self._thread.join(max(0.0, deadline - time.monotonic()))
+        if self._thread.is_alive():
+            logger.error(
+                "录像写入线程未能在 %.1f 秒内退出；保留编码器和元数据句柄",
+                max(0.0, float(timeout_sec)),
+            )
+            return False
+        if not self._truth_closed:
+            logger.error("真值事件采集仍在退出，录像资源延后统一收尾")
+            return False
         try:
             if self._writer is not None:
                 self._writer.release()
@@ -181,9 +217,16 @@ class FrameRecorder:
             self._meta.close()
         except Exception:
             pass
+        with self._state_lock:
+            self._finalized = True
+        try:
+            atexit.unregister(self.close)
+        except Exception:
+            pass
         logger.info(
             "原始帧录制结束：%d 帧（丢弃 %d）-> %s",
             self._count,
             self._dropped,
             self.dir,
         )
+        return True

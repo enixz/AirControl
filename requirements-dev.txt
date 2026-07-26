@@ -1,4 +1,4 @@
--r requirements.txt
+-r requirements.lock
 pytest>=8,<10
 pytest-qt>=4.4,<5
 pytest-mock>=3.14,<4

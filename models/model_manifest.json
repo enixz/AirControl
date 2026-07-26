@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "scope": "Release gate for the bundled HaGRID/Ultralytics hand detector. This is not a complete third-party asset audit.",
+  "models": {
+    "hand_yolov8n.onnx": {
+      "sha256": "c0e22242413252175bdd4eab1f7f85624b1c5c388c8120fe08090e3f14302049",
+      "bytes": 12265534,
+      "embedded_metadata_license": "AGPL-3.0 License (https://ultralytics.com/license)",
+      "source_url": null,
+      "source_commit_or_checksum": null,
+      "redistribution_approved": false,
+      "approval_reference": null,
+      "notes": "Embedded ONNX metadata identifies an Ultralytics YOLOv8n export. Do not infer a distribution right from this file alone."
+    }
+  }
+}

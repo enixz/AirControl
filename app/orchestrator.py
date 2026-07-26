@@ -32,6 +32,30 @@ from services.voice_dictation import VoiceDictationService
 logger = logging.getLogger(__name__)
 
 
+def choose_camera_device(requested_index, available):
+    """Return (index, backend, used_fallback) from verified probe results."""
+    available_by_index = {camera["index"]: camera for camera in available}
+    requested = available_by_index.get(requested_index)
+    if requested is not None:
+        return requested_index, requested.get("backend"), False
+    if available:
+        fallback = available[0]
+        return fallback["index"], fallback.get("backend"), True
+    return requested_index, None, False
+
+
+def choose_startup_resolution(width, height):
+    """Use an explicit saved resolution or a fast 720p startup default."""
+    try:
+        width = int(width) if width is not None else 0
+        height = int(height) if height is not None else 0
+    except (TypeError, ValueError):
+        width = height = 0
+    if width > 0 and height > 0:
+        return width, height
+    return 1280, 720
+
+
 class AirControlOrchestrator(QObject):
     # Public signals to communicate with the UI view
     frame_processed = pyqtSignal(object, list, list, str)  # frame (ndarray), landmarks, gestures, current_gesture
@@ -86,6 +110,9 @@ class AirControlOrchestrator(QObject):
         self._tracker_ready_signal.connect(self._on_tracker_ready)
         self._tracker_request_id = 0
         self._closing = False
+        self._closing_event = threading.Event()
+        self._background_threads = set()
+        self._background_threads_lock = threading.Lock()
 
         self.status_text = "Ready"
         self.status_color = (0, 255, 0)
@@ -103,6 +130,13 @@ class AirControlOrchestrator(QObject):
         self._fsm_far_track_active = False    # 当前 tracker 是否带 long_range 运行时覆盖
         self._engine_switch_pending = False   # FSM 发起的 tracker 重建是否在途
         self._pending_far_track_seed = False  # 下次重建落地后要播种 crop-zoom 交接 hint
+        # 自动切换只在远距丢手时才需要 YOLO。把它放到后台预热，避免首次
+        # NEAR→CAPTURE 时同步创建 ONNX + HandLandmarker 造成数秒空窗。
+        # 预热实例未参与推理，取用后立即清空；关闭/禁用时统一释放。
+        self._warmed_yolo_tracker = None
+        self._warmed_yolo_signature = None
+        self._yolo_prewarm_inflight = False
+        self._tracker_prewarm_lock = threading.Lock()
         _configured_engine = self.config.get("detection_engine", "mediapipe")
         self._last_config_engine = (
             _configured_engine if isinstance(_configured_engine, str) else "mediapipe"
@@ -119,10 +153,51 @@ class AirControlOrchestrator(QObject):
         if hasattr(self, 'voice_assistant'):
             self.voice_assistant.aircontrol_hwnd = hwnd
 
+    def _start_background_thread(self, target, name, args=()):
+        """Start and track a bounded-lifecycle helper owned by the orchestrator."""
+        if self._closing:
+            return None
+
+        def run():
+            try:
+                target(*args)
+            finally:
+                with self._background_threads_lock:
+                    self._background_threads.discard(threading.current_thread())
+
+        thread = threading.Thread(target=run, name=name, daemon=True)
+        with self._background_threads_lock:
+            if self._closing:
+                return None
+            self._background_threads.add(thread)
+            thread.start()
+        return thread
+
+    def _wait_for_background_threads(self, timeout_sec):
+        """Wait for owned helpers without exceeding the caller's deadline."""
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        current = threading.current_thread()
+        while True:
+            with self._background_threads_lock:
+                threads = [
+                    thread for thread in self._background_threads
+                    if thread is not current and thread.is_alive()
+                ]
+            if not threads:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error(
+                    "后台任务未能在关闭期限内退出: %s",
+                    ", ".join(sorted(thread.name for thread in threads)),
+                )
+                return False
+            threads[0].join(remaining)
+
     def _find_available_cameras(self, exclude_index=None):
         """枚举系统可用摄像头，返回完整列表。
 
-        exclude_index: 通常是用户指定的索引（已经确认打不开），可以跳过以加快速度
+        exclude_index: 已经由本进程打开、无法重复探测的当前摄像头索引。
         返回 [] 表示没有任何可用摄像头
         """
         try:
@@ -133,38 +208,20 @@ class AirControlOrchestrator(QObject):
 
     def init_services(self):
         requested_index = self.config.get("camera_index")
+        startup_width, startup_height = choose_startup_resolution(
+            self.config.get("camera_width"),
+            self.config.get("camera_height"),
+        )
 
-        # 启动前先探测系统上实际可用的摄像头索引，再决定使用哪个。
-        # 这样 config.json 里的 camera_index 只是"偏好"：偏好索引可用就用它，
-        # 不可用（如复制到只有摄像头 0 的电脑但 config 是 1）则自动回退到第一个可用索引。
-        available = self._find_available_cameras(requested_index)
+        # 正常启动先直接打开偏好设备。CameraService 自身会做后端回退，因此无须
+        # 为常见的单摄像头场景同步枚举 0..3；只有偏好设备真实启动失败时才做全量
+        # 枚举并选择备用设备。
+        chosen_index = requested_index
         chosen_backend = None
-        if available:
-            available_by_index = {c["index"]: c for c in available}
-            if requested_index in available_by_index:
-                chosen_index = requested_index
-                chosen_backend = available_by_index[requested_index].get("backend")
-                logger.info(
-                    "摄像头偏好索引 %d 可用，直接使用（后端: %s）",
-                    requested_index,
-                    chosen_backend if chosen_backend is not None else "默认",
-                )
-            else:
-                chosen_index = available[0]["index"]
-                chosen_backend = available[0].get("backend")
-                logger.warning(
-                    "摄像头偏好索引 %s 不可用，自动回退到可用索引 %d（后端: %s）",
-                    requested_index, chosen_index,
-                    chosen_backend if chosen_backend is not None else "默认",
-                )
-        else:
-            chosen_index = requested_index
-            logger.warning("未探测到可用摄像头，尝试使用偏好索引 %s", requested_index)
-
         self.camera = CameraService(
             camera_index=chosen_index,
-            width=self.config.get("camera_width"),
-            height=self.config.get("camera_height"),
+            width=startup_width,
+            height=startup_height,
             force_mjpeg=self.config.get("camera_force_mjpeg") is not False,
             min_fps=self.config.get("camera_min_fps") or 20,
             preferred_backend=chosen_backend,
@@ -173,12 +230,42 @@ class AirControlOrchestrator(QObject):
         try:
             self.camera.start()
         except Exception as e:
-            logger.exception("摄像头启动失败: %s", e)
-            self._camera_available = False
-            self.status_text = f"摄像头不可用: {e}"
-            self.status_color = (255, 0, 0)
-            self.status_timer = time.time()
-            self.status_updated.emit(self.status_text, self.status_color)
+            logger.warning("偏好摄像头 %s 启动失败: %s", requested_index, e)
+            self.camera.release()
+            available = self._find_available_cameras()
+            chosen_index, chosen_backend, used_fallback = choose_camera_device(
+                requested_index,
+                available,
+            )
+            if available:
+                logger.warning(
+                    "%s摄像头 %d（后端: %s）",
+                    "自动回退到" if used_fallback else "按已验证后端重试",
+                    chosen_index,
+                    chosen_backend if chosen_backend is not None else "默认",
+                )
+                self.camera = CameraService(
+                    camera_index=chosen_index,
+                    width=startup_width,
+                    height=startup_height,
+                    force_mjpeg=self.config.get("camera_force_mjpeg") is not False,
+                    min_fps=self.config.get("camera_min_fps") or 20,
+                    preferred_backend=chosen_backend,
+                )
+                try:
+                    self.camera.start()
+                except Exception as fallback_error:
+                    logger.exception("备用摄像头启动失败: %s", fallback_error)
+                    self.camera.release()
+                    e = fallback_error
+                    self._camera_available = False
+            else:
+                self._camera_available = False
+            if not self._camera_available:
+                self.status_text = f"摄像头不可用: {e}"
+                self.status_color = (255, 0, 0)
+                self.status_timer = time.time()
+                self.status_updated.emit(self.status_text, self.status_color)
 
         self._tracker_config_signature = self._tracker_signature()
         self.tracker = self._create_tracker()
@@ -191,6 +278,9 @@ class AirControlOrchestrator(QObject):
         # Phase 3.2: pinch 双阈值滞回开关（默认关闭，保持旧版单阈值行为）
         self.recognizer.pinch_hysteresis_enabled = bool(
             self.config.get("pinch_hysteresis_enabled", False)
+        )
+        self.recognizer.pinch_exit_hysteresis_enabled = bool(
+            self.config.get("pinch_exit_hysteresis_enabled", False)
         )
         # Phase 3.3: thumb_extended 旋转不变判定开关（默认关闭，新旧并存对照）
         self.recognizer.thumb_perp_ratio_enabled = bool(
@@ -254,7 +344,9 @@ class AirControlOrchestrator(QObject):
         self.inference_worker.performance_updated.connect(
             self._on_performance_updated
         )
+        self.inference_worker.tracker_swapped.connect(self._on_tracker_swapped)
         self.inference_worker.start()
+        self._schedule_yolo_prewarm()
 
     def _tracker_signature(self):
         return (
@@ -281,9 +373,14 @@ class AirControlOrchestrator(QObject):
             if merged:
                 merged.update(config_overrides)
                 config = merged
+        max_num_hands = 2
+        if signature[0] == ENGINE_HAGRID_YOLO:
+            # YOLO 远距捕获只服务一个主控手；多手在该场景通常来自背景误检，
+            # 既拖慢逐 crop Landmarker，又会阻塞 CAPTURE 的稳定单手判据。
+            max_num_hands = int(config.get("yolo_max_hands", 1))
         return create_hand_tracker(
             engine=signature[0],
-            max_num_hands=2,
+            max_num_hands=max_num_hands,
             min_detection_confidence=signature[3],
             min_presence_confidence=signature[4],
             min_tracking_confidence=signature[5],
@@ -294,14 +391,103 @@ class AirControlOrchestrator(QObject):
 
     def _configure_engine_switcher(self):
         """按 config 刷新远距引擎自动切换状态机的参数（参数变更即重置计帧）。"""
+        # detection_engine 是用户的显式引擎选择。自动闭环只以 mediapipe
+        # 作为近距基线；用户手动选 hagrid_yolo 时不再反向覆盖成 MediaPipe。
+        enabled = (
+            self.config.get("engine_auto_switch", False) is True
+            and self.config.get("detection_engine", "mediapipe") == "mediapipe"
+        )
         self._engine_switcher.configure(
-            enabled=self.config.get("engine_auto_switch", False) is True,
+            enabled=enabled,
             no_hand_frames=self.config.get("engine_auto_switch_no_hand_frames", 60),
             hand_frames=self.config.get("engine_auto_switch_hand_frames", 30),
             near_frames=self.config.get("engine_auto_switch_near_frames", 90),
             near_bbox_ratio=self.config.get("engine_auto_switch_near_bbox_ratio", 0.04),
             cooldown_sec=self.config.get("engine_auto_switch_cooldown_sec", 5.0),
         )
+
+    def _yolo_signature(self):
+        """返回与当前配置匹配、但固定使用 hagrid_yolo 的 tracker 签名。"""
+        signature = self._tracker_signature()
+        return (ENGINE_HAGRID_YOLO, *signature[1:])
+
+    @staticmethod
+    def _close_tracker_safely(tracker, context):
+        if tracker is None:
+            return
+        close = getattr(tracker, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                logger.exception("关闭 %s tracker 失败", context)
+
+    def _take_warmed_yolo_tracker(self, signature):
+        """取走签名匹配的预热 YOLO；不匹配的旧实例立即释放。"""
+        stale = None
+        with self._tracker_prewarm_lock:
+            tracker = self._warmed_yolo_tracker
+            warmed_signature = self._warmed_yolo_signature
+            self._warmed_yolo_tracker = None
+            self._warmed_yolo_signature = None
+            if tracker is not None and warmed_signature == signature:
+                logger.info("引擎自动切换: 复用已预热的 hagrid_yolo tracker")
+                return tracker
+            stale = tracker
+        self._close_tracker_safely(stale, "过期预热")
+        return None
+
+    def _discard_warmed_yolo_tracker(self):
+        """释放空闲的预热 YOLO。正在构建的线程会在完成时自行看到 _closing。"""
+        with self._tracker_prewarm_lock:
+            tracker = self._warmed_yolo_tracker
+            self._warmed_yolo_tracker = None
+            self._warmed_yolo_signature = None
+        self._close_tracker_safely(tracker, "预热")
+
+    def _schedule_yolo_prewarm(self, delay_sec=0.0):
+        """后台预热下一个 CAPTURE 态所需的 YOLO tracker，绝不阻塞 UI/推理。"""
+        if self._closing or not self._engine_switcher.enabled:
+            return
+        signature = self._yolo_signature()
+        with self._tracker_prewarm_lock:
+            if (
+                self._warmed_yolo_signature == signature
+                or self._yolo_prewarm_inflight
+            ):
+                return
+            self._yolo_prewarm_inflight = True
+
+        def build():
+            tracker = None
+            ready = False
+            try:
+                if delay_sec > 0 and self._closing_event.wait(delay_sec):
+                    return
+                if not self._closing and self._engine_switcher.enabled:
+                    tracker = self._create_tracker(signature)
+            except Exception:
+                logger.exception("后台预热 hagrid_yolo tracker 失败")
+            finally:
+                stale = None
+                with self._tracker_prewarm_lock:
+                    self._yolo_prewarm_inflight = False
+                    if (
+                        tracker is not None
+                        and not self._closing
+                        and self._engine_switcher.enabled
+                    ):
+                        stale = self._warmed_yolo_tracker
+                        self._warmed_yolo_tracker = tracker
+                        self._warmed_yolo_signature = signature
+                        tracker = None
+                        ready = True
+                self._close_tracker_safely(stale, "旧预热")
+                self._close_tracker_safely(tracker, "未使用预热")
+                if ready:
+                    logger.info("引擎自动切换: hagrid_yolo 预热就绪")
+
+        self._start_background_thread(build, "YoloTrackerPrewarm")
 
     def _maybe_auto_switch_engine(self, hands_landmarks, hand_bbox_ratio=0.0):
         """远距三态自动切换：逐帧喂检出结果给 FSM，按目标态执行迁移。
@@ -370,7 +556,15 @@ class AirControlOrchestrator(QObject):
             return
         self._pending_far_track_seed = bool(seed)
         self._engine_switch_pending = True
-        self._request_tracker_rebuild(signature, config_overrides=overrides)
+        prepared = None
+        if signature[0] == ENGINE_HAGRID_YOLO:
+            prepared = self._take_warmed_yolo_tracker(signature)
+        if prepared is not None:
+            self._request_tracker_rebuild(
+                signature, config_overrides=overrides, prepared_tracker=prepared,
+            )
+        else:
+            self._request_tracker_rebuild(signature, config_overrides=overrides)
         self.status_text = self._FSM_STATE_STATUS.get(
             self._engine_switcher.state, "检测引擎自动切换中"
         )
@@ -468,7 +662,7 @@ class AirControlOrchestrator(QObject):
         for line in lines:
             logger.info(line)
 
-    def switch_camera(self, new_index):
+    def switch_camera(self, new_index, camera_info=None):
         """Runtime hot-swapping of cameras."""
         try:
             old_index = self.camera.camera_index
@@ -478,13 +672,36 @@ class AirControlOrchestrator(QObject):
             return True
 
         logger.info("切换摄像头: %d → %d", old_index, new_index)
+        old_backend = getattr(self.camera, "_backend", None)
+        old_width = getattr(self.camera, "width", None)
+        old_height = getattr(self.camera, "height", None)
 
         # 1. Stop active inference worker
         if hasattr(self, "inference_worker") and self.inference_worker is not None:
             try:
-                self.inference_worker.stop()
+                old_worker = self.inference_worker
+                if old_worker.stop() is False:
+                    logger.error(
+                        "摄像头切换取消：旧采集线程未能安全退出，禁止释放其设备句柄"
+                    )
+                    try:
+                        old_worker.finished.connect(
+                            lambda worker=old_worker: (
+                                self._recover_inference_after_stop_timeout(worker)
+                            )
+                        )
+                    except (TypeError, RuntimeError):
+                        pass
+                    if not old_worker.isRunning():
+                        self._recover_inference_after_stop_timeout(old_worker)
+                    return False
+                # A swap signal can still be queued in the UI event loop while
+                # stop() has already completed. Use the worker's authoritative
+                # active tracker when constructing the replacement worker.
+                self.tracker = old_worker.tracker
             except Exception:
                 logger.exception("停 InferenceWorker 时异常")
+                return False
 
         # 2. Release old camera
         try:
@@ -492,16 +709,26 @@ class AirControlOrchestrator(QObject):
         except Exception:
             logger.exception("释放旧摄像头时异常")
 
-        # 3. 探测目标摄像头应使用的后端
-        available = self._find_available_cameras(exclude_index=old_index)
-        available_by_index = {c["index"]: c for c in available}
-        new_backend = available_by_index.get(new_index, {}).get("backend")
+        # 3. 设置窗口已在后台枚举并预探测候选设备，优先复用结果；
+        # 仅程序化调用未提供 camera_info 时才同步补探测。
+        camera_info = camera_info if isinstance(camera_info, dict) else {}
+        if camera_info.get("index") != new_index:
+            available = self._find_available_cameras(exclude_index=old_index)
+            camera_info = next(
+                (camera for camera in available if camera["index"] == new_index),
+                {},
+            )
+        new_backend = camera_info.get("backend")
+        new_width, new_height = choose_startup_resolution(
+            camera_info.get("width") or self.config.get("camera_width"),
+            camera_info.get("height") or self.config.get("camera_height"),
+        )
 
         # 4. Try to start new camera service
         new_cam = CameraService(
             camera_index=new_index,
-            width=self.config.get("camera_width"),
-            height=self.config.get("camera_height"),
+            width=new_width,
+            height=new_height,
             force_mjpeg=self.config.get("camera_force_mjpeg") is not False,
             min_fps=self.config.get("camera_min_fps") or 20,
             preferred_backend=new_backend,
@@ -510,14 +737,19 @@ class AirControlOrchestrator(QObject):
             new_cam.start()
         except Exception:
             logger.exception("新摄像头 %d 启动失败，回滚到旧摄像头 %d", new_index, old_index)
+            try:
+                new_cam.release()
+            except Exception:
+                logger.exception("释放启动失败的新摄像头时异常")
             # Rollback
             try:
                 self.camera = CameraService(
                     camera_index=old_index,
-                    width=self.config.get("camera_width"),
-                    height=self.config.get("camera_height"),
+                    width=old_width,
+                    height=old_height,
                     force_mjpeg=self.config.get("camera_force_mjpeg") is not False,
                     min_fps=self.config.get("camera_min_fps") or 20,
+                    preferred_backend=old_backend,
                 )
                 self.camera.start()
             except Exception:
@@ -529,6 +761,15 @@ class AirControlOrchestrator(QObject):
         self._restart_inference_worker()
         logger.info("摄像头已切换到 %d (%dx%d)", new_index, new_cam.width or 0, new_cam.height or 0)
         return True
+
+    def _recover_inference_after_stop_timeout(self, worker):
+        """Restart capture on the unchanged camera after a timed-out switch."""
+        if self._closing or self.inference_worker is not worker:
+            return
+        if worker.isRunning():
+            return
+        logger.warning("旧摄像头采集线程已延迟退出，恢复原摄像头推理")
+        self._restart_inference_worker()
 
     def _make_frame_recorder(self):
         """按 config 创建原始帧录制器；默认关闭、失败返回 None（绝不影响主流程）。"""
@@ -560,15 +801,17 @@ class AirControlOrchestrator(QObject):
         current = getattr(self, "frame_recorder", None)
         if current is not None:
             # 正在录 → 停止
+            # 先从 worker 脱离，阻止后续帧再取得旧 recorder；已经取得快照的
+            # 帧由 FrameRecorder 的状态锁与 close sentinel 安全收尾。
+            self.frame_recorder = None
+            if self.inference_worker is not None:
+                self.inference_worker.set_frame_recorder(None)
             try:
                 current.close()
                 path = getattr(current, "dir", None)
             except Exception:
                 logger.exception("停止录制失败")
                 path = None
-            self.frame_recorder = None
-            if self.inference_worker is not None:
-                self.inference_worker.set_frame_recorder(None)
             logger.info("F5 录制已停止 -> %s", path)
             return False, path
 
@@ -605,6 +848,7 @@ class AirControlOrchestrator(QObject):
         new_worker.error_occurred.connect(self._on_inference_error)
         new_worker.fps_updated.connect(self._on_fps_updated)
         new_worker.performance_updated.connect(self._on_performance_updated)
+        new_worker.tracker_swapped.connect(self._on_tracker_swapped)
         new_worker.start()
         self.inference_worker = new_worker
 
@@ -612,6 +856,9 @@ class AirControlOrchestrator(QObject):
         self.recognizer.cooldown = self.config.get("cooldown")
         self.recognizer.pinch_hysteresis_enabled = bool(
             self.config.get("pinch_hysteresis_enabled", False)
+        )
+        self.recognizer.pinch_exit_hysteresis_enabled = bool(
+            self.config.get("pinch_exit_hysteresis_enabled", False)
         )
         self.recognizer.thumb_perp_ratio_enabled = bool(
             self.config.get("thumb_perp_ratio_enabled", False)
@@ -657,6 +904,10 @@ class AirControlOrchestrator(QObject):
                     )
             self._engine_switcher.reset()
         self._configure_engine_switcher()
+        if self._engine_switcher.enabled:
+            self._schedule_yolo_prewarm()
+        else:
+            self._discard_warmed_yolo_tracker()
         # 用户关闭了自动切换但当前跑在 FSM 覆盖的引擎上：回到 config 配置的引擎。
         if not self._engine_switcher.enabled and self._engine_override is not None:
             logger.info("引擎自动切换已关闭，回到配置引擎 %s", config_engine)
@@ -690,9 +941,13 @@ class AirControlOrchestrator(QObject):
             self.set_mode(new_mode)
         logger.info("配置已更新: 模式 -> %s / 目标软件 -> %s", new_mode, self.ppt.target_app)
 
-    def _request_tracker_rebuild(self, signature, config_overrides=None):
+    def _request_tracker_rebuild(self, signature, config_overrides=None, prepared_tracker=None):
         self._tracker_request_id += 1
         request_id = self._tracker_request_id
+
+        if prepared_tracker is not None:
+            self._tracker_ready_signal.emit(prepared_tracker, signature, request_id, "")
+            return
 
         def build():
             tracker = None
@@ -711,11 +966,7 @@ class AirControlOrchestrator(QObject):
                 tracker, signature, request_id, error
             )
 
-        threading.Thread(
-            target=build,
-            name="TrackerBuildWorker",
-            daemon=True,
-        ).start()
+        self._start_background_thread(build, "TrackerBuildWorker")
 
     def _on_tracker_ready(self, tracker, signature, request_id, error):
         if self._closing or request_id != self._tracker_request_id:
@@ -740,31 +991,53 @@ class AirControlOrchestrator(QObject):
             self.status_color = (255, 0, 0)
             self.status_updated.emit(self.status_text, self.status_color)
             return
-        # RCU 风格：从旧 tracker 迁移运行时状态到新 tracker，
-        # 避免配置变更后光标跳变、crop-zoom 退出、平滑器重置。
-        old_tracker = self.tracker
-        migrate = getattr(tracker, "migrate_state_from", None)
-        if callable(migrate) and old_tracker is not None:
-            try:
-                migrate(old_tracker)
-            except Exception:
-                logger.exception("tracker 状态迁移失败（非致命，继续使用新 tracker）")
-        # CAPTURE→FAR_TRACK 交接：迁移完成后把 YOLO 最后的手部 hint 播种给
-        # 新 MP tracker 的 crop-zoom，ZOOM 直接锁住交接点（无 hint 则退回
-        # 人脸引导/多尺度捕获，long_range 链路自带）。
-        if self._pending_far_track_seed:
-            self._pending_far_track_seed = False
-            seed = getattr(tracker, "seed_crop_zoom_from_hint", None)
-            seeded = seed() if callable(seed) else False
+        seed_crop_zoom = bool(self._pending_far_track_seed)
+        self._pending_far_track_seed = False
+        context = {"signature": signature, "request_id": request_id}
+        accepted = self.inference_worker.update_tracker(
+            tracker,
+            context=context,
+            seed_crop_zoom=seed_crop_zoom,
+        )
+        if accepted is False:
+            self._engine_switch_pending = False
+            self.status_text = "模型更新失败: 推理线程已停止"
+            self.status_color = (255, 0, 0)
+            self.status_updated.emit(self.status_text, self.status_color)
+            return
+        logger.info("tracker 已构建完成，等待推理线程原子切换")
+
+    def _on_tracker_swapped(self, worker, tracker, context, details):
+        """Commit UI-visible tracker state in worker frame-signal order."""
+        if self._closing or worker is not self.inference_worker:
+            return
+        context = context if isinstance(context, dict) else {}
+        details = details if isinstance(details, dict) else {}
+        signature = context.get("signature")
+        request_id = context.get("request_id")
+        self.tracker = tracker
+        if signature is not None:
+            self._tracker_config_signature = signature
+        if request_id == self._tracker_request_id:
+            self._engine_switch_pending = False
+        if details.get("seed_requested"):
             logger.info(
                 "CAPTURE→FAR_TRACK 交接: crop-zoom 种子%s",
-                "已播种（YOLO hint → MP ZOOM）" if seeded else "无 hint，靠人脸引导捕获",
+                (
+                    "已播种（YOLO hint → MP ZOOM）"
+                    if details.get("seeded")
+                    else "无 hint，靠人脸引导捕获"
+                ),
             )
-        self.tracker = tracker
-        self._tracker_config_signature = signature
-        self._engine_switch_pending = False
-        self.inference_worker.update_tracker(tracker)
-        logger.info("tracker 已在后台完成更新")
+        # Yolo 已交接给 MP 后，再异步准备下一次 CAPTURE 所需实例。
+        if (
+            signature is not None
+            and signature[0] == "mediapipe"
+            and request_id == self._tracker_request_id
+            and self._engine_switcher.enabled
+        ):
+            self._schedule_yolo_prewarm(delay_sec=0.5)
+        logger.info("tracker 已由推理线程原子切换完成")
 
     # ------------------------------------------------------------------
     # Modes System
@@ -1154,7 +1427,7 @@ class AirControlOrchestrator(QObject):
         }
         handler = voice_actions.get(action_name)
         if handler is not None:
-            threading.Thread(target=handler, daemon=True).start()
+            self._start_background_thread(handler, "VoiceAssistantAction")
             return
 
         window_actions = {
@@ -1199,31 +1472,68 @@ class AirControlOrchestrator(QObject):
                 enabled = self.overlay.toggle_shape_correction()
                 self.toolbar.set_shape_correction(enabled)
 
-    def close(self):
+    def close(self, timeout_sec=3.0):
         """Resource release when window is closed."""
-        self._closing = True
-        self._tracker_request_id += 1
-        if self.mode_manager.current_mode:
-            self.mode_manager.current_mode.on_exit()
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
 
+        def remaining():
+            return max(0.0, deadline - time.monotonic())
+
+        self._closing = True
+        self._closing_event.set()
+        self._tracker_request_id += 1
+        shutdown_incomplete = False
+        if self.mode_manager.current_mode:
+            try:
+                mode_stopped = self.mode_manager.current_mode.on_exit() is not False
+                shutdown_incomplete = shutdown_incomplete or not mode_stopped
+            except Exception:
+                shutdown_incomplete = True
+                logger.exception("停止当前交互模式失败")
+
+        inference_stopped = True
         if hasattr(self, 'inference_worker'):
             try:
                 self.inference_worker.frame_ready.disconnect(self._on_frame_ready)
             except (TypeError, RuntimeError):
                 pass
-            self.inference_worker.stop()
+            try:
+                inference_stopped = self.inference_worker.stop(
+                    timeout_ms=max(0, int(remaining() * 1000))
+                ) is not False
+            except Exception:
+                inference_stopped = False
+                logger.exception("停止推理服务失败")
+            shutdown_incomplete = shutdown_incomplete or not inference_stopped
 
+        voice_stopped = True
         if hasattr(self, 'voice_command'):
-            self.voice_command.stop()
+            try:
+                voice_stopped = self.voice_command.stop(
+                    timeout_sec=remaining()
+                ) is not False
+            except Exception:
+                voice_stopped = False
+                logger.exception("停止语音指令服务失败")
+            shutdown_incomplete = shutdown_incomplete or not voice_stopped
 
         # 停止语音听写服务（释放 SenseVoice ONNX session）
-        if hasattr(self, 'voice_dictation'):
+        if voice_stopped and hasattr(self, 'voice_dictation'):
             stop_dictation = getattr(self.voice_dictation, "stop", None)
             if callable(stop_dictation):
                 try:
-                    stop_dictation()
+                    dictation_stopped = stop_dictation(
+                        timeout_sec=remaining()
+                    ) is not False
+                    shutdown_incomplete = (
+                        shutdown_incomplete or not dictation_stopped
+                    )
                 except Exception:
+                    shutdown_incomplete = True
                     logger.exception("停止语音听写服务失败")
+        elif not voice_stopped and hasattr(self, 'voice_dictation'):
+            # ASR worker may still own the recognizer. Never release it here.
+            shutdown_incomplete = True
 
         # 停止语音助手服务（释放可能持有的窗口句柄引用）
         if hasattr(self, 'voice_assistant'):
@@ -1234,12 +1544,36 @@ class AirControlOrchestrator(QObject):
                 except Exception:
                     logger.exception("停止语音助手服务失败")
 
-        self.camera.release()
-        close_tracker = getattr(self.tracker, "close", None)
-        if callable(close_tracker):
-            try:
-                close_tracker()
-            except Exception:
-                logger.exception("关闭 tracker 失败")
+        background_stopped = self._wait_for_background_threads(remaining())
+        shutdown_incomplete = shutdown_incomplete or not background_stopped
+
+        if inference_stopped:
+            if hasattr(self, "inference_worker"):
+                self.tracker = getattr(
+                    self.inference_worker,
+                    "tracker",
+                    self.tracker,
+                )
+            self.camera.release()
+            close_tracker = getattr(self.tracker, "close", None)
+            if callable(close_tracker):
+                try:
+                    close_tracker()
+                except Exception:
+                    logger.exception("关闭 tracker 失败")
+        else:
+            logger.error("推理线程仍持有摄像头/tracker，跳过并发释放")
+        self._discard_warmed_yolo_tracker()
         if getattr(self, "frame_recorder", None) is not None:
-            self.frame_recorder.close()
+            try:
+                recorder_stopped = self.frame_recorder.close(
+                    timeout_sec=remaining()
+                ) is not False
+                shutdown_incomplete = (
+                    shutdown_incomplete or not recorder_stopped
+                )
+            except Exception:
+                shutdown_incomplete = True
+                logger.exception("停止录像服务失败")
+        self._shutdown_incomplete = shutdown_incomplete
+        return not shutdown_incomplete

@@ -41,6 +41,8 @@ class TestConfigEdge(unittest.TestCase):
         self.assertEqual(cm.get("edge_acceleration_strength"), 35)
         self.assertEqual(cm.get("pinch_freeze_enabled"), False)
         self.assertEqual(cm.get("pinch_hysteresis_enabled"), False)
+        self.assertEqual(cm.get("yolo_max_hands"), 1)
+        self.assertTrue(cm.get("pinch_exit_hysteresis_enabled"))
 
     def test_save_preserves_edge_keys(self):
         """保存后 config.json 中包含正确的 edge 配置键"""

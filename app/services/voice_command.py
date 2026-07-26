@@ -103,6 +103,8 @@ class VoiceCommandService:
         self._kws_stream = None
         self._audio_stream = None
         self._audio_queue = None
+        self._audio_cleanup_lock = threading.Lock()
+        self._audio_cleanup_thread = None
         self._running = False
         self._thread = None
         self._current_mode = None
@@ -128,6 +130,11 @@ class VoiceCommandService:
         self._reload_lock = threading.Lock()
         self._reload_thread = None
         self._pending_reload_mode = None
+        # Partial/final/verification ASR jobs use native recognizers and must be
+        # joined before VoiceDictationService releases the recognizer.
+        self._asr_threads_lock = threading.Lock()
+        self._asr_threads = set()
+        self._asr_accepting = True
 
         # 模型路径 — 基于 AirControl 项目根目录
         # 本文件位于 app/services/voice_command.py，向上两层即为项目根目录
@@ -170,25 +177,114 @@ class VoiceCommandService:
             return False
 
         self._running = True
+        with self._asr_threads_lock:
+            self._asr_accepting = True
         self._thread = threading.Thread(target=self._detection_loop, daemon=True)
         self._thread.start()
         logger.info("语音指令服务已启动")
         return True
 
-    def stop(self):
+    def stop(self, timeout_sec=3.0):
         """停止语音指令检测"""
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
         self._running = False
+        self._dictation_mode = False
+        self._dictation_buffer = bytearray()
+        self._dictation_callback = None
+        self._dictation_status_callback = None
+        self._dictation_partial_callback = None
+        self._dictation_session_id += 1
         with self._reload_lock:
             self._pending_reload_mode = None
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3.0)
+        with self._asr_threads_lock:
+            self._asr_accepting = False
+        if not self._join_thread_until(self._thread, deadline, "KWS 检测线程"):
+            return False
         reload_thread = self._reload_thread
-        if reload_thread and reload_thread.is_alive():
-            reload_thread.join(timeout=3.0)
-        self._cleanup_audio()
-        self._kws = None
-        self._kws_stream = None
+        if not self._join_thread_until(reload_thread, deadline, "KWS 重载线程"):
+            return False
+        if not self._join_asr_threads(deadline):
+            return False
+        if not self._cleanup_audio_until(deadline):
+            return False
+        with self._kws_lock:
+            self._kws = None
+            self._kws_stream = None
         logger.info("语音指令服务已停止")
+        return True
+
+    @staticmethod
+    def _join_thread_until(thread, deadline, label):
+        if thread is None or not thread.is_alive():
+            return True
+        remaining = max(0.0, deadline - time.monotonic())
+        thread.join(remaining)
+        if thread.is_alive():
+            logger.error("%s未能在关闭期限内退出；保留其原生资源", label)
+            return False
+        return True
+
+    def _start_asr_thread(self, target, *args, name):
+        """Start and track one native ASR job so stop() can join it."""
+
+        def run_tracked():
+            try:
+                target(*args)
+            finally:
+                with self._asr_threads_lock:
+                    self._asr_threads.discard(threading.current_thread())
+
+        with self._asr_threads_lock:
+            if not self._asr_accepting:
+                return False
+            thread = threading.Thread(
+                target=run_tracked,
+                name=name,
+                daemon=True,
+            )
+            self._asr_threads.add(thread)
+            thread.start()
+        return True
+
+    def _join_asr_threads(self, deadline):
+        """Wait within the shared deadline for every accepted ASR job."""
+        current = threading.current_thread()
+        while True:
+            with self._asr_threads_lock:
+                threads = [
+                    thread for thread in self._asr_threads
+                    if thread is not current
+                ]
+            if not threads:
+                return True
+            for thread in threads:
+                remaining = max(0.0, deadline - time.monotonic())
+                thread.join(remaining)
+                if thread.is_alive():
+                    logger.error(
+                        "ASR 线程 %s 未能在关闭期限内退出；保留听写模型",
+                        thread.name,
+                    )
+                    return False
+
+    def _cleanup_audio_until(self, deadline):
+        """Run potentially native audio shutdown without exceeding the deadline."""
+        with self._audio_cleanup_lock:
+            thread = self._audio_cleanup_thread
+            if thread is None or not thread.is_alive():
+                thread = threading.Thread(
+                    target=self._cleanup_audio,
+                    name="VoiceAudioCleanup",
+                    daemon=True,
+                )
+                self._audio_cleanup_thread = thread
+                thread.start()
+        remaining = max(0.0, deadline - time.monotonic())
+        thread.join(remaining)
+        if thread.is_alive():
+            logger.error("音频流未能在关闭期限内释放")
+            return False
+        return True
 
     def on_mode_changed(self, mode_name):
         """模式切换时更新关键词集（异步，不阻塞调用方）
@@ -593,11 +689,14 @@ class VoiceCommandService:
         snapshot = bytes(self._dictation_buffer[-max_bytes:])
         session_id = self._dictation_session_id
         callback = self._dictation_partial_callback
-        threading.Thread(
-            target=self._run_partial_asr,
-            args=(snapshot, session_id, callback),
-            daemon=True,
-        ).start()
+        if not self._start_asr_thread(
+            self._run_partial_asr,
+            snapshot,
+            session_id,
+            callback,
+            name="PartialAsrWorker",
+        ):
+            self._partial_busy = False
 
     def _run_partial_asr(self, audio_bytes, session_id, callback):
         """独立线程：跑一次 ASR 并把结果回调出去（若 session 仍有效）。"""
@@ -707,11 +806,13 @@ class VoiceCommandService:
                 pass
 
         # ASR 异步跑，调用方立即返回不阻塞
-        threading.Thread(
-            target=self._run_final_asr,
-            args=(audio_bytes, on_text, on_status),
-            daemon=True,
-        ).start()
+        self._start_asr_thread(
+            self._run_final_asr,
+            audio_bytes,
+            on_text,
+            on_status,
+            name="FinalAsrWorker",
+        )
 
     def _run_final_asr(self, audio_bytes, on_text, on_status):
         """后台线程：跑最终 ASR + 状态/文本回调。"""
@@ -778,11 +879,11 @@ class VoiceCommandService:
                     )
                     return
                 self._last_keyword_time = now
-                threading.Thread(
-                    target=self._verify_and_finish_dictation,
-                    args=(self._dictation_session_id,),
-                    daemon=True,
-                ).start()
+                self._start_asr_thread(
+                    self._verify_and_finish_dictation,
+                    self._dictation_session_id,
+                    name="StopVerifyAsrWorker",
+                )
             else:
                 logger.debug("听写中忽略关键词: %s", keyword)
             return

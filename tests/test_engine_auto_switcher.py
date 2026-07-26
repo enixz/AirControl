@@ -243,7 +243,7 @@ class TestEngineAutoSwitchConfigSchema(unittest.TestCase):
     def test_defaults_present_in_fresh_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = ConfigManager(os.path.join(temp_dir, "config.json"))
-            self.assertIs(config.get("engine_auto_switch"), False)
+            self.assertIs(config.get("engine_auto_switch"), True)
             self.assertEqual(config.get("engine_auto_switch_no_hand_frames"), 60)
             self.assertEqual(config.get("engine_auto_switch_hand_frames"), 30)
             self.assertEqual(config.get("engine_auto_switch_near_frames"), 90)
@@ -259,7 +259,7 @@ class TestEngineAutoSwitchConfigSchema(unittest.TestCase):
             "engine_auto_switch_near_bbox_ratio": 0.5,
             "engine_auto_switch_cooldown_sec": -1,
         })
-        self.assertIs(config.get("engine_auto_switch"), False)
+        self.assertIs(config.get("engine_auto_switch"), True)
         self.assertEqual(config.get("engine_auto_switch_no_hand_frames"), 60)
         self.assertEqual(config.get("engine_auto_switch_hand_frames"), 30)
         self.assertEqual(config.get("engine_auto_switch_near_frames"), 90)
@@ -319,6 +319,23 @@ class TestOrchestratorThreeState(unittest.TestCase):
         orch._request_tracker_rebuild.assert_called_once_with(_SIG_YOLO, config_overrides=None)
         self.assertTrue(orch._engine_switch_pending)
 
+    def test_near_to_capture_reuses_matching_warmed_yolo(self):
+        """预热完成后，CAPTURE 不再重新构造昂贵的 YOLO/HandLandmarker。"""
+        orch = _make_orchestrator()
+        _wire_switcher(orch)
+        warmed = MagicMock()
+        orch._warmed_yolo_tracker = warmed
+        orch._warmed_yolo_signature = _SIG_YOLO
+
+        for _ in range(3):
+            orch._maybe_auto_switch_engine([], 0.0)
+
+        orch._request_tracker_rebuild.assert_called_once_with(
+            _SIG_YOLO, config_overrides=None, prepared_tracker=warmed,
+        )
+        self.assertIsNone(orch._warmed_yolo_tracker)
+        self.assertIsNone(orch._warmed_yolo_signature)
+
     def test_pending_rebuild_blocks_duplicate_requests(self):
         orch = _make_orchestrator()
         _wire_switcher(orch)
@@ -344,25 +361,41 @@ class TestOrchestratorThreeState(unittest.TestCase):
         )
 
     def test_tracker_ready_seeds_crop_zoom_after_migrate(self):
-        """交接顺序：migrate_state_from 先复制 YOLO hint，再播种 crop-zoom。"""
+        """构建线程只排队；迁移和播种由推理线程原子执行后再提交。"""
         orch = _make_orchestrator()
         orch._tracker_request_id = 1
         orch._pending_far_track_seed = True
         orch._engine_switch_pending = True
-        orch.tracker = MagicMock()  # 旧 YOLO tracker
+        old_tracker = MagicMock()
+        orch.tracker = old_tracker
         orch.inference_worker = MagicMock()
         new_tracker = MagicMock()
-        order = MagicMock()
-        order.attach_mock(new_tracker.migrate_state_from, "migrate")
-        order.attach_mock(new_tracker.seed_crop_zoom_from_hint, "seed")
-        new_tracker.seed_crop_zoom_from_hint.return_value = True
+        orch.inference_worker.update_tracker.return_value = True
 
         orch._on_tracker_ready(new_tracker, _SIG_MP, 1, "")
 
-        self.assertEqual([c[0] for c in order.mock_calls], ["migrate", "seed"])
+        new_tracker.migrate_state_from.assert_not_called()
+        new_tracker.seed_crop_zoom_from_hint.assert_not_called()
         self.assertFalse(orch._pending_far_track_seed)
+        self.assertTrue(orch._engine_switch_pending)
+        context = {"signature": _SIG_MP, "request_id": 1}
+        orch.inference_worker.update_tracker.assert_called_once_with(
+            new_tracker,
+            context=context,
+            seed_crop_zoom=True,
+        )
+        self.assertIs(orch.tracker, old_tracker)
+
+        orch._on_tracker_swapped(
+            orch.inference_worker,
+            new_tracker,
+            context,
+            {"seed_requested": True, "seeded": True},
+        )
+
+        self.assertIs(orch.tracker, new_tracker)
+        self.assertEqual(orch._tracker_config_signature, _SIG_MP)
         self.assertFalse(orch._engine_switch_pending)
-        orch.inference_worker.update_tracker.assert_called_once_with(new_tracker)
 
     def test_failed_rebuild_rolls_back_override(self):
         orch = _make_orchestrator()
@@ -444,6 +477,18 @@ class TestOrchestratorThreeState(unittest.TestCase):
         self.assertEqual(orch._last_config_engine, "hagrid_yolo")
         self.assertEqual(orch._engine_switcher.state, STATE_NEAR)
         # config 未开 engine_auto_switch → 状态机被配置为关闭
+        self.assertFalse(orch._engine_switcher.enabled)
+
+    def test_manual_yolo_choice_disables_auto_override_even_when_enabled_in_config(self):
+        """手动选择 hagrid_yolo 时，自动闭环不能再把它切回 MediaPipe。"""
+        orch = _make_orchestrator()
+        orch._last_config_engine = "mediapipe"
+        self._apply_config_with(orch, {
+            "detection_engine": "hagrid_yolo",
+            "engine_auto_switch": True,
+            "interaction_mode": "mouse",
+            "cooldown": 1.0,
+        })
         self.assertFalse(orch._engine_switcher.enabled)
 
     def test_manual_change_during_far_track_flips_long_range_off(self):

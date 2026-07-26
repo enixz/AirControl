@@ -1,7 +1,8 @@
 """手势特性 A/B 对比脚本（实施方案 Phase 3.1/3.2/3.3 验证）
 
 用本地录像离线对比三个新特性开关前后的**手势指标**：
-  - pinch_hysteresis（Phase 3.2）：pinch 状态翻转次数、滞回带帧数
+  - pinch_exit_hysteresis（Phase 3.2）：保持旧进入阈值、只放宽退出的 pinch 状态
+    翻转次数与真值指标；同时保留完整双阈值方案作对照
   - thumb_perp_ratio（Phase 3.3）：thumb_extended 翻转次数、perp_ratio 分布
   - pinch_freeze（Phase 3.1）：pinch 持续期间混合指针的漂移风险（观察性指标）
 
@@ -192,11 +193,12 @@ def _compute_freeze_observation(pinch_states, pointer_positions, grace_frames=9)
     }
 
 
-def _analyze_config(cached_landmarks, pinch_hyst, thumb_perp):
+def _analyze_config(cached_landmarks, pinch_hyst, thumb_perp, pinch_exit_hyst=False):
     """用指定配置跑所有帧，返回手势指标。
 
     pinch_hyst: pinch_hysteresis_enabled
     thumb_perp: thumb_perp_ratio_enabled
+    pinch_exit_hyst: pinch_exit_hysteresis_enabled
     """
     from modes.mouse_mode import MouseMode
     from services.gesture_recognizer import GestureRecognizer
@@ -204,6 +206,7 @@ def _analyze_config(cached_landmarks, pinch_hyst, thumb_perp):
 
     gr = GestureRecognizer()
     gr.pinch_hysteresis_enabled = pinch_hyst
+    gr.pinch_exit_hysteresis_enabled = pinch_exit_hyst
     gr.thumb_perp_ratio_enabled = thumb_perp
 
     pinch_states = []
@@ -261,7 +264,7 @@ def _fmt_ms(value):
 
 
 def _print_compare_table(results, labels):
-    """打印 4 种配置的对比表。"""
+    """打印所有候选配置的对比表。"""
     keys = [
         ("pinch_flips", "{:.0f}", "pinch 状态翻转次数（↓好）"),
         ("pinch_frames", "{:.0f}", "pinch 帧数"),
@@ -279,14 +282,15 @@ def _print_compare_table(results, labels):
         ("freeze_event_max_drift_p95_px", "{:.1f}", "事件最大混合指针漂移 P95"),
     ]
 
-    w = 14
+    w = max(14, max(len(label) + 2 for label in labels))
+    columns = " ".join(f"{label:>{w}}" for label in labels)
     print()
     print("=" * 100)
-    print(f"{'指标':<32} {'说明':<28} {labels[0]:>{w}} {labels[1]:>{w}} {labels[2]:>{w}} {labels[3]:>{w}}")
+    print(f"{'指标':<32} {'说明':<28} {columns}")
     print("=" * 100)
     for key, fmt, desc in keys:
-        vals = [fmt.format(results[i].get(key, 0)) for i in range(4)]
-        print(f"{key:<32} {desc:<28} {vals[0]:>{w}} {vals[1]:>{w}} {vals[2]:>{w}} {vals[3]:>{w}}")
+        vals = " ".join(f"{fmt.format(result.get(key, 0)):>{w}}" for result in results)
+        print(f"{key:<32} {desc:<28} {vals}")
 
     if results[0].get("truth"):
         print("-" * 100)
@@ -300,8 +304,10 @@ def _print_compare_table(results, labels):
             ("truth_onset_p95", "onset 延迟 P95", "onset_delay_p95_ms", _fmt_ms),
         ]
         for label, desc, mkey, fmt in truth_rows:
-            vals = [fmt(results[i]["truth"][mkey]) for i in range(4)]
-            print(f"{label:<32} {desc:<28} {vals[0]:>{w}} {vals[1]:>{w}} {vals[2]:>{w}} {vals[3]:>{w}}")
+            vals = " ".join(
+                f"{fmt(result['truth'][mkey]):>{w}}" for result in results
+            )
+            print(f"{label:<32} {desc:<28} {vals}")
     print("=" * 100)
 
 
@@ -312,7 +318,7 @@ def _truth_line(metrics):
     )
 
 
-def _print_truth_recommendation(results):
+def _print_truth_recommendation(results, labels):
     """基于真值指标给出默认开/关的量化建议。
 
     判据（保守）：漏检率不升（容差 1pp）、误报不增、onset P95 增幅 < 50ms，
@@ -321,11 +327,13 @@ def _print_truth_recommendation(results):
     print("\n[真值量化结论] pinch 点击/拖拽（意图真值 vs 检测事件）:")
     base = results[0]["truth"]
     print(f"  baseline(全关): {_truth_line(base)}")
-    for idx, name in ((1, "+hyst"), (2, "+perp"), (3, "+both")):
+    for idx, name in enumerate(labels[1:], start=1):
         print(f"  {name:<16}: {_truth_line(results[idx]['truth'])}")
 
     base_flips = results[0]["pinch_flips"]
-    for idx, name in ((1, "+hyst"), (3, "+both")):
+    for idx, name in enumerate(labels[1:], start=1):
+        if "hyst" not in name:
+            continue
         m = results[idx]["truth"]
         flip_cut = (
             (base_flips - results[idx]["pinch_flips"]) / base_flips
@@ -348,7 +356,7 @@ def _print_truth_recommendation(results):
         print(f"  {name}: {verdict}（{detail}）")
 
 
-def _print_conclusions(results, has_truth=False):
+def _print_conclusions(results, labels, has_truth=False):
     """打印结论分析。has_truth=True 时附真值量化建议。"""
     print("\n" + "=" * 100)
     print("结论分析")
@@ -356,11 +364,11 @@ def _print_conclusions(results, has_truth=False):
 
     base = results[0]  # baseline
 
-    # Phase 3.2: pinch 滞回
+    # Phase 3.2: 仅退出方向 pinch 滞回
     hyst = results[1]
     flip_reduction = base["pinch_flips"] - hyst["pinch_flips"]
     flip_pct = (flip_reduction / base["pinch_flips"] * 100) if base["pinch_flips"] else 0
-    print("\n[Phase 3.2] pinch 双阈值滞回:")
+    print("\n[Phase 3.2] pinch 仅退出方向滞回:")
     print(f"  pinch 翻转次数: {base['pinch_flips']} → {hyst['pinch_flips']}  "
           f"(减少 {flip_reduction} 次, -{flip_pct:.1f}%)")
     print(f"  滞回带候选帧数: {base['pinch_in_hysteresis_band']} 帧")
@@ -371,12 +379,13 @@ def _print_conclusions(results, has_truth=False):
         print("  → 无人工点击真值，翻转减少不等同于准确率提高，不能据此自动开启默认值")
 
     # Phase 3.3: thumb_perp 旋转不变
-    perp = results[2]
+    perp = results[3]
     ext_flip_reduction = base["thumb_ext_flips"] - perp["thumb_ext_flips"]
     ext_flip_pct = (ext_flip_reduction / base["thumb_ext_flips"] * 100) if base["thumb_ext_flips"] else 0
+    ext_flip_direction = "减少" if ext_flip_reduction >= 0 else "增加"
     print("\n[Phase 3.3] thumb_extended 旋转不变判定:")
     print(f"  thumb_extended 翻转次数: {base['thumb_ext_flips']} → {perp['thumb_ext_flips']}  "
-          f"(减少 {ext_flip_reduction} 次, -{ext_flip_pct:.1f}%)")
+          f"({ext_flip_direction} {abs(ext_flip_reduction)} 次, {abs(ext_flip_pct):.1f}%)")
     print(f"  perp_ratio 分布: 均值 {perp['perp_ratio_mean']:.3f}, 标准差 {perp['perp_ratio_std']:.3f}")
     print("  → 样本没有 thumb-tucked/extended 标签，均值不能用于选阈值；继续默认关闭")
 
@@ -404,7 +413,7 @@ def _print_conclusions(results, has_truth=False):
     print("     握拳 idx_ratio 应 > 0.40（EXIT 阈值）。若均值落在 0.30-0.40 说明录像多为边界状态")
 
     if has_truth:
-        _print_truth_recommendation(results)
+        _print_truth_recommendation(results, labels)
 
 
 def main():
@@ -436,17 +445,18 @@ def main():
     else:
         print("  无 truth_events.jsonl → 仅观察性指标（录制时按住空格可采集真值）")
 
-    print("\n[2/2] 对比 4 种配置的手势指标...")
+    print("\n[2/2] 对比 5 种配置的手势指标...")
     configs = [
-        (False, False, "baseline(全关)"),  # = v1.3.6 行为
-        (True, False, "+hyst"),            # Phase 3.2
-        (False, True, "+perp"),           # Phase 3.3
-        (True, True, "+both"),             # 全开
+        (False, False, False, "baseline(全关)"),  # = v1.3.6 行为
+        (False, True, False, "+exit-hyst"),      # 保持旧版进入阈值
+        (True, False, False, "+dual-hyst"),      # 旧完整双阈值方案
+        (False, False, True, "+perp"),           # Phase 3.3
+        (False, True, True, "+exit-hyst+perp"),  # 可选组合
     ]
     results = []
-    for pinch_hyst, thumb_perp, label in configs:
+    for pinch_hyst, pinch_exit_hyst, thumb_perp, label in configs:
         print(f"  跑配置: {label} ...")
-        r = _analyze_config(cached, pinch_hyst, thumb_perp)
+        r = _analyze_config(cached, pinch_hyst, thumb_perp, pinch_exit_hyst)
         r["config"] = label
         results.append(r)
 
@@ -464,16 +474,16 @@ def main():
             detected = states_to_intervals(states, frame_times)
             result["truth"] = compute_metrics(truth_intervals, detected)
 
-    labels = [c[2] for c in configs]
+    labels = [c[3] for c in configs]
     _print_compare_table(results, labels)
-    _print_conclusions(results, has_truth=bool(truth_intervals))
+    _print_conclusions(results, labels, has_truth=bool(truth_intervals))
 
     # 保存结果
     out_path = os.path.join(args.rec_dir, "gesture_ab_result.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "methodology": {
                     "freeze_pointer": "MouseMode blended pointer in source-video pixels",
                     "release_frame_excluded": True,

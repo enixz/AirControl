@@ -32,6 +32,7 @@ add_data_if_present(datas, "gesture_recognizer.task", ".")
 add_data_if_present(datas, os.path.join("models", "hand_landmarker.task"), "models")
 # hagrid_yolo 引擎的 HaGRID YOLO 手部检测器（随仓库分发，打包进 models/）。
 add_data_if_present(datas, os.path.join("models", "hand_yolov8n.onnx"), "models")
+add_data_if_present(datas, os.path.join("models", "model_manifest.json"), "models")
 for kws_file in (
     "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
     "decoder-epoch-12-avg-2-chunk-16-left-64.onnx",

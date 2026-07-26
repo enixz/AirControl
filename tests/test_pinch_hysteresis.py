@@ -67,9 +67,10 @@ class TestPinchHysteresisDefaults(unittest.TestCase):
     """验证默认行为：关闭滞回时与旧版单阈值一致。"""
 
     def test_hysteresis_disabled_by_default(self):
-        """GestureRecognizer 默认 pinch_hysteresis_enabled=False。"""
+        """Recognizer 默认关闭开关；ConfigManager 负责将仅退出方案默认设为开启。"""
         gr = GestureRecognizer()
         self.assertFalse(gr.pinch_hysteresis_enabled)
+        self.assertFalse(gr.pinch_exit_hysteresis_enabled)
 
     def test_single_threshold_when_disabled(self):
         """关闭滞回时，PINCH_RATIO=0.35 是唯一阈值。"""
@@ -142,6 +143,36 @@ class TestPinchHysteresisEnterExit(unittest.TestCase):
 
         hand = make_hand_with_pinch_ratio(0.45)  # 远超 EXIT
         features = gr.get_hand_features(hand)
+        self.assertFalse(features["thumb_index_pinch"])
+
+
+class TestPinchExitOnlyHysteresis(unittest.TestCase):
+    """仅退出方向滞回必须不改变旧版的进入灵敏度。"""
+
+    def test_keeps_legacy_enter_threshold(self):
+        gr = GestureRecognizer()
+        gr.pinch_exit_hysteresis_enabled = True
+
+        features = gr.get_hand_features(make_hand_with_pinch_ratio(0.34))
+
+        self.assertTrue(features["thumb_index_pinch"])
+
+    def test_keeps_pinch_until_exit_threshold(self):
+        gr = GestureRecognizer()
+        gr.pinch_exit_hysteresis_enabled = True
+        gr._was_thumb_index_pinch = True
+
+        features = gr.get_hand_features(make_hand_with_pinch_ratio(0.37))
+
+        self.assertTrue(features["thumb_index_pinch"])
+
+    def test_full_hysteresis_takes_precedence_when_both_enabled(self):
+        gr = GestureRecognizer()
+        gr.pinch_hysteresis_enabled = True
+        gr.pinch_exit_hysteresis_enabled = True
+
+        features = gr.get_hand_features(make_hand_with_pinch_ratio(0.32))
+
         self.assertFalse(features["thumb_index_pinch"])
 
 

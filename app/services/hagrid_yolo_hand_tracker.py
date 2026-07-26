@@ -355,16 +355,18 @@ class HagridYoloHandTracker(BaseHandTracker):
                 boxes_xywh = filtered[:, :4]
                 scores_filtered = filtered[:, 4]
 
-                # 转为 xyxy
-                boxes_xyxy = np.zeros_like(boxes_xywh)
-                boxes_xyxy[:, 0] = boxes_xywh[:, 0] - boxes_xywh[:, 2] / 2
-                boxes_xyxy[:, 1] = boxes_xywh[:, 1] - boxes_xywh[:, 3] / 2
-                boxes_xyxy[:, 2] = boxes_xywh[:, 0] + boxes_xywh[:, 2] / 2
-                boxes_xyxy[:, 3] = boxes_xywh[:, 1] + boxes_xywh[:, 3] / 2
+                # OpenCV NMSBoxes 需要左上角 x/y + w/h；YOLO 输出是中心 xywh。
+                # 直接把中心坐标传进去会使不同尺寸候选的 IoU 失真，保留重复框。
+                nms_boxes = np.column_stack((
+                    boxes_xywh[:, 0] - boxes_xywh[:, 2] / 2,
+                    boxes_xywh[:, 1] - boxes_xywh[:, 3] / 2,
+                    boxes_xywh[:, 2],
+                    boxes_xywh[:, 3],
+                ))
 
                 # NMS
                 indices = cv2.dnn.NMSBoxes(
-                    boxes_xywh.tolist(), scores_filtered.tolist(),
+                    nms_boxes.tolist(), scores_filtered.tolist(),
                     self._yolo_conf, _NMS_IOU,
                 )
                 if len(indices) == 0:

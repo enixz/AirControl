@@ -79,6 +79,7 @@ class TestOrchestratorDictation(unittest.TestCase):
         values = {
             "cooldown": 1.0,
             "pinch_hysteresis_enabled": True,
+            "pinch_exit_hysteresis_enabled": True,
             "thumb_perp_ratio_enabled": True,
             "interaction_mode": "mouse",
         }
@@ -99,6 +100,7 @@ class TestOrchestratorDictation(unittest.TestCase):
         orchestrator.apply_config()
 
         self.assertTrue(orchestrator.recognizer.pinch_hysteresis_enabled)
+        self.assertTrue(orchestrator.recognizer.pinch_exit_hysteresis_enabled)
         self.assertTrue(orchestrator.recognizer.thumb_perp_ratio_enabled)
 
 if __name__ == "__main__":

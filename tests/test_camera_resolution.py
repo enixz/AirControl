@@ -2,17 +2,135 @@ import os
 import sys
 import time
 import unittest
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
 import numpy as np
-from services.camera import _RESOLUTION_CANDIDATES, probe_max_resolution
+import services.camera as camera_module
+from services.camera import (
+    _RESOLUTION_CANDIDATES,
+    CameraService,
+    invalidate_probe_cache,
+    probe_max_resolution,
+)
 
 
 class TestCameraResolutionCandidates(unittest.TestCase):
     def test_automatic_probe_is_capped_at_1080p(self):
         self.assertLessEqual(max(height for _, height in _RESOLUTION_CANDIDATES), 1080)
+
+
+class TestCameraProbeOwnership(unittest.TestCase):
+    def tearDown(self):
+        invalidate_probe_cache()
+
+    @patch("services.camera.cv2.VideoCapture")
+    def test_failed_open_releases_native_handle(self, video_capture):
+        cap = MagicMock()
+        cap.isOpened.return_value = False
+        video_capture.return_value = cap
+
+        opened, ok = camera_module._try_open_camera(7)
+
+        self.assertIsNone(opened)
+        self.assertFalse(ok)
+        cap.release.assert_called_once()
+
+    @patch("services.camera.cv2.VideoCapture")
+    def test_failed_first_frame_releases_native_handle(self, video_capture):
+        cap = MagicMock()
+        cap.isOpened.return_value = True
+        cap.read.return_value = (False, None)
+        video_capture.return_value = cap
+
+        opened, ok = camera_module._try_open_camera(7)
+
+        self.assertIsNone(opened)
+        self.assertFalse(ok)
+        cap.release.assert_called_once()
+
+    def test_probe_exception_releases_capture(self):
+        cap = MagicMock()
+        with (
+            mock.patch.object(
+                camera_module,
+                "_open_capture_with_fallback",
+                return_value=(cap, 123),
+            ),
+            mock.patch.object(
+                camera_module,
+                "_measure_max_resolution",
+                side_effect=RuntimeError("driver failed"),
+            ),
+        ):
+            result = probe_max_resolution(1, use_cache=False)
+
+        self.assertIsNone(result)
+        cap.release.assert_called_once()
+
+    def test_probe_cache_is_parameter_aware_and_invalidatable(self):
+        first_cap = MagicMock()
+        second_cap = MagicMock()
+        with (
+            mock.patch.object(
+                camera_module,
+                "_open_capture_with_fallback",
+                side_effect=[(first_cap, 10), (second_cap, 20)],
+            ) as opener,
+            mock.patch.object(
+                camera_module,
+                "_measure_max_resolution",
+                side_effect=[(1920, 1080), (640, 480)],
+            ),
+        ):
+            first = probe_max_resolution(
+                3,
+                min_fps=20,
+                force_mjpeg=True,
+                preferred_backend=10,
+            )
+            cached = probe_max_resolution(
+                3,
+                min_fps=20,
+                force_mjpeg=True,
+                preferred_backend=10,
+            )
+            different = probe_max_resolution(
+                3,
+                min_fps=60,
+                force_mjpeg=False,
+                preferred_backend=20,
+            )
+
+            self.assertEqual(first, (1920, 1080))
+            self.assertEqual(cached, first)
+            self.assertEqual(different, (640, 480))
+            self.assertEqual(opener.call_count, 2)
+
+        invalidate_probe_cache(3)
+        self.assertFalse(camera_module._PROBE_CACHE)
+
+    def test_start_configuration_exception_releases_open_capture(self):
+        cap = MagicMock()
+        cap.set.side_effect = RuntimeError("native set failed")
+        service = CameraService(
+            camera_index=2,
+            width=640,
+            height=480,
+            preferred_backend=123,
+        )
+        with mock.patch.object(
+            camera_module,
+            "_open_capture_with_fallback",
+            return_value=(cap, 123),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "native set failed"):
+                service.start()
+
+        cap.release.assert_called_once()
+        self.assertIsNone(service.cap)
 
 
 class TestMjpgReapplyOnResolutionChange(unittest.TestCase):

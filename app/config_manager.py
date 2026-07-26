@@ -1,13 +1,28 @@
+import copy
 import json
 import logging
 import os
+import shutil
 import sys
 import threading
+from datetime import datetime
 
 from modes import MODE_NAMES
-from runtime_paths import data_path, project_root
+from runtime_paths import data_path, project_root, resource_path
 
 logger = logging.getLogger(__name__)
+
+
+class ConfigSaveError(OSError):
+    """Raised when a configuration update cannot be persisted atomically."""
+
+    def __init__(self, config_file, cause=None):
+        message = f"无法保存配置文件: {config_file}"
+        if cause is not None:
+            message = f"{message} ({cause})"
+        super().__init__(message)
+        self.config_file = config_file
+        self.cause = cause
 
 
 # 关键字段校验 schema：(type, validator, default)
@@ -145,6 +160,9 @@ _CONFIG_SCHEMA = {
     # Pinch 双阈值滞回（实施方案 Phase 3.2）：ENTER/EXIT 双阈值消除边界抖动。
     # 翻转减少不等同于准确率提高；缺少事件真值前默认关闭。
     "pinch_hysteresis_enabled": (bool, _is_bool, False),
+    # 仅退出方向滞回：保留旧版 0.35 进入阈值，已捏合时以 0.40 阈值退出。
+    # 带真值 A/B（14 组）未增加漏检/延迟，误报 9→4，故默认启用；可显式关闭。
+    "pinch_exit_hysteresis_enabled": (bool, _is_bool, True),
     # thumb_extended 旋转不变判定（实施方案 Phase 3.3）：用拇指 tip 到掌心中轴的
     # 垂直距离/掌宽 替代旧的 thumb_tip_to_index_mcp 距离。暂默认关闭（A/B 显示
     # 阈值 0.50 偏低，perp_ratio 实测均值 1.106，需采集内收姿势标定后再开启）。
@@ -204,6 +222,9 @@ _CONFIG_SCHEMA = {
     # YOLO 手部检测器置信度阈值（仅 hagrid_yolo 引擎使用）。
     # 越低检出越多但误检也多；0.25 是 HaGRID v2 推荐值。
     "yolo_confidence": ((int, float), _is_num_in(0.05, 0.95), 0.25),
+    # 远距 CAPTURE 面向单个主控手。限制 YOLO 只交给下游一个最高分候选，
+    # 避免背景误检形成"多手"并阻塞自动切换；MediaPipe 仍支持双手。
+    "yolo_max_hands": (int, _is_int_in(1, 2), 1),
     # 远距离 ZOOM 鲁棒性：连续丢帧多少帧才断 ZOOM；人脸检测短边分辨率（越大越能找回远处的手）。
     "zoom_miss_frames": (int, _is_int_in(3, 60), 10),
     "face_detect_short": (int, _is_int_in(240, 1280), 400),
@@ -250,12 +271,14 @@ _CONFIG_SCHEMA = {
 }
 
 
-def _validate_config(cfg):
+def _validate_config(cfg, defaults=None):
     """逐字段校验，错误用默认值兜底，返回修正后的 dict 和警告列表。"""
     warnings = []
-    for key, (expected_type, validator, default) in _CONFIG_SCHEMA.items():
+    defaults = defaults or {}
+    for key, (expected_type, validator, schema_default) in _CONFIG_SCHEMA.items():
         if key not in cfg:
             continue
+        default = defaults.get(key, schema_default)
         value = cfg[key]
         # 类型检查 (bool 被排除在 int 之外)
         if not isinstance(value, expected_type) or (
@@ -303,6 +326,7 @@ class ConfigManager:
             "pinch_freeze_enabled": False,
             "pinch_freeze_grace_sec": 0.3,
             "pinch_hysteresis_enabled": False,
+            "pinch_exit_hysteresis_enabled": True,
             "thumb_perp_ratio_enabled": False,
             "edge_y_canvas_enabled": True,
             "edge_y_canvas_deadzone_bottom": 18,
@@ -318,6 +342,7 @@ class ConfigManager:
             "inference_max_width": 720,
             "zoom_miss_frames": 10,
             "face_detect_short": 400,
+            "yolo_max_hands": 1,
             # 投机式增强层总开关：稳定档默认关闭远距增强，需要时用 long_range 档位开启。
             "adaptive_skip_enabled": False,
             "long_range_enabled": False,
@@ -372,35 +397,102 @@ class ConfigManager:
                 "THUMB_DOWN": "hang_up_voice_assistant"
             }
         }
-        self.config = self.load_config()
+        self.default_config = self._load_published_defaults(self.default_config)
         self._dirty = False
         self._batch_depth = 0
+        self._batch_snapshot = None
+        self._batch_dirty_before = False
         self._save_lock = threading.Lock()
+        self.last_save_error = None
+        self._needs_initial_save = False
+        self.config = self.load_config()
+        if self._needs_initial_save:
+            self.save_config()
+
+    @staticmethod
+    def _load_published_defaults(builtin_defaults):
+        """Merge the bundled config template over safe built-in fallbacks."""
+        defaults = copy.deepcopy(builtin_defaults)
+        template_path = resource_path("config.json")
+        try:
+            with open(template_path, encoding="utf-8") as stream:
+                published = json.load(stream)
+            if not isinstance(published, dict):
+                raise TypeError("config.json 顶层必须是对象")
+            published_mapping = published.pop("gesture_mapping", None)
+            defaults.update(published)
+            if isinstance(published_mapping, dict):
+                defaults["gesture_mapping"].update(published_mapping)
+            defaults, warnings = _validate_config(
+                defaults,
+                defaults=builtin_defaults,
+            )
+            for warning in warnings:
+                logger.warning("发布默认配置校验: %s", warning)
+        except Exception as exc:
+            logger.warning(
+                "读取发布默认配置失败，使用内置安全默认值 (%s): %s",
+                template_path,
+                exc,
+            )
+        return defaults
 
     def load_config(self):
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, encoding='utf-8') as f:
                     user_config = json.load(f)
-                    merged = self.default_config.copy()
+                    if not isinstance(user_config, dict):
+                        raise TypeError("配置顶层必须是对象")
+                    merged = copy.deepcopy(self.default_config)
                     merged.update(user_config)
-                    merged_mapping = self.default_config["gesture_mapping"].copy()
+                    merged_mapping = copy.deepcopy(
+                        self.default_config["gesture_mapping"]
+                    )
                     merged_mapping.update(user_config.get("gesture_mapping", {}))
                     merged["gesture_mapping"] = merged_mapping
                     # Schema 校验：错误字段用默认值兜底，避免误编辑导致黑屏
-                    merged, warnings = _validate_config(merged)
+                    merged, warnings = _validate_config(
+                        merged,
+                        defaults=self.default_config,
+                    )
                     for w in warnings:
                         logger.warning("配置校验: %s", w)
                     return merged
             except Exception as e:
                 logger.warning("读取配置失败，使用默认配置: %s", e)
-        return self.default_config.copy()
+                self._backup_corrupt_config(e)
+                self._needs_initial_save = True
+        else:
+            self._needs_initial_save = True
+        return copy.deepcopy(self.default_config)
+
+    def _backup_corrupt_config(self, read_error):
+        """Preserve an unreadable config before replacing it with defaults."""
+        if not os.path.exists(self.config_file):
+            return None
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup_path = f"{self.config_file}.corrupt-{timestamp}.bak"
+        try:
+            shutil.copy2(self.config_file, backup_path)
+        except Exception as backup_error:
+            logger.error(
+                "损坏配置备份失败，拒绝覆盖原文件 (%s): %s",
+                self.config_file,
+                backup_error,
+            )
+            raise ConfigSaveError(self.config_file, backup_error) from read_error
+        logger.warning("损坏配置已备份到: %s", backup_path)
+        return backup_path
 
     def save_config(self):
         if self._batch_depth:
             self._dirty = True
             return True
-        return self._do_save()
+        if not self._do_save():
+            raise ConfigSaveError(self.config_file, self.last_save_error)
+        self._dirty = False
+        return True
 
     def _do_save(self):
         with self._save_lock:
@@ -412,8 +504,10 @@ class ConfigManager:
                     f.flush()
                     os.fsync(f.fileno())
                 os.replace(temp_path, self.config_file)
+                self.last_save_error = None
                 return True
             except Exception as e:
+                self.last_save_error = e
                 logger.error("保存配置失败: %s", e)
                 try:
                     if os.path.exists(temp_path):
@@ -430,8 +524,18 @@ class ConfigManager:
         return self.config.get(key, *args)
 
     def set(self, key, value):
+        missing = object()
+        old_value = self.config.get(key, missing)
         self.config[key] = value
-        self.save_config()
+        try:
+            self.save_config()
+        except ConfigSaveError:
+            if not self._batch_depth:
+                if old_value is missing:
+                    self.config.pop(key, None)
+                else:
+                    self.config[key] = old_value
+            raise
 
     def apply_stability_profile(self, profile):
         """Apply a named experience profile to the related stability switches."""
@@ -452,8 +556,18 @@ class ConfigManager:
         return self.config["gesture_mapping"].get(gesture, "none")
 
     def set_mapping(self, gesture, action):
+        missing = object()
+        old_value = self.config["gesture_mapping"].get(gesture, missing)
         self.config["gesture_mapping"][gesture] = action
-        self.save_config()
+        try:
+            self.save_config()
+        except ConfigSaveError:
+            if not self._batch_depth:
+                if old_value is missing:
+                    self.config["gesture_mapping"].pop(gesture, None)
+                else:
+                    self.config["gesture_mapping"][gesture] = old_value
+            raise
 
 
 class _BatchContext:
@@ -461,11 +575,36 @@ class _BatchContext:
         self._manager = manager
 
     def __enter__(self):
+        if self._manager._batch_depth == 0:
+            self._manager._batch_snapshot = copy.deepcopy(self._manager.config)
+            self._manager._batch_dirty_before = self._manager._dirty
         self._manager._batch_depth += 1
         return self._manager
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._manager._batch_depth = max(0, self._manager._batch_depth - 1)
-        if self._manager._batch_depth == 0 and self._manager._dirty:
-            self._manager._do_save()
-            self._manager._dirty = False
+        if self._manager._batch_depth:
+            return False
+
+        snapshot = self._manager._batch_snapshot
+        dirty_before = self._manager._batch_dirty_before
+        self._manager._batch_snapshot = None
+        self._manager._batch_dirty_before = False
+
+        if exc_type is not None:
+            self._manager.config = snapshot
+            self._manager._dirty = dirty_before
+            return False
+
+        if not self._manager._dirty:
+            return False
+
+        if not self._manager._do_save():
+            self._manager.config = snapshot
+            self._manager._dirty = dirty_before
+            raise ConfigSaveError(
+                self._manager.config_file,
+                self._manager.last_save_error,
+            )
+        self._manager._dirty = False
+        return False

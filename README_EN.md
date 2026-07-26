@@ -330,10 +330,15 @@ Test coverage:
 The project is configured with PyInstaller for one-click packaging:
 
 ```bash
-python build.py
+python build.py --development
 ```
 
 Output will be in the `dist/` directory with all dependencies and model files included.
+`--development` output is for local verification only and must not be
+distributed. Both `python build.py` and `python build.py --release` enforce the
+release gate by default. The bundled YOLO model has no recorded source
+or redistribution approval yet, so the release build intentionally fails; see
+[model provenance and release gate](MODEL_PROVENANCE.md).
 Before release, run the hardware-free package self-test. Exit code `0` means
 the models and native runtimes loaded successfully:
 
@@ -392,7 +397,14 @@ python -m pytest tests/
 
 ## 📄 License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+The repository **code** is licensed under the [Apache License 2.0](LICENSE).
+Third-party models are not automatically covered by that notice. The bundled
+`hand_yolov8n.onnx` carries an AGPL-3.0 string in its embedded metadata and has
+no recorded provenance or redistribution approval, so the package must not be
+represented as publicly distributable under Apache-2.0. See the
+[model provenance and release gate](MODEL_PROVENANCE.md) and the
+[official Ultralytics licensing guidance](https://www.ultralytics.com/license).
+Local-only development, testing, and use are not blocked by this project gate.
 
 ```
 Copyright 2026 AirControl

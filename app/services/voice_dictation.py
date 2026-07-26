@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 import numpy as np
 from runtime_paths import resource_path
@@ -63,21 +64,41 @@ class VoiceDictationService:
         tokens_file = os.path.join(self._model_dir, "tokens.txt")
         return model_file is not None and os.path.isfile(tokens_file)
 
-    def stop(self):
+    def stop(self, timeout_sec=3.0):
         """释放 SenseVoice ONNX recognizer，允许 GC 回收模型内存。
 
         释放后若再次调用 dictate()，_ensure_loaded() 会重新加载模型。
         """
-        with self._load_lock:
-            if self._recognizer is not None:
-                try:
-                    # sherpa-onnx OfflineRecognizer 没有显式 close，删除引用让 GC 回收
-                    del self._recognizer
-                except Exception:
-                    pass
-                self._recognizer = None
-            # 重置加载失败标志，允许下次重新尝试加载
-            self._load_failed = False
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        # dictate() owns the native recognizer while holding _dictate_lock.
+        # On timeout, leave the reference intact so no other thread observes a
+        # released recognizer while native decode is still using it.
+        if not self._dictate_lock.acquire(
+            timeout=max(0.0, deadline - time.monotonic())
+        ):
+            logger.error("SenseVoice 解码未能在关闭期限内退出；保留 recognizer")
+            return False
+        try:
+            if not self._load_lock.acquire(
+                timeout=max(0.0, deadline - time.monotonic())
+            ):
+                logger.error("SenseVoice 模型加载未能在关闭期限内退出")
+                return False
+            try:
+                if self._recognizer is not None:
+                    try:
+                        # sherpa-onnx OfflineRecognizer 没有显式 close，删除引用让 GC 回收
+                        del self._recognizer
+                    except Exception:
+                        pass
+                    self._recognizer = None
+                # 重置加载失败标志，允许下次重新尝试加载
+                self._load_failed = False
+            finally:
+                self._load_lock.release()
+        finally:
+            self._dictate_lock.release()
+        return True
 
     def dictate(self, samples, sample_rate=None):
         """对一段音频做语音识别，返回纯文本（已去除元标签）。
@@ -107,9 +128,12 @@ class VoiceDictationService:
 
         try:
             with self._dictate_lock:
-                stream = self._recognizer.create_stream()
+                recognizer = self._recognizer
+                if recognizer is None:
+                    return ""
+                stream = recognizer.create_stream()
                 stream.accept_waveform(sr, samples)
-                self._recognizer.decode_stream(stream)
+                recognizer.decode_stream(stream)
                 raw = stream.result.text or ""
         except Exception as e:
             logger.error("SenseVoice 识别失败: %s", e, exc_info=True)

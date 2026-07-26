@@ -5,10 +5,17 @@ replay_video.run() 里延迟导入，所以 import replay_video 不会拉起 med
 """
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
+import replay_video
 from replay_video import compute_metrics
 
 
@@ -70,6 +77,50 @@ class TestComputeMetrics(unittest.TestCase):
         self.assertAlmostEqual(m["ms_mean"], 25.0)
         self.assertAlmostEqual(m["ms_p95"], 40.0)        # idx=min(3,int(4*0.95)=3)=3
         self.assertAlmostEqual(m["fps_proc"], 1000.0 / 25.0)
+
+
+class TestReplayInputAndLifecycle(unittest.TestCase):
+    def test_iter_frames_reads_default_mp4_recorder_output(self):
+        frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        capture = mock.MagicMock()
+        capture.read.side_effect = [(True, frame), (False, None)]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "frames.mp4").touch()
+            with mock.patch(
+                "replay_video.cv2.VideoCapture",
+                return_value=capture,
+            ):
+                frames = list(replay_video.iter_frames(temp_dir))
+
+        self.assertEqual(len(frames), 1)
+        self.assertIs(frames[0], frame)
+        capture.release.assert_called_once_with()
+
+    def test_run_closes_tracker_after_processing(self):
+        tracker = mock.MagicMock()
+        tracker.find_hands.return_value = (
+            np.zeros((4, 4, 3), dtype=np.uint8),
+            [],
+            [],
+        )
+        factory_module = SimpleNamespace(
+            create_hand_tracker=mock.MagicMock(return_value=tracker)
+        )
+        with (
+            mock.patch(
+                "replay_video.import_module",
+                return_value=factory_module,
+            ),
+            mock.patch(
+                "replay_video.iter_frames",
+                return_value=[np.zeros((4, 4, 3), dtype=np.uint8)],
+            ),
+            mock.patch("replay_video._load_config", return_value={}),
+        ):
+            metrics, _counter = replay_video.run("unused")
+
+        self.assertEqual(metrics["frames"], 1)
+        tracker.close.assert_called_once_with()
 
 
 if __name__ == "__main__":

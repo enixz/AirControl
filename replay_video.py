@@ -31,6 +31,7 @@ import logging
 import os
 import sys
 import time
+from importlib import import_module
 
 import cv2
 
@@ -98,10 +99,21 @@ def compute_metrics(records):
 # ----------------------------------------------------------------- 帧读取 --
 
 def iter_frames(rec_dir):
-    """按顺序产出 frame（BGR）。支持 frames.mkv 或 frames/*.png。"""
-    mkv = os.path.join(rec_dir, "frames.mkv")
-    if os.path.exists(mkv):
-        cap = cv2.VideoCapture(mkv)
+    """按顺序产出 frame（BGR）。支持录制器输出的视频或 PNG 帧序列。"""
+    video_path = next(
+        (
+            path
+            for path in (
+                os.path.join(rec_dir, "frames.mkv"),
+                os.path.join(rec_dir, "frames.mp4"),
+                os.path.join(rec_dir, "frames.avi"),
+            )
+            if os.path.exists(path)
+        ),
+        None,
+    )
+    if video_path is not None:
+        cap = cv2.VideoCapture(video_path)
         try:
             while True:
                 ok, fr = cap.read()
@@ -154,7 +166,9 @@ def _load_config(overrides):
 def run(rec_dir, overrides=None, jpeg_quality=None):
     """跑一遍：建真 tracker、逐帧喂真 find_hands、读状态、返回 (指标, 事件计数)。"""
     sys.path.insert(0, os.path.join(PROJECT_ROOT, "app"))
-    from services.hand_tracker_factory import create_hand_tracker  # 延迟导入，避免单测拉起 mediapipe
+    create_hand_tracker = import_module(
+        "services.hand_tracker_factory"
+    ).create_hand_tracker
 
     cfg = _load_config(overrides or {})
 
@@ -204,6 +218,9 @@ def run(rec_dir, overrides=None, jpeg_quality=None):
                 "ms": ms,
             })
     finally:
+        close = getattr(tracker, "close", None)
+        if callable(close):
+            close()
         glog.removeHandler(counter)
         glog.propagate = prev_propagate
 
@@ -236,8 +253,12 @@ def _print_single(metrics, counter, label):
 
 def _print_compare(base, base_c, var, var_c, var_label):
     keys = list(_FMT) + ["acquire", "sr_switch"]
-    base = dict(base); base["acquire"] = base_c.acquire_count; base["sr_switch"] = base_c.sr_switch
-    var = dict(var); var["acquire"] = var_c.acquire_count; var["sr_switch"] = var_c.sr_switch
+    base = dict(base)
+    base["acquire"] = base_c.acquire_count
+    base["sr_switch"] = base_c.sr_switch
+    var = dict(var)
+    var["acquire"] = var_c.acquire_count
+    var["sr_switch"] = var_c.sr_switch
     print(f"\n{'metric':<18} {'baseline':>12} {var_label:>20} {'delta':>12}")
     print("-" * 66)
     for k in keys:

@@ -102,6 +102,9 @@ class GestureRecognizer:
         self._was_thumb_middle_pinch = False
         # pinch 滞回开关：由 orchestrator 从 config 设置，默认关闭保持旧版行为
         self.pinch_hysteresis_enabled = False
+        # 仅退出方向滞回：保留旧版 0.35 进入阈值，已捏合时才放宽到 0.40，
+        # 以避免完整双阈值方案因 ENTER=0.30 带来的点击漏检。
+        self.pinch_exit_hysteresis_enabled = False
         # thumb_extended 旋转不变判定开关（实施方案 Phase 3.3）：默认关闭，
         # 开启后 thumb_extended 使用 perp_ratio 替代旧的 thumb_tip_to_index_mcp 距离。
         # 新旧特征都计算并输出到 features dict，便于 telemetry 并存对照。
@@ -146,8 +149,8 @@ class GestureRecognizer:
         pinky_up = landmarks[20][2] < landmarks[18][2]
         thumb_index = math.hypot(landmarks[4][1] - landmarks[8][1], landmarks[4][2] - landmarks[8][2])
         thumb_middle = math.hypot(landmarks[4][1] - landmarks[12][1], landmarks[4][2] - landmarks[12][2])
-        # pinch 判定：单阈值（旧版兼容）或双阈值滞回（实施方案 Phase 3.2）
-        # 滞回：已捏合时用 EXIT（更宽松的保持），未捏合时用 ENTER（更严格的进入）
+        # pinch 判定：单阈值（旧版兼容）、仅退出方向滞回或双阈值滞回。
+        # 仅退出方案保持旧版进入灵敏度，已捏合后才用 EXIT 阈值维持状态。
         if getattr(self, 'pinch_hysteresis_enabled', False):
             idx_thresh = hand_width * (
                 self.PINCH_EXIT_RATIO if self._was_thumb_index_pinch
@@ -156,6 +159,17 @@ class GestureRecognizer:
             mid_thresh = hand_width * (
                 self.PINCH_EXIT_RATIO if self._was_thumb_middle_pinch
                 else self.PINCH_ENTER_RATIO
+            )
+            thumb_index_pinch = thumb_index < idx_thresh
+            thumb_middle_pinch = thumb_middle < mid_thresh
+        elif getattr(self, 'pinch_exit_hysteresis_enabled', False):
+            idx_thresh = hand_width * (
+                self.PINCH_EXIT_RATIO if self._was_thumb_index_pinch
+                else self.PINCH_RATIO
+            )
+            mid_thresh = hand_width * (
+                self.PINCH_EXIT_RATIO if self._was_thumb_middle_pinch
+                else self.PINCH_RATIO
             )
             thumb_index_pinch = thumb_index < idx_thresh
             thumb_middle_pinch = thumb_middle < mid_thresh

@@ -9,10 +9,10 @@
 
 变体：
   legacy_f09059d  昨晚实测引发严重断触的版本（中指长>掌宽×0.6 判双指、无标签否决、2帧去抖）
-  fixed           本次修复（mi>0.95 判双指、POINTING_UP/FIST 否决、3帧去抖+滞后）
+  fixed           直接调用项目当前 DrawMode，不维护易漂移的重复状态机
   bare_mediapipe  裸奔 MediaPipe：笔状态直接绑 POINTING_UP 标签，无任何缓冲/门控
 
-“fixed” 变体先与真实 DrawMode 类在同一输入上对跑校验（笔状态逐帧一致才可信）。
+“fixed” 变体直接运行真实 DrawMode，因此实现更新会自动反映到模拟结果。
 
 用法：
   python simulate_draw.py                  # 合成 120s 书写会话对比三变体
@@ -24,6 +24,7 @@ import math
 import os
 import random
 import sys
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "app"))
 
@@ -93,12 +94,13 @@ def synth_session(seconds=120.0, seed=7):
             label = "POINTING_UP" if rng.random() < 0.875 else "OTHER"
             frames.append((build_hand(mi, thumb, yaw, rng), label, "down"))
         t += stroke_len
-        # --- 0.5s 故意抬笔：正面、拇指分开（习惯交互）
+        # --- 0.5s 故意抬笔：当前稳定档以可靠的 VICTORY 标签悬停/抬笔；
+        # 拇指抬笔已因关键点噪声默认关闭，不能再作为当前行为的意图样本。
         gap_len = 0.5
-        for k in range(int(gap_len * FPS)):
+        for _k in range(int(gap_len * FPS)):
             mi = min(0.81, max(0.05, rng.gauss(0.40, 0.18)))
             thumb = min(1.3, max(0.70, rng.gauss(0.95, 0.15)))
-            label = "POINTING_UP" if rng.random() < 0.25 else "OTHER"
+            label = "VICTORY"
             frames.append((build_hand(mi, thumb, 0.95, rng), label, "up"))
         t += gap_len
     return frames
@@ -107,10 +109,7 @@ def synth_session(seconds=120.0, seed=7):
 # ---------------------------------------------------------------- 判定变体 --
 
 class PenGate:
-    """draw_mode 起落笔判定的精确复刻（不含 UI），变体由参数切换。
-
-    fixed 配置与真实 DrawMode 的逐帧一致性由 --validate 校验保证。
-    """
+    """Historical draw-mode gate retained only for legacy comparison."""
 
     def __init__(self, *, rule, veto, debounce, frontality_gate=0.55):
         self.r = GestureRecognizer()
@@ -204,6 +203,50 @@ class PenGate:
         return False
 
 
+class CurrentDrawGate:
+    """Adapter that drives the real DrawMode on the simulator's frame clock."""
+
+    def __init__(self):
+        from modes.draw_mode import DrawMode
+
+        class Config:
+            def get(self, key, default=None):
+                return {"draw_record_trace": False}.get(key, default)
+
+        self.overlay = mock.MagicMock()
+        self.overlay.REFERENCE_HAND_SIZE = 100.0
+        self.overlay.isVisible.return_value = True
+        mouse = mock.MagicMock()
+        mouse.to_screen.return_value = (500, 500)
+        self.mode = DrawMode(
+            Config(),
+            GestureRecognizer(),
+            mouse,
+            self.overlay,
+            mock.MagicMock(),
+            mock.MagicMock(),
+            mock.MagicMock(),
+        )
+        self.mode.on_enter()
+        self.writing = False
+        self.lifts = []
+
+    def step(self, idx, landmarks, label):
+        hands = [landmarks] if landmarks is not None else []
+        gestures = (
+            [{"label": label, "bbox_area": 0.0}]
+            if landmarks is not None
+            else []
+        )
+        was_writing = self.writing
+        with mock.patch("modes.draw_mode.time.time", return_value=idx / FPS):
+            result = self.mode.handle(hands, gestures, 640, 480)
+        self.writing = bool(self.mode._was_writing)
+        if was_writing and not self.writing:
+            self.lifts.append((idx, f"draw_mode_{result.gesture.lower()}"))
+        return self.writing
+
+
 class BareGate:
     """裸奔 MediaPipe：笔状态 = (label == POINTING_UP)，无缓冲无门控。"""
 
@@ -223,7 +266,7 @@ def make_variant(name):
     if name == "legacy_f09059d":
         return PenGate(rule="hand_width", veto=False, debounce=2)
     if name == "fixed":
-        return PenGate(rule="mi", veto=True, debounce=3)
+        return CurrentDrawGate()
     if name == "bare_mediapipe":
         return BareGate()
     raise ValueError(name)
@@ -254,7 +297,9 @@ def evaluate(frames, gate):
         if prev_intent == "up" and intent == "down" and gap_lifted:
             deliberate_lift_ok += 1
         prev_intent = intent
-    for idx, cause in gate.lifts:
+    if prev_intent == "up" and gap_lifted:
+        deliberate_lift_ok += 1
+    for idx, _cause in gate.lifts:
         if frames[idx][2] == "down":
             false_lifts += 1
     minutes = len(frames) / FPS / 60.0
@@ -273,37 +318,6 @@ def _hist(it):
     return dict(sorted(h.items(), key=lambda kv: -kv[1]))
 
 
-def validate_against_real_drawmode(frames):
-    """保真度校验：PenGate('fixed') 与真实 DrawMode 在同一输入上逐帧对比笔状态。"""
-    from unittest import mock
-    from modes.draw_mode import DrawMode
-
-    overlay = mock.MagicMock()
-    overlay.REFERENCE_HAND_SIZE = 100.0
-    overlay.isVisible.return_value = True
-    mouse = mock.MagicMock()
-    mouse.to_screen.return_value = (500, 500)
-
-    class Cfg:
-        def get(self, k, d=None):
-            return {"draw_record_trace": False}.get(k, d)
-
-    dm = DrawMode(Cfg(), GestureRecognizer(), mouse, overlay,
-                  mock.MagicMock(), mock.MagicMock(), mock.MagicMock())
-    dm.on_enter()
-    model = make_variant("fixed")
-    mismatch = 0
-    for idx, (lm, label, _intent) in enumerate(frames):
-        hands = [lm] if lm is not None else []
-        gestures = [{"label": label, "bbox_area": 0.0}] if lm is not None else []
-        result = dm.handle(hands, gestures, 640, 480)
-        real_pen = result.gesture == "DRAW"
-        model_pen = model.step(idx, lm, label)
-        if real_pen != model_pen:
-            mismatch += 1
-    return mismatch, len(frames)
-
-
 def load_replay(path):
     frames = []
     with open(path, encoding="utf-8") as fh:
@@ -316,25 +330,30 @@ def load_replay(path):
     return frames
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--replay", help="回放 draw_trace.jsonl（实机录制）")
     ap.add_argument("--seconds", type=float, default=120.0)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    if args.seconds <= 0:
+        ap.error("--seconds must be greater than zero")
 
     if args.replay:
-        frames = load_replay(args.replay)
+        try:
+            frames = load_replay(args.replay)
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            print(f"无法读取回放文件: {exc}", file=sys.stderr)
+            return 2
         print(f"回放 {args.replay}: {len(frames)} 帧（意图未知，只统计抬笔事件）")
     else:
         frames = synth_session(args.seconds)
         print(f"合成会话: {args.seconds:.0f}s @ {FPS:.0f}fps，"
               f"笔画2s+抬笔0.5s循环，横扫偏航 1.0~0.4，分布取自实测 gesture.log")
-        mismatch, total = validate_against_real_drawmode(frames)
-        pct = 100.0 * (1 - mismatch / total)
-        print(f"保真度校验: PenGate(fixed) vs 真实 DrawMode 笔状态一致率 "
-              f"{pct:.2f}% ({total - mismatch}/{total})")
-        if mismatch:
-            print("!! 模型与真实实现不一致，对比结果不可信 !!")
+
+    if not frames:
+        print("没有可评估的帧", file=sys.stderr)
+        return 2
 
     print()
     header = f"{'变体':<18}{'断触/分钟':>10}{'故意抬笔成功率':>14}{'误落笔帧占比':>12}  抬笔原因"
@@ -346,7 +365,8 @@ def main():
         print(f"{name:<18}{m['false_lifts_per_min']:>10.1f}"
               f"{100 * m['deliberate_lift_rate']:>13.0f}%"
               f"{m['false_down_pct_in_gaps']:>11.0f}%  {m['lift_causes']}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

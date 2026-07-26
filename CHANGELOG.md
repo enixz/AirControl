@@ -16,21 +16,29 @@
   (`base_hand_tracker.py:707-709` returns early when no hand is present), so
   it structurally cannot solve initial acquisition at distance. YOLO is the
   better *catcher*; the two are complementary, not alternatives.
-- **Engine auto-switch** (`engine_auto_switch`, default off): when MediaPipe
-  sees no hand for ~60 consecutive frames the tracker switches to
-  `hagrid_yolo`; after ~90 consecutive stable single-hand frames it switches
-  back. A 5 s cooldown prevents oscillation, multi-hand frames (a YOLO
-  false-positive signature) do not count toward switching back, and a manual
-  `detection_engine` choice always stays authoritative. Runtime override
-  lives in memory only; restart still honors the configured engine.
-- **Ground-truth A/B verdict for the three gesture features, 2026-07-22**:
+- **Engine auto-switch warm handoff** (`engine_auto_switch`, default off): a
+  background HaGRID YOLO + Landmarker instance is prepared while MediaPipe is
+  active and reused for CAPTURE, removing the observed 2.6–3.8 s cold start.
+  After 60 no-hand frames it moves to CAPTURE; 30 stable single-hand frames
+  hand off to FAR_TRACK. YOLO capture now keeps only the highest-confidence
+  hand (`yolo_max_hands=1`) and uses corrected centre-xywh NMS coordinates.
+  Multi-hand frames do not count toward handoff. The loop runs only when the
+  configured engine is `mediapipe`; explicitly selecting `hagrid_yolo`
+  remains authoritative.
+- **Ground-truth A/B verdict for the three gesture features, 2026-07-24**:
   near-range B-group (`raw_capture/20260722_164055`, 1846 frames, 99% hand
-  frames, 14 labeled click/drag groups) — pinch hysteresis cuts false alarms
-  10 → 3 and pinch flips -43%, but recall drops 64.3% → 57.1% and onset P95
-  worsens 1402 → 4011 ms; `thumb_perp` has no labeled poses for calibration;
-  freeze drift observations do not justify a default change. **All three
-  features remain off by default**; an asymmetric EXIT-only hysteresis is
-  noted as the future direction.
+  frames, 14 labeled click/drag groups) — the new EXIT-only pinch hysteresis
+  preserves recall (64.3%) and onset P95 (1402 ms) while reducing false alarms
+  9 → 4 and flips 35 → 25, so `pinch_exit_hysteresis_enabled` is now **on by
+  default**. The older dual ENTER/EXIT switch remains off: it reduced false
+  alarms further but recall fell to 57.1% and onset P95 rose to 4011 ms.
+  `thumb_perp` still lacks labeled poses and remains off.
+- **Release protection for the bundled YOLO model**: its embedded ONNX metadata
+  reports `AGPL-3.0`, while its source and distribution approval are not
+  recorded. `python build.py --release` now refuses packaging until
+  `models/model_manifest.json` contains a verified source and approval;
+  see `MODEL_PROVENANCE.md`. Developer builds remain available but warn
+  and must not be published.
 - **Fix: "app crashed during recording" was Space clicking the focused
   button** (`e5bb295`). Qt activates a focused QPushButton on Space release,
   and the floating window's close button had keyboard focus while the user

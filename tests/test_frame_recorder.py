@@ -2,7 +2,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -12,6 +15,110 @@ from services.frame_recorder import FrameRecorder
 
 
 class TestFrameRecorder(unittest.TestCase):
+    def test_close_timeout_never_evicts_a_queued_frame_for_sentinel(self):
+        class BlockingWriter:
+            def __init__(self):
+                self.entered = threading.Event()
+                self.release_event = threading.Event()
+
+            def write(self, _frame):
+                self.entered.set()
+                self.release_event.wait()
+
+            def release(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = FrameRecorder(
+                out_root=temp_dir,
+                max_frames=9,
+                max_seconds=10,
+            )
+            recorder._writer = BlockingWriter()
+            frame = np.zeros((16, 16, 3), dtype=np.uint8)
+            recorder.write(frame)
+            self.assertTrue(recorder._writer.entered.wait(timeout=1.0))
+            for _ in range(8):
+                recorder.write(frame)
+            self.assertEqual(recorder._queue.qsize(), 8)
+
+            self.assertFalse(recorder.close(timeout_sec=0.03))
+            self.assertEqual(recorder._queue.qsize(), 8)
+            self.assertFalse(recorder._sentinel_queued)
+
+            recorder._writer.release_event.set()
+            self.assertTrue(recorder.close(timeout_sec=1.0))
+            self.assertEqual(recorder._count, 9)
+
+    def test_close_timeout_preserves_writer_owned_resources(self):
+        class BlockingWriter:
+            def __init__(self):
+                self.entered = threading.Event()
+                self.release_event = threading.Event()
+                self.released = False
+
+            def write(self, _frame):
+                self.entered.set()
+                self.release_event.wait()
+
+            def release(self):
+                self.released = True
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = FrameRecorder(
+                out_root=temp_dir,
+                max_frames=1,
+                max_seconds=10,
+            )
+            writer = BlockingWriter()
+            recorder._writer = writer
+            recorder.write(np.zeros((16, 16, 3), dtype=np.uint8))
+            self.assertTrue(writer.entered.wait(timeout=1.0))
+
+            started = time.perf_counter()
+            self.assertFalse(recorder.close(timeout_sec=0.05))
+            self.assertLess(time.perf_counter() - started, 0.5)
+            self.assertFalse(writer.released)
+            self.assertFalse(recorder._meta.closed)
+
+            writer.release_event.set()
+            self.assertTrue(recorder.close(timeout_sec=1.0))
+            self.assertTrue(writer.released)
+            self.assertTrue(recorder._meta.closed)
+
+    def test_close_waits_for_slow_writer_before_closing_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = FrameRecorder(
+                out_root=temp_dir,
+                max_frames=1,
+                max_seconds=10,
+            )
+            recorder._use_png = True
+            entered = threading.Event()
+            release = threading.Event()
+
+            def slow_write(*_args, **_kwargs):
+                entered.set()
+                release.wait(timeout=2.0)
+                return True
+
+            with mock.patch(
+                "services.frame_recorder.cv2.imwrite",
+                side_effect=slow_write,
+            ):
+                recorder.write(np.zeros((16, 16, 3), dtype=np.uint8))
+                self.assertTrue(entered.wait(timeout=1.0))
+                timer = threading.Timer(0.1, release.set)
+                timer.start()
+                started = time.perf_counter()
+                recorder.close()
+                elapsed = time.perf_counter() - started
+                timer.join(timeout=1.0)
+
+            self.assertGreaterEqual(elapsed, 0.08)
+            self.assertFalse(recorder._thread.is_alive())
+            self.assertTrue(recorder._meta.closed)
+
     def test_async_recorder_flushes_metadata_on_close(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             recorder = FrameRecorder(

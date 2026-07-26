@@ -1,12 +1,17 @@
 import logging
 import os
+import subprocess
 import sys
 import threading
+import time
 import winsound
+from collections import deque
+
+import cv2
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from config_manager import ConfigManager
+from config_manager import ConfigManager, ConfigSaveError
 from draw_toolbar import DrawToolbar
 from drawing_overlay import DrawingOverlay
 from modes import MODE_NAME_ZH, MODE_NAMES
@@ -31,16 +36,67 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from runtime_paths import resource_path
-from services.camera import list_available_cameras
+from services.camera import list_available_cameras, probe_max_resolution
 from services.mouse_controller import MouseController
 from version import __version__
 
 logger = logging.getLogger(__name__)
 
 
+def _make_preview_pixmap(frame, target_width, target_height):
+    """Create a display-sized pixmap without copying the full source frame."""
+    source_height, source_width, channels = frame.shape
+    target_width = max(1, int(target_width))
+    target_height = max(1, int(target_height))
+    scale = min(
+        target_width / max(source_width, 1),
+        target_height / max(source_height, 1),
+    )
+    preview_width = max(1, int(round(source_width * scale)))
+    preview_height = max(1, int(round(source_height * scale)))
+    if preview_width != source_width or preview_height != source_height:
+        interpolation = (
+            cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        )
+        preview = cv2.resize(
+            frame,
+            (preview_width, preview_height),
+            interpolation=interpolation,
+        )
+    else:
+        preview = frame
+    bytes_per_line = channels * preview_width
+    image = QImage(
+        preview.data,
+        preview_width,
+        preview_height,
+        bytes_per_line,
+        QImage.Format.Format_BGR888,
+    )
+    # QPixmap owns the converted pixels after this call, so the temporary
+    # NumPy preview can be released without a full-resolution QImage.copy().
+    return QPixmap.fromImage(image)
+
+
+def camera_config_values(camera_data):
+    """Return only complete camera fields safe to persist from a combo item."""
+    if not isinstance(camera_data, dict):
+        return {}
+    camera_index = camera_data.get("index")
+    if not isinstance(camera_index, int) or camera_index < 0:
+        return {}
+    values = {"camera_index": camera_index}
+    width = camera_data.get("width")
+    height = camera_data.get("height")
+    if width is not None and height is not None:
+        values.update(camera_width=width, camera_height=height)
+    return values
+
+
 class SettingsDialog(QDialog):
     # 后台信号：完成摄像头枚举后回主线程刷新下拉框
     _cameras_enumerated = pyqtSignal(list)
+    _camera_probed = pyqtSignal(int, object, str)
 
     def __init__(self, config_manager, parent=None):
         super().__init__(parent)
@@ -48,12 +104,44 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("设置")
         self.setMinimumWidth(300)
         self._cameras_enumerated.connect(self._on_cameras_enumerated)
+        self._camera_probed.connect(self._on_camera_probed)
+        self._camera_probe_threads = {}
+        self._camera_probe_lock = threading.Lock()
+        self._camera_worker_cancel = threading.Event()
         self.init_ui()
+        self.camera_combo.currentIndexChanged.connect(
+            self._on_camera_selection_changed
+        )
         # 异步枚举摄像头
-        threading.Thread(
-            target=self._enumerate_cameras_worker,
+        self._camera_enumeration_thread = self._start_camera_worker(
+            self._enumerate_cameras_worker,
+            "CameraEnumerationWorker",
+        )
+
+    def _start_camera_worker(self, target, name, args=()):
+        """Start a cancellable camera helper and register it with the app owner."""
+        parent = self.parent()
+        start_owned = getattr(
+            getattr(parent, "orchestrator", None),
+            "_start_background_thread",
+            None,
+        )
+        if callable(start_owned):
+            return start_owned(target, name, args=args)
+        thread = threading.Thread(
+            target=target,
+            args=args,
+            name=name,
             daemon=True,
-        ).start()
+        )
+        thread.start()
+        return thread
+
+    def done(self, result):
+        # Native camera probes cannot be force-cancelled safely. Suppress late
+        # Qt signals; the application owner tracks and joins them on shutdown.
+        self._camera_worker_cancel.set()
+        super().done(result)
 
     def init_ui(self):
         # ---- 创建所有控件（属性名保持不变以兼容 AST 测试与 save_settings） ----
@@ -65,7 +153,10 @@ class SettingsDialog(QDialog):
             current_idx = int(current_idx) if current_idx is not None else 0
         except (TypeError, ValueError):
             current_idx = 0
-        self.camera_combo.addItem(f"摄像头 {current_idx}（当前）", current_idx)
+        self.camera_combo.addItem(
+            f"摄像头 {current_idx}（当前）",
+            {"index": current_idx, "current": True},
+        )
         self.camera_combo.addItem("正在检测其它摄像头…", -1)
         self.camera_combo.model().item(1).setEnabled(False)
 
@@ -258,8 +349,8 @@ class SettingsDialog(QDialog):
 
         # ---- 底部按钮 ----
         btn_layout = QHBoxLayout()
-        save_btn = QPushButton("保存")
-        save_btn.clicked.connect(self.save_settings)
+        self.save_btn = QPushButton("保存")
+        self.save_btn.clicked.connect(self.save_settings)
         cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
         reset_btn = QPushButton("恢复默认")
@@ -267,7 +358,7 @@ class SettingsDialog(QDialog):
         reset_btn.clicked.connect(self._reset_defaults)
         btn_layout.addWidget(reset_btn)
         btn_layout.addStretch()
-        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(self.save_btn)
         btn_layout.addWidget(cancel_btn)
 
         main_layout = QVBoxLayout()
@@ -328,33 +419,160 @@ class SettingsDialog(QDialog):
         except Exception:
             logger.exception("枚举摄像头失败")
             cams = [{"index": current_idx, "name": f"摄像头 {current_idx}（当前）"}]
-        self._cameras_enumerated.emit(cams)
+        for index, camera in enumerate(cams):
+            if camera.get("index") != current_idx:
+                continue
+            camera = dict(camera)
+            camera["current"] = True
+            saved_width = self.config.get("camera_width")
+            saved_height = self.config.get("camera_height")
+            if saved_width is not None and saved_height is not None:
+                camera["width"] = saved_width
+                camera["height"] = saved_height
+            cams[index] = camera
+        if not self._camera_worker_cancel.is_set():
+            self._cameras_enumerated.emit(cams)
 
     def _on_cameras_enumerated(self, cameras):
-        current_idx = self.camera_combo.itemData(0)
+        current_data = self.camera_combo.itemData(0)
+        current_idx = (
+            current_data.get("index")
+            if isinstance(current_data, dict)
+            else current_data
+        )
         self.camera_combo.clear()
         if not cameras:
-            self.camera_combo.addItem(f"摄像头 {current_idx}（当前）", current_idx)
+            self.camera_combo.addItem(
+                f"摄像头 {current_idx}（当前）",
+                {"index": current_idx, "current": True},
+            )
             return
         for cam in cameras:
-            self.camera_combo.addItem(cam["name"], cam["index"])
+            self.camera_combo.addItem(cam["name"], cam)
         for i in range(self.camera_combo.count()):
-            if self.camera_combo.itemData(i) == current_idx:
+            data = self.camera_combo.itemData(i)
+            index = data.get("index") if isinstance(data, dict) else data
+            if index == current_idx:
                 self.camera_combo.setCurrentIndex(i)
                 break
 
+    def _on_camera_selection_changed(self, _combo_index=None):
+        camera = self.camera_combo.currentData()
+        if not isinstance(camera, dict) or camera.get("current"):
+            self.save_btn.setEnabled(True)
+            return
+        if camera.get("width") and camera.get("height"):
+            self.save_btn.setEnabled(True)
+            return
+        if camera.get("probing"):
+            self.save_btn.setEnabled(False)
+            return
+
+        camera = dict(camera)
+        camera["probing"] = True
+        combo_index = self.camera_combo.currentIndex()
+        self.camera_combo.setItemData(combo_index, camera)
+        camera_name = camera.get("name") or f"摄像头 {camera.get('index')}"
+        self.camera_combo.setItemText(
+            combo_index,
+            f"{camera_name}（检测分辨率中…）",
+        )
+        self.save_btn.setEnabled(False)
+        camera_index = camera["index"]
+        with self._camera_probe_lock:
+            thread = self._camera_probe_threads.get(camera_index)
+            if thread is not None and thread.is_alive():
+                return
+            thread = self._start_camera_worker(
+                self._probe_camera_worker,
+                f"CameraResolutionProbe-{camera_index}",
+                args=(camera,),
+            )
+            self._camera_probe_threads[camera_index] = thread
+
+    def _probe_camera_worker(self, camera):
+        camera_index = camera["index"]
+        error = ""
+        try:
+            resolution = probe_max_resolution(
+                camera_index,
+                min_fps=self.config.get("camera_min_fps") or 20,
+                force_mjpeg=self.config.get("camera_force_mjpeg") is not False,
+                preferred_backend=camera.get("backend"),
+            )
+            if resolution is None:
+                resolution = (1280, 720)
+                error = "未能测得稳定分辨率，使用 1280×720"
+            # Windows camera release is asynchronous; settle off the UI thread.
+            self._camera_worker_cancel.wait(0.5)
+        except Exception as exc:
+            logger.exception("摄像头 %d 分辨率探测失败", camera_index)
+            resolution = (1280, 720)
+            error = str(exc)
+        finally:
+            with self._camera_probe_lock:
+                self._camera_probe_threads.pop(camera_index, None)
+        if not self._camera_worker_cancel.is_set():
+            self._camera_probed.emit(camera_index, resolution, error)
+
+    def _on_camera_probed(self, camera_index, resolution, error):
+        for combo_index in range(self.camera_combo.count()):
+            camera = self.camera_combo.itemData(combo_index)
+            if not isinstance(camera, dict) or camera.get("index") != camera_index:
+                continue
+            camera = dict(camera)
+            camera["probing"] = False
+            camera["width"], camera["height"] = resolution
+            if error:
+                camera["probe_warning"] = error
+            self.camera_combo.setItemData(combo_index, camera)
+            camera_name = camera.get("name") or f"摄像头 {camera_index}"
+            self.camera_combo.setItemText(
+                combo_index,
+                f"{camera_name} ({resolution[0]}×{resolution[1]})",
+            )
+            if combo_index == self.camera_combo.currentIndex():
+                self.save_btn.setEnabled(True)
+            return
+
     def save_settings(self):
-        new_camera_idx = self.camera_combo.currentData()
+        camera_data = self.camera_combo.currentData()
+        new_camera_idx = (
+            camera_data.get("index")
+            if isinstance(camera_data, dict)
+            else camera_data
+        )
+        camera_switched = False
+        parent = self.parent()
+        old_camera_idx = self.config.get("camera_index")
+        try:
+            old_camera_idx = int(old_camera_idx) if old_camera_idx is not None else 0
+        except (TypeError, ValueError):
+            old_camera_idx = 0
+        old_camera_info = {
+            "index": old_camera_idx,
+            "width": self.config.get("camera_width"),
+            "height": self.config.get("camera_height"),
+        }
+        old_camera = getattr(getattr(parent, "orchestrator", None), "camera", None)
+        if old_camera is not None:
+            old_camera_info.update({
+                "backend": getattr(old_camera, "_backend", None),
+                "width": getattr(old_camera, "width", None),
+                "height": getattr(old_camera, "height", None),
+            })
+
         if isinstance(new_camera_idx, int) and new_camera_idx >= 0:
-            old_camera_idx = self.config.get("camera_index")
-            try:
-                old_camera_idx = int(old_camera_idx) if old_camera_idx is not None else 0
-            except (TypeError, ValueError):
-                old_camera_idx = 0
             if new_camera_idx != old_camera_idx:
-                parent = self.parent()
+                if isinstance(camera_data, dict) and camera_data.get("probing"):
+                    QMessageBox.information(
+                        self,
+                        "摄像头检测中",
+                        "正在检测所选摄像头，请稍候再保存。",
+                    )
+                    return
                 if parent is not None and hasattr(parent, "switch_camera"):
-                    ok = parent.switch_camera(new_camera_idx)
+                    ok = parent.switch_camera(new_camera_idx, camera_data)
                     if not ok:
                         QMessageBox.warning(
                             self, "摄像头切换失败",
@@ -362,31 +580,46 @@ class SettingsDialog(QDialog):
                             "请检查设备是否被其它程序占用，或换 USB 口重试。",
                         )
                         return
-                    self.config.set("camera_index", new_camera_idx)
+                    camera_switched = True
 
-        with self.config.batch_update():
-            self.config.apply_stability_profile(self.profile_combo.currentData())
-            self.config.set("target_app", self.app_combo.currentText())
-            self.config.set("model_type", self.model_combo.currentText())
-            self.config.set("interaction_mode", self.mode_combo.currentText())
-            self.config.set("cooldown", self.cd_spin.value() / 1000.0)
-            self.config.set("mouse_sensitivity", self.sensitivity_spin.value())
-            self.config.set("edge_acceleration_enabled", self.edge_check.isChecked())
-            self.config.set("edge_acceleration_strength", self.edge_strength_spin.value())
-            self.config.set("edge_y_canvas_enabled", self.y_canvas_check.isChecked())
-            self.config.set("edge_y_canvas_deadzone_bottom", self.y_dz_bottom_spin.value())
-            self.config.set("edge_y_canvas_deadzone_top", self.y_dz_top_spin.value())
-            self.config.set("pen_width", self.pen_spin.value())
-            self.config.set("voice_assistant", self.voice_combo.currentData())
-            self.config.set("zoom_sr_engine", self.zoom_sr_combo.currentData())
-            self.config.set_mapping("SWIPE_RIGHT", self.right_combo.currentText())
-            self.config.set_mapping("SWIPE_LEFT", self.left_combo.currentText())
-            self.config.set_mapping("SWIPE_UP", self.up_combo.currentText())
-            self.config.set_mapping("SWIPE_DOWN", self.down_combo.currentText())
-            self.config.set_mapping("FIST", self.fist_combo.currentText())
-            self.config.set_mapping("THUMB_UP", self.thumb_combo.currentText())
-            self.config.set_mapping("SCISSOR", self.scissor_combo.currentText())
-            self.config.set_mapping("THUMB_DOWN", self.thumb_down_combo.currentText())
+        try:
+            with self.config.batch_update():
+                if isinstance(new_camera_idx, int) and new_camera_idx >= 0:
+                    for key, value in camera_config_values(camera_data).items():
+                        self.config.set(key, value)
+                self.config.apply_stability_profile(self.profile_combo.currentData())
+                self.config.set("target_app", self.app_combo.currentText())
+                self.config.set("model_type", self.model_combo.currentText())
+                self.config.set("interaction_mode", self.mode_combo.currentText())
+                self.config.set("cooldown", self.cd_spin.value() / 1000.0)
+                self.config.set("mouse_sensitivity", self.sensitivity_spin.value())
+                self.config.set("edge_acceleration_enabled", self.edge_check.isChecked())
+                self.config.set("edge_acceleration_strength", self.edge_strength_spin.value())
+                self.config.set("edge_y_canvas_enabled", self.y_canvas_check.isChecked())
+                self.config.set("edge_y_canvas_deadzone_bottom", self.y_dz_bottom_spin.value())
+                self.config.set("edge_y_canvas_deadzone_top", self.y_dz_top_spin.value())
+                self.config.set("pen_width", self.pen_spin.value())
+                self.config.set("voice_assistant", self.voice_combo.currentData())
+                self.config.set("zoom_sr_engine", self.zoom_sr_combo.currentData())
+                self.config.set_mapping("SWIPE_RIGHT", self.right_combo.currentText())
+                self.config.set_mapping("SWIPE_LEFT", self.left_combo.currentText())
+                self.config.set_mapping("SWIPE_UP", self.up_combo.currentText())
+                self.config.set_mapping("SWIPE_DOWN", self.down_combo.currentText())
+                self.config.set_mapping("FIST", self.fist_combo.currentText())
+                self.config.set_mapping("THUMB_UP", self.thumb_combo.currentText())
+                self.config.set_mapping("SCISSOR", self.scissor_combo.currentText())
+                self.config.set_mapping("THUMB_DOWN", self.thumb_down_combo.currentText())
+        except ConfigSaveError as exc:
+            logger.exception("设置保存失败")
+            if camera_switched and parent is not None and hasattr(parent, "switch_camera"):
+                if not parent.switch_camera(old_camera_idx, old_camera_info):
+                    logger.error("配置保存失败后，摄像头回滚到 %d 失败", old_camera_idx)
+            QMessageBox.critical(
+                self,
+                "保存设置失败",
+                f"设置未保存，已保留原配置。\n\n{exc}",
+            )
+            return
         self.accept()
 
 
@@ -432,6 +665,8 @@ class FloatingWindow(QMainWindow):
         self.orchestrator.restore_requested.connect(self._on_restore_requested)
 
         self._current_fps = 0.0
+        self._preview_ms = deque(maxlen=180)
+        self._last_preview_perf_log = time.monotonic()
         self._last_mode_text = ""   # 缓存 mode_label 文本，避免每帧 setText
         self._last_hint_text = ""   # 缓存 hint_label 文本，避免每帧 setText
         self.drag_pos = None
@@ -674,8 +909,8 @@ class FloatingWindow(QMainWindow):
         if dialog.exec():
             self.apply_config()
 
-    def switch_camera(self, new_index):
-        return self.orchestrator.switch_camera(new_index)
+    def switch_camera(self, new_index, camera_info=None):
+        return self.orchestrator.switch_camera(new_index, camera_info)
 
     def apply_config(self):
         # 显式执行 mouse.set_edge_acceleration 逻辑以顺利通过 AST 检测检查
@@ -693,20 +928,17 @@ class FloatingWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_frame_processed(self, frame, hands_landmarks, hands_gestures, current_gesture):
-        # Qt can consume OpenCV's BGR layout directly; avoid a full-frame
-        # BGR->RGB conversion on every UI update.
+        preview_started = time.perf_counter()
         h, w, ch = frame.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(
-            frame.data, w, h, bytes_per_line, QImage.Format.Format_BGR888
-        ).copy()
-
         self.video_label.setPixmap(
-            QPixmap.fromImage(qt_image).scaled(
+            _make_preview_pixmap(
+                frame,
                 self.video_label.width(),
                 self.video_label.height(),
-                Qt.AspectRatioMode.KeepAspectRatio,
             )
+        )
+        self._record_preview_performance(
+            (time.perf_counter() - preview_started) * 1000.0
         )
         # 模式标签上直接显示实时帧率（_current_fps 由 fps_updated 每秒刷新），便于现场观察卡顿
         # 仅在文本变化时 setText，避免每帧触发 Qt 重绘
@@ -727,6 +959,30 @@ class FloatingWindow(QMainWindow):
             self.res_label.adjustSize()
             self.res_label.show()
             self.res_label.raise_()
+
+    def _record_preview_performance(self, elapsed_ms):
+        self._preview_ms.append(float(elapsed_ms))
+        now = time.monotonic()
+        if now - self._last_preview_perf_log < 5.0:
+            return
+        self._last_preview_perf_log = now
+        values = sorted(self._preview_ms)
+        if not values:
+            return
+
+        def percentile(fraction):
+            index = min(
+                len(values) - 1,
+                int(round((len(values) - 1) * fraction)),
+            )
+            return values[index]
+
+        logger.info(
+            "[PERF UI] preview p50/p95=%.2f/%.2fms | samples=%d",
+            percentile(0.50),
+            percentile(0.95),
+            len(values),
+        )
 
     def _on_voice_status_updated(self, text):
         if not hasattr(self, "voice_label") or self.voice_label is None:
@@ -1098,7 +1354,7 @@ class FloatingWindow(QMainWindow):
 
     def closeEvent(self, event):
         # 优雅释放后台全部服务
-        self.orchestrator.close()
+        self._shutdown_incomplete = self.orchestrator.close() is False
 
         # 释放 UI 组件
         self.toolbar.close()
@@ -1114,6 +1370,38 @@ def is_admin():
         return ctypes.windll.shell32.IsUserAnAdmin()
     except Exception:
         return False
+
+
+def _request_admin_relaunch(argv=None):
+    """Request an explicit elevated relaunch and report whether it started."""
+    import ctypes
+
+    argv = list(sys.argv if argv is None else argv)
+    if getattr(sys, "frozen", False):
+        executable = sys.executable
+        relaunch_args = argv[1:]
+    else:
+        executable = sys.executable
+        relaunch_args = [os.path.abspath(__file__), *argv[1:]]
+    try:
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            executable,
+            subprocess.list2cmdline(relaunch_args),
+            None,
+            1,
+        )
+    except Exception as exc:
+        logger.warning("提权请求异常: %s，将以普通权限启动。", exc)
+        return False
+    if int(result) <= 32:
+        logger.warning(
+            "提权请求被拒绝或失败（ShellExecuteW=%s），将以普通权限启动。",
+            result,
+        )
+        return False
+    return True
 
 
 def main():
@@ -1163,24 +1451,11 @@ def main():
             return 3
         return 0
 
-    if not is_admin():
-        import ctypes
-        script_args = sys.argv
-        if not getattr(sys, 'frozen', False):
-            script_args = [os.path.abspath(__file__)] + sys.argv[1:]
-        try:
-            # "runas" 触发 UAC 提权请求
-            ctypes.windll.shell32.ShellExecuteW(
-                None,
-                "runas",
-                sys.executable,
-                " ".join(f'"{arg}"' for arg in script_args),
-                None,
-                1,
-            )
+    # 最小权限启动是默认行为。只有显式传入 --elevate 时才请求 UAC；
+    # 用户拒绝或 ShellExecuteW 返回错误码时继续以普通权限运行。
+    if "--elevate" in sys.argv and not is_admin():
+        if _request_admin_relaunch():
             return 0
-        except Exception as e:
-            logger.warning("提权请求被拒绝或失败: %s，将以普通权限启动。", e)
 
     # 统一日志配置：所有模块日志写入 gesture.log（在崩溃捕获之前，确保 critical 也能落盘）
     from log_config import setup_logging
@@ -1195,7 +1470,15 @@ def main():
     app = QApplication(sys.argv)
     window = FloatingWindow()
     window.show()
-    return app.exec()
+    exit_code = app.exec()
+    if getattr(window, "_shutdown_incomplete", False) is True:
+        # A native camera/ASR/codec call ignored its cooperative stop deadline.
+        # Those resources were deliberately not released concurrently. Let the
+        # OS reclaim the process instead of hanging or racing a live native call.
+        logger.critical("原生后台任务未能按时退出，执行受控强制进程结束")
+        logging.shutdown()
+        os._exit(exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -1,22 +1,21 @@
 # AirControl 1.4 release validation
 
-Validation date: 2026-07-18
+Validation date: 2026-07-24
 
 ## Automated gates
 
 | Gate | Result |
 | --- | --- |
-| Python 3.10.7 | compile + Ruff + 353 tests passed; app coverage 40% |
-| Python 3.12.1 | compile + Ruff + 353 tests passed; app coverage 40% |
+| Python 3.10 | 429 tests + 179 subtests passed; `pip check` passed |
+| Python 3.12.1 | compile + Ruff + 429 tests + 179 subtests passed; app coverage 45% |
 | Dependency integrity | `pip check` passed on Python 3.10 and 3.12 |
-| Windows package | PyInstaller 6.21.0 build passed on Python 3.12 |
+| Windows package | PyInstaller 6.21.0 development build passed on Python 3.12 |
 | Package metadata | FileVersion and ProductVersion are both `1.4.0` |
-| Package self-test | hand tracker and offline voice models initialized; exit code 0 |
-| GUI startup smoke | remained alive for 10 seconds; camera 0 opened through DSHOW/MJPG at 1920x1080 and 24 fps; no crash marker |
-| v1.3.5 config compatibility | all 64 shipped legacy keys merged in memory with zero schema normalization warnings |
+| Package self-test | exit code 0; bundled model manifest present |
+| Model release gate | `python build.py --release` correctly refuses the unapproved YOLO model |
 
-Local candidate EXE: 9,623,573 bytes, SHA-256
-`6CE90D23D9A45E10B94F78099285018FE83AF237018A9C6731887B940B01C559`.
+Local development EXE: 9,644,648 bytes, SHA-256
+`009C331A5B5B927038515C99E56F915575085122400AAC591E7A80164FCD44C9`.
 CI now repeats the package build, version-resource check, and packaged self-test
 on the Python 3.12 matrix job.
 
@@ -32,10 +31,22 @@ click/drag ground truth.
 | `20260705_095523` | 1079 / 1057 | 4 → 2 | 1 | 0 | not evaluable |
 | `20260705_174137` | 1583 / 1455 | 22 → 18 | 9 | 6 | 43.3px / 105.4px |
 
-The drift values are source-video pixels, not screen cursor error. Until click
-and intentional-drag intervals are labeled, `pinch_freeze_enabled`,
-`pinch_hysteresis_enabled`, and `thumb_perp_ratio_enabled` remain false by
-default.
+The drift values are source-video pixels, not screen cursor error. A later
+14-event ground-truth replay (`20260722_164055`) showed that the new
+`pinch_exit_hysteresis_enabled` preserves recall (64.3%) and onset P95
+(1402 ms) while reducing false alarms 9→4, so it is enabled by default.
+`pinch_hysteresis_enabled` (the older dual ENTER/EXIT mode),
+`pinch_freeze_enabled`, and `thumb_perp_ratio_enabled` remain false by default.
+
+## Model licence release blocker
+
+The bundled `models/hand_yolov8n.onnx` reports an AGPL-3.0 licence string in
+its embedded metadata, but no source or redistribution approval is recorded.
+`python build.py` and `python build.py --release` intentionally fail until
+`models/model_manifest.json` is completed and approved. See
+[`MODEL_PROVENANCE.md`](MODEL_PROVENANCE.md). A successful developer
+build created with `python build.py --development` and its self-test are not
+public-release approval.
 
 ## Local experimental tag record
 

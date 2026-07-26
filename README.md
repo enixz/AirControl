@@ -305,6 +305,10 @@ AirControl 集成双引擎语音系统：
 | `hand_detection_confidence` | 手部检测阈值，远距离调低（0.4-0.6） | 0.4 |
 | `hand_presence_confidence` | 手在画面中的判定阈值 | 0.5 |
 | `hand_tracking_confidence` | 帧间跟踪阈值 | 0.5 |
+| `pinch_exit_hysteresis_enabled` | 保留旧捏合进入阈值 0.35，已捏合时以 0.40 才退出；带真值 A/B 未增加漏检/延迟且误报更低 | true |
+| `pinch_hysteresis_enabled` | 旧版双阈值（进入 0.30 / 退出 0.40）；会增加漏检，继续默认关闭 | false |
+| `engine_auto_switch` | 仅以 MediaPipe 为近距基线时启用：无手后由后台预热的 YOLO 捕获，稳定单手后交回 MediaPipe | false |
+| `yolo_max_hands` | YOLO 捕获交给下游的最高置信候选数；远距单主控手默认 1 | 1 |
 | `pen_width_auto_scale` | 笔触粗细随手距自动缩放（关闭则始终同一粗细，光标灵敏度仍随手大小自适应） | false |
 | `mode_switch_hold_sec` | 🤟 切模式手势需保持的时长（秒） | 1.0 |
 | `mode_switch_vote_ratio` | 保持窗口内 🤟 标签帧占比阈值，远距离误检多可适当调低 | 0.6 |
@@ -393,10 +397,14 @@ python -m pytest tests/test_edge_map.py
 项目已配置 PyInstaller，可一键打包为 Windows 可执行文件：
 
 ```bash
-python build.py
+python build.py --development
 ```
 
 打包后的文件将输出到 `dist/` 目录，包含所有依赖和模型文件。
+`--development` 产物仅用于本地开发验证，不得分发。`python build.py` 与
+`python build.py --release` 都会默认执行发布许可门禁。
+当前捆绑 YOLO 模型的来源与分发许可尚未完成记录，因此发布构建会按设计拒绝执行，
+详见 [模型来源与发布门禁](MODEL_PROVENANCE.md)。
 发布前可运行无摄像头/麦克风自检，退出码 `0` 表示模型与原生运行库加载成功：
 
 ```powershell
@@ -454,7 +462,12 @@ python -m pytest tests/
 
 ## 📄 许可证
 
-本项目采用 [Apache License 2.0](LICENSE) 许可证。
+本项目**代码**采用 [Apache License 2.0](LICENSE) 许可证。第三方模型不自动适用
+该声明；当前捆绑的 `hand_yolov8n.onnx` 在嵌入元数据中标为 AGPL-3.0，且来源与再分发
+授权尚未记录，因此不得据此宣称安装包可按 Apache-2.0 公开分发。详见
+[模型来源与发布门禁](MODEL_PROVENANCE.md)及
+[Ultralytics 官方许可证说明](https://www.ultralytics.com/license)。仅限本机开发、测试和
+使用不受本项目发布门禁影响。
 
 ```
 Copyright 2026 AirControl
