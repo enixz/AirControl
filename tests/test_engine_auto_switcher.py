@@ -594,5 +594,50 @@ class TestTrackerHandoffHelpers(unittest.TestCase):
         bare._sr.reset_tier.assert_not_called()
 
 
+class TestCaptureEngineSelection(unittest.TestCase):
+    """CAPTURE 态捕获引擎可选：engine_auto_switch_capture_engine 热切换。
+
+    覆盖 _capture_engine() 的默认/显式/非法值回退，以及它对
+    _yolo_signature() 与 _apply_fsm_state(CAPTURE) 的贯穿。
+    """
+
+    def _orch(self, capture_engine):
+        orch = _make_orchestrator()
+        orch.config = MagicMock()
+        orch.config.get = lambda key, default=None: (
+            capture_engine if key == "engine_auto_switch_capture_engine" else default
+        )
+        orch._request_tracker_rebuild = MagicMock()
+        return orch
+
+    def test_default_is_hagrid_yolo(self):
+        orch = self._orch(None)  # config.get 落默认
+        self.assertEqual(orch._capture_engine(), "hagrid_yolo")
+        self.assertEqual(orch._yolo_signature()[0], "hagrid_yolo")
+
+    def test_explicit_person_pose(self):
+        orch = self._orch("person_pose_hand")
+        self.assertEqual(orch._capture_engine(), "person_pose_hand")
+        self.assertEqual(orch._yolo_signature()[0], "person_pose_hand")
+
+    def test_invalid_value_falls_back(self):
+        orch = self._orch("not_an_engine")
+        self.assertEqual(orch._capture_engine(), "hagrid_yolo")
+
+    def test_apply_fsm_state_uses_capture_engine(self):
+        orch = self._orch("person_pose_hand")
+        orch._tracker_config_signature = _SIG_MP  # 与目标不同 → 走重建路径
+        orch._tracker_signature = MagicMock(return_value=_SIG_YOLO)
+        orch._apply_fsm_state(STATE_CAPTURE)
+        self.assertEqual(orch._engine_override, "person_pose_hand")
+        self.assertFalse(orch._fsm_far_track_active)
+
+    def test_capture_status_text_reflects_engine(self):
+        orch = self._orch("person_pose_hand")
+        self.assertIn("person_pose_hand", orch._capture_status_text())
+        orch2 = self._orch(None)
+        self.assertIn("hagrid_yolo", orch2._capture_status_text())
+
+
 if __name__ == "__main__":
     unittest.main()

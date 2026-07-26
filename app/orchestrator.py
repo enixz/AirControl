@@ -18,6 +18,10 @@ from services.engine_auto_switcher import (
     STATE_FAR_TRACK,
     EngineAutoSwitcher,
 )
+
+# 远距 CAPTURE 态可选捕获引擎（在 ENGINE_HAGRID_YOLO 基础上扩展）
+ENGINE_PERSON_POSE = "person_pose_hand"
+_CAPTURE_ENGINES = (ENGINE_HAGRID_YOLO, ENGINE_PERSON_POSE)
 from services.geometric_classifier import WeightedVoteClassifier
 from services.gesture_recognizer import GestureRecognizer
 from services.hand_tracker_factory import create_hand_tracker
@@ -374,8 +378,8 @@ class AirControlOrchestrator(QObject):
                 merged.update(config_overrides)
                 config = merged
         max_num_hands = 2
-        if signature[0] == ENGINE_HAGRID_YOLO:
-            # YOLO 远距捕获只服务一个主控手；多手在该场景通常来自背景误检，
+        if signature[0] in (ENGINE_HAGRID_YOLO, ENGINE_PERSON_POSE):
+            # YOLO/姿态 远距捕获只服务一个主控手；多手在该场景通常来自背景误检，
             # 既拖慢逐 crop Landmarker，又会阻塞 CAPTURE 的稳定单手判据。
             max_num_hands = int(config.get("yolo_max_hands", 1))
         return create_hand_tracker(
@@ -406,10 +410,20 @@ class AirControlOrchestrator(QObject):
             cooldown_sec=self.config.get("engine_auto_switch_cooldown_sec", 5.0),
         )
 
+    def _capture_engine(self):
+        """CAPTURE 态使用的捕获引擎（config 热切换，默认 hagrid_yolo）。
+
+        可配 engine_auto_switch_capture_engine=person_pose_hand 换成
+        框人→姿态→手腕的远距/侧位捕获引擎。非法值回退 hagrid_yolo。
+        """
+        eng = str(self.config.get(
+            "engine_auto_switch_capture_engine", ENGINE_HAGRID_YOLO)).strip().lower()
+        return eng if eng in _CAPTURE_ENGINES else ENGINE_HAGRID_YOLO
+
     def _yolo_signature(self):
-        """返回与当前配置匹配、但固定使用 hagrid_yolo 的 tracker 签名。"""
+        """返回与当前配置匹配、但固定使用 CAPTURE 捕获引擎的 tracker 签名。"""
         signature = self._tracker_signature()
-        return (ENGINE_HAGRID_YOLO, *signature[1:])
+        return (self._capture_engine(), *signature[1:])
 
     @staticmethod
     def _close_tracker_safely(tracker, context):
@@ -510,16 +524,20 @@ class AirControlOrchestrator(QObject):
         logger.info("引擎自动切换: 目标态 %s（%s）", target, switcher.last_reason)
         self._apply_fsm_state(target)
 
-    # 三态 → 用户可见状态提示（中文）
+    # 三态 → 用户可见状态提示（中文）。CAPTURE 文案随捕获引擎动态生成（见 _capture_status_text）。
     _FSM_STATE_STATUS = {
-        STATE_CAPTURE: "远距捕获中：hagrid_yolo 全帧找手",
         STATE_FAR_TRACK: "远距跟踪中：ZOOM 已接管",
     }
+
+    def _capture_status_text(self):
+        if self._capture_engine() == ENGINE_PERSON_POSE:
+            return "远距捕获中：person_pose_hand 框人拿手腕找手"
+        return "远距捕获中：hagrid_yolo 全帧找手"
 
     def _apply_fsm_state(self, target):
         """执行 FSM 目标态：CAPTURE/FAR_TRACK 走引擎重建，NEAR 撤覆盖回配置档。"""
         if target == STATE_CAPTURE:
-            self._engine_override = ENGINE_HAGRID_YOLO
+            self._engine_override = self._capture_engine()
             self._fsm_far_track_active = False
             self._request_fsm_rebuild(seed=False)
         elif target == STATE_FAR_TRACK:
@@ -557,7 +575,7 @@ class AirControlOrchestrator(QObject):
         self._pending_far_track_seed = bool(seed)
         self._engine_switch_pending = True
         prepared = None
-        if signature[0] == ENGINE_HAGRID_YOLO:
+        if signature[0] in _CAPTURE_ENGINES:
             prepared = self._take_warmed_yolo_tracker(signature)
         if prepared is not None:
             self._request_tracker_rebuild(
@@ -565,9 +583,12 @@ class AirControlOrchestrator(QObject):
             )
         else:
             self._request_tracker_rebuild(signature, config_overrides=overrides)
-        self.status_text = self._FSM_STATE_STATUS.get(
-            self._engine_switcher.state, "检测引擎自动切换中"
-        )
+        if self._engine_switcher.state == STATE_CAPTURE:
+            self.status_text = self._capture_status_text()
+        else:
+            self.status_text = self._FSM_STATE_STATUS.get(
+                self._engine_switcher.state, "检测引擎自动切换中"
+            )
         self.status_color = (0, 255, 255)
         self.status_timer = time.time()
         self.status_updated.emit(self.status_text, self.status_color)

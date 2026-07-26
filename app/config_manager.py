@@ -232,6 +232,9 @@ _CONFIG_SCHEMA = {
     "person_pose_sr_trigger": (int, _is_int_in(32, 384), 96),
     # 是否对小手做超分（False=纯插值放大，做 SR 开关的 A/B 对照）。
     "person_pose_sr_enabled": (bool, _is_bool, True),
+    # 远距 CAPTURE 态使用的捕获引擎：hagrid_yolo（默认）或 person_pose_hand（框人→姿态拿手腕）。
+    "engine_auto_switch_capture_engine": (
+        str, lambda v: v in ("hagrid_yolo", "person_pose_hand"), "hagrid_yolo"),
     # 远距离 ZOOM 鲁棒性：连续丢帧多少帧才断 ZOOM；人脸检测短边分辨率（越大越能找回远处的手）。
     "zoom_miss_frames": (int, _is_int_in(3, 60), 10),
     "face_detect_short": (int, _is_int_in(240, 1280), 400),
