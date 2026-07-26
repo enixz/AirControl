@@ -36,3 +36,25 @@ Before changing the approval flag, retain a review reference that identifies
 the model source, its licence, and the release channel/terms that were approved.
 The gate currently covers this known YOLO asset only; it is not a substitute for
 an audit of every third-party dependency and model in a release.
+
+## `models/yolov8n-pose.onnx` (local experiment only, NOT in git)
+
+Used by the experimental `person_pose_hand` engine
+(`app/services/person_pose_hand_tracker.py`) for body-pose wrist anchoring.
+
+| Field | Current evidence |
+| --- | --- |
+| SHA-256 | `09f7a631a4c0e1daa10d2c33a2d78346bbb1db016fbe899cf7eb55dcc4044611` |
+| Size | 13,514,381 bytes |
+| ONNX metadata | Ultralytics YOLOv8n, pose task, 640×640 input, output `[1, 56, 8400]` |
+| Embedded license string | `AGPL-3.0 License (https://ultralytics.com/license)` |
+| Source URL | <https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n-pose.pt> |
+| Export | `yolo export model=yolov8n-pose.pt format=onnx opset=13 simplify imgsz=640` (ultralytics 8.4.92) |
+| Redistribution approval | not recorded |
+
+Same Ultralytics AGPL situation as the bundled hand detector, **except this
+file is intentionally excluded from version control** (`.gitignore`) and is
+**not** packaged into any build. It is downloaded/exported locally on demand
+for offline A/B experiments. It must **not** be added to a release artifact or
+to git without the same provenance review and approval gate as
+`hand_yolov8n.onnx`. Local-only development and A/B evaluation are not blocked.

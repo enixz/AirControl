@@ -58,6 +58,10 @@ models/sense-voice/
 # HaGRID YOLO 手部检测器：hand_yolov8n.onnx（12MB）已入仓库，供打包与 CI 冒烟；
 # .pt 权重仅重新导出 ONNX 时需要，仍不入库。
 models/hand_yolov8n.pt
+# person_pose_hand 引擎的人体姿态模型：yolov8n-pose.onnx（13MB）不入 git，
+# 由 MODEL_PROVENANCE.md 指引按需导出（Ultralytics AGPL，仅本地实验用）。
+models/yolov8n-pose.onnx
+models/yolov8s-pose.onnx
 
 # Claude Code 工作目录（包含 worktree、隔离副本等内部产物）
 .claude/

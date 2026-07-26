@@ -114,7 +114,7 @@ _CONFIG_SCHEMA = {
         lambda v: v in _STABILITY_PROFILE_PRESETS,
         "stable",
     ),
-    "detection_engine": (str, lambda v: v in ("mediapipe", "hagrid_yolo"), "mediapipe"),
+    "detection_engine": (str, lambda v: v in ("mediapipe", "hagrid_yolo", "person_pose_hand"), "mediapipe"),
     # 远距引擎三态自动切换（默认关闭，不打扰现有用户），闭环：
     #   NEAR(mediapipe 裸检) --连续无手--> CAPTURE(hagrid_yolo 全帧捕获)
     #   CAPTURE --连续稳定单手--> FAR_TRACK(mediapipe + ZOOM 运行时覆盖)
@@ -225,6 +225,13 @@ _CONFIG_SCHEMA = {
     # 远距 CAPTURE 面向单个主控手。限制 YOLO 只交给下游一个最高分候选，
     # 避免背景误检形成"多手"并阻塞自动切换；MediaPipe 仍支持双手。
     "yolo_max_hands": (int, _is_int_in(1, 2), 1),
+    # === person_pose_hand 引擎（框人→姿态拿手腕→框手，远距/侧位实验）===
+    # yolov8-pose 人体检测置信度；越低越远也能框到人，但误检增多。
+    "person_pose_confidence": ((int, float), _is_num_in(0.05, 0.95), 0.25),
+    # 手框短边低于此像素才触发超分放大（更远更小的手才需要）。
+    "person_pose_sr_trigger": (int, _is_int_in(32, 384), 96),
+    # 是否对小手做超分（False=纯插值放大，做 SR 开关的 A/B 对照）。
+    "person_pose_sr_enabled": (bool, _is_bool, True),
     # 远距离 ZOOM 鲁棒性：连续丢帧多少帧才断 ZOOM；人脸检测短边分辨率（越大越能找回远处的手）。
     "zoom_miss_frames": (int, _is_int_in(3, 60), 10),
     "face_detect_short": (int, _is_int_in(240, 1280), 400),
