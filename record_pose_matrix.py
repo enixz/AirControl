@@ -167,7 +167,18 @@ class PoseMatrixRecorder:
 
         win = "Pose Matrix Recorder"
         cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-        logger.info("就绪。共 %d 段。空格=开始/停止  N=下一段  B=重录  C=切换摄像头  Q=退出", len(self.segments))
+
+        # 鼠标控制（3米外够不着键盘时用）：左键=开始/停止，右键=下一段
+        self._mouse_cmd = None
+
+        def _on_mouse(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                self._mouse_cmd = "toggle"
+            elif event == cv2.EVENT_RBUTTONDOWN:
+                self._mouse_cmd = "next"
+
+        cv2.setMouseCallback(win, _on_mouse)
+        logger.info("就绪。共 %d 段。鼠标: 左键=开始/停止 右键=下一段 ｜ 键盘: 空格/N/B/C/Q", len(self.segments))
         logger.info("检测到摄像头: %s（当前 %d，按 C 切换）", cams, self.camera_index)
 
         while self.idx < len(self.segments):
@@ -202,16 +213,23 @@ class PoseMatrixRecorder:
             cv2.imshow(win, disp)
 
             key = cv2.waitKey(1) & 0xFF
+            # 鼠标命令优先（转成一个统一命令再处理）
+            cmd = None
+            if self._mouse_cmd == "toggle":
+                cmd = "toggle"
+            elif self._mouse_cmd == "next":
+                cmd = "next"
+            self._mouse_cmd = None
             if key in (27, ord("q")):
                 break
-            elif key == ord(" "):
+            elif key == ord(" ") or cmd == "toggle":
                 if self.recording:
                     self.stop_segment()
                     if not self.next_segment():
                         break
                 else:
                     self.start_segment()
-            elif key == ord("n"):
+            elif key == ord("n") or cmd == "next":
                 if not self.next_segment():
                     break
             elif key == ord("b"):
