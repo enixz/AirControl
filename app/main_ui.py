@@ -1423,8 +1423,6 @@ def main():
             ),
             resource_path("models", "kws-zh-wenetspeech", "tokens.txt"),
             resource_path("app", "voice_keywords", "keywords.txt"),
-            # hagrid_yolo 引擎自检：模型随安装包分发，缺失说明打包遗漏。
-            resource_path("models", "hand_yolov8n.onnx"),
         ]
         missing = [path for path in required_files if not os.path.isfile(path)]
         if missing:
@@ -1438,9 +1436,17 @@ def main():
             tracker = HandTracker(static_image_mode=True, config=config)
             tracker.close()
 
-            # hagrid_yolo 引擎自检：验证 ONNX 模型可解析、推理会话可创建。
-            yolo_tracker = create_hand_tracker(engine="hagrid_yolo", config=config)
-            yolo_tracker.close()
+            # hagrid_yolo 引擎自检：模型为可选下载，缺失时跳过而非失败。
+            yolo_model = resource_path("models", "hand_yolov8n.onnx")
+            if os.path.isfile(yolo_model):
+                yolo_tracker = create_hand_tracker(engine="hagrid_yolo", config=config)
+                yolo_tracker.close()
+            else:
+                logger.info(
+                    "自检: hand_yolov8n.onnx 未安装，hagrid_yolo 引擎"
+                    "及 engine_auto_switch 远距自动切换不可用。"
+                    "如需使用，请参考 README 下载模型。"
+                )
 
             voice = VoiceCommandService(config)
             voice._current_mode = config.get("interaction_mode", "mouse")

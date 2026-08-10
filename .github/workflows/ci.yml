@@ -47,23 +47,21 @@ jobs:
           name: coverage-report
           path: coverage.xml
 
-      - name: Verify release gate rejects unapproved model
+      - name: Verify release build excludes AGPL model
         if: matrix.python-version == '3.12'
         shell: pwsh
         run: |
           python build.py --release
-          $releaseExitCode = $LASTEXITCODE
-          if ($releaseExitCode -eq 0) {
-            throw "Release build unexpectedly bypassed the model provenance gate"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release build failed with exit code $LASTEXITCODE"
           }
-          Write-Host "Release gate correctly rejected the unapproved model"
-          $global:LASTEXITCODE = 0
+          Write-Host "Release build succeeded: AGPL model correctly excluded"
 
-      - name: Build non-distributable Windows development bundle
+      - name: Build Windows release bundle
         if: matrix.python-version == '3.12'
         run: python build.py --development
 
-      - name: Verify packaged development bundle
+      - name: Verify packaged bundle
         if: matrix.python-version == '3.12'
         shell: pwsh
         run: |

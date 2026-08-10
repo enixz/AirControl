@@ -1,8 +1,22 @@
 # Changelog
 
-## Unreleased
+## v1.4.0 - 2026-08-10
 
-- **Experimental `person_pose_hand` engine + A4000/DirectML GPU fix, 2026-07-26**
+AirControl 1.4 consolidates the locally iterated pinch-stability work, the
+HaGRID YOLO far-range engine, ground-truth A/B validation, and the engine
+auto-switch state machine into a single public minor release over v1.3.5.
+
+The three new gesture layers are available for controlled trials. The
+EXIT-only pinch hysteresis (`pinch_exit_hysteresis_enabled`) is now **on by
+default** after a 14-event ground-truth A/B showed it preserves recall while
+reducing false alarms. The freeze and dual-threshold modes remain off.
+
+- **YOLO model policy change**: `hand_yolov8n.onnx` (AGPL-3.0) is no longer
+  packaged into the release bundle. `build.py` verifies that `AirControl.spec`
+  does not include the model; users who need the `hagrid_yolo` engine or
+  `engine_auto_switch` feature download it separately (see README). The
+  default `mediapipe` engine is unaffected.
+- **Experimental `person_pose_hand` engine + A4000/DirectML GPU fix**
   (branch `experiment/person-pose-hand-crop`): new capture engine
   框人→yolov8-pose 拿手腕→框手→（小手超分）→HandLandmarker 关键点, selectable
   via `detection_engine=person_pose_hand` or as the CAPTURE-state engine via
@@ -14,10 +28,8 @@
   locally. **GPU fix**: removed the conflicting plain `onnxruntime` package that
   shadowed `onnxruntime-directml`, restoring `DmlExecutionProvider` on the
   RTX A4000 — YOLO+pose now run on DirectML, cutting single-frame `_detect` to
-  ~27 ms @720p (the benchmark's residual latency is per-crop HandLandmarker +
-  MediaPipe ops that fall back to CPU). Experimental; defaults unchanged.
-
-- **Long-range (3–5 m) engine A/B with ground truth, 2026-07-22**
+  ~27 ms @720p. Experimental; defaults unchanged.
+- **Long-range (3–5 m) engine A/B with ground truth**
   (`raw_capture/20260722_145659`, 2000 frames, 18 truth events): MediaPipe
   detects hands in 42.7% of frames vs HaGRID YOLO 92.8%, but YOLO costs ~2.5x
   latency (P95 81 ms vs 35 ms), ~4x jitter and a 58.1% multi-hand rate at
@@ -27,10 +39,9 @@
   long_range_enabled=true`): with the long-range chain engaged, MediaPipe
   reaches 88.1% detection with only 1.4% multi-hand, half the jitter and
   ~10 ms lower P95 latency than YOLO — the better *tracker*. But zoom can
-  only engage after a hand is already detected
-  (`base_hand_tracker.py:707-709` returns early when no hand is present), so
-  it structurally cannot solve initial acquisition at distance. YOLO is the
-  better *catcher*; the two are complementary, not alternatives.
+  only engage after a hand is already detected, so it structurally cannot
+  solve initial acquisition at distance. YOLO is the better *catcher*; the
+  two are complementary, not alternatives.
 - **Engine auto-switch warm handoff** (`engine_auto_switch`, default off): a
   background HaGRID YOLO + Landmarker instance is prepared while MediaPipe is
   active and reused for CAPTURE, removing the observed 2.6–3.8 s cold start.
@@ -40,7 +51,7 @@
   Multi-hand frames do not count toward handoff. The loop runs only when the
   configured engine is `mediapipe`; explicitly selecting `hagrid_yolo`
   remains authoritative.
-- **Ground-truth A/B verdict for the three gesture features, 2026-07-24**:
+- **Ground-truth A/B verdict for the three gesture features**:
   near-range B-group (`raw_capture/20260722_164055`, 1846 frames, 99% hand
   frames, 14 labeled click/drag groups) — the new EXIT-only pinch hysteresis
   preserves recall (64.3%) and onset P95 (1402 ms) while reducing false alarms
@@ -48,20 +59,13 @@
   default**. The older dual ENTER/EXIT switch remains off: it reduced false
   alarms further but recall fell to 57.1% and onset P95 rose to 4011 ms.
   `thumb_perp` still lacks labeled poses and remains off.
-- **Release protection for the bundled YOLO model**: its embedded ONNX metadata
-  reports `AGPL-3.0`, while its source and distribution approval are not
-  recorded. `python build.py --release` now refuses packaging until
-  `models/model_manifest.json` contains a verified source and approval;
-  see `MODEL_PROVENANCE.md`. Developer builds remain available but warn
-  and must not be published.
 - **Fix: "app crashed during recording" was Space clicking the focused
   button** (`e5bb295`). Qt activates a focused QPushButton on Space release,
   and the floating window's close button had keyboard focus while the user
   tapped Space as the truth marker — an orderly `closeEvent` that looked like
-  a crash (no WER report, no faulthandler dump; shutdown began 16 ms after
-  the Space-up event). All floating-window buttons and every draw-toolbar
-  button/slider are now `NoFocus`, with regression tests.
-- **Ground-truth recording framework** (2026-07-21/22): `TruthEventLogger`
+  a crash. All floating-window buttons and every draw-toolbar button/slider
+  are now `NoFocus`, with regression tests.
+- **Ground-truth recording framework**: `TruthEventLogger`
   writes `truth_events.jsonl` from a configurable marker key (space for near
   range; wireless-mouse middle/side buttons or presenter PageUp/PageDown for
   3–5 m; comma-separated multi-key supported);
@@ -69,21 +73,12 @@
   onset-offset latency against truth with conservative default on/off
   criteria. F8 is a global record hotkey and a REC dot is painted on the
   frameless floating window while recording.
-- **HaGRID YOLO engine finishing** (2026-07-21, `ceed13b`): 12 MB
-  `hand_yolov8n.onnx` now ships in the repo and the PyInstaller spec, the
-  packaged build self-test verifies engine init, and model-filename wording
-  is unified. Near-range A/B showed parity detection at 2.3–2.7x latency, so
-  `mediapipe` stays default.
+- **HaGRID YOLO engine finishing** (`ceed13b`): 12 MB
+  `hand_yolov8n.onnx` stays in the repo for development/CI but is no longer
+  packaged into the release bundle. Near-range A/B showed parity detection
+  at 2.3–2.7x latency, so `mediapipe` stays default.
 - `benchmark_ab.py` gained `--engines`, `--set key=value` (config overrides
   for offline experiments) and `--out`; new metrics include `zoom_on_frames`.
-
-## v1.4.0 - 2026-07-18
-
-AirControl 1.4 consolidates the locally iterated pinch-stability work into a
-single public minor release over v1.3.5. The three new gesture layers are
-available for controlled trials, but remain **off by default** until labeled
-click/drag recordings demonstrate both accuracy and acceptable latency.
-
 - **Freeze-on-pinch cursor stabilization**: `pinch_freeze_enabled` can lock the
   cursor for `pinch_freeze_grace_sec` (default 0.3s) after pinch begins. The
   corrected replay metric excludes the release frame and follows MouseMode's

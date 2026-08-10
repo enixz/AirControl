@@ -61,6 +61,10 @@ _MIN_HAND_BOX = 24
 _MAX_HAND_BOX = 320
 # 手框短边低于此像素才触发超分（更远更小的手才需要放大）
 _DEFAULT_SR_TRIGGER = 96
+# 小手提点前的上下文外扩系数：以手腕为中心的原始手框只包到腕/掌根，
+# HandLandmarker 需要看到整只手+周边上下文才认得（尤其 135° 背侧位）。
+# 与父类 _CROP_PADDING 同义；实测 135°远距 检出 48% → 100%（padding≥1.0）。
+_HAND_CROP_CONTEXT = 1.5
 
 
 class PersonPoseHandTracker(HagridYoloHandTracker):
@@ -77,6 +81,10 @@ class PersonPoseHandTracker(HagridYoloHandTracker):
         self._pose_conf = float(config.get("person_pose_confidence", _DEFAULT_POSE_CONF))
         self._sr_trigger = int(config.get("person_pose_sr_trigger", _DEFAULT_SR_TRIGGER))
         self._sr_enabled = bool(config.get("person_pose_sr_enabled", True))
+        # 本引擎的小手放大默认用普通插值而非 Real-ESRGAN：实测在外扩上下文的
+        # crop 上，SR 与插值检出率完全一致（090/135/180/000 全平），但每帧多花
+        # ~54ms。仅在 config 显式指定 person_pose_sr_engine 时才用 SR。
+        self._sr_engine = config.get("person_pose_sr_engine", "none")
         self._pose_session = None
         self._pose_input_name = None
         try:
@@ -181,8 +189,18 @@ class PersonPoseHandTracker(HagridYoloHandTracker):
                 self._append_detection(sub, hands_landmarks, hands_gestures, raw_data)
                 continue
 
-            # 小手：crop → 超分/放大到 target → 在大图上提点 → 坐标映回原帧
-            crop = frame[y0:y1, x0:x1]
+            # 小手：以手腕框为中心外扩上下文 → crop → 超分/放大到 target →
+            # 在大图上提点 → 坐标映回原帧。
+            # ⚠️ 必须先外扩上下文再放大：手腕框只包到腕/掌根，直接放大喂给
+            # HandLandmarker 时它看不到整只手，135°背侧位检出会从 100% 掉到 48%。
+            cx = (x0 + x1) / 2.0
+            cy = (y0 + y1) / 2.0
+            half = max(x1 - x0, y1 - y0) * _HAND_CROP_CONTEXT / 2.0
+            cx0 = int(max(0, cx - half))
+            cy0 = int(max(0, cy - half))
+            cx1 = int(min(frame_w, cx + half))
+            cy1 = int(min(frame_h, cy + half))
+            crop = frame[cy0:cy1, cx0:cx1]
             if crop.size == 0:
                 continue
             target = int(self._crop_target_size)
@@ -192,13 +210,13 @@ class PersonPoseHandTracker(HagridYoloHandTracker):
                 zoomed, [(0, 0, zw, zh, bbox[4])], zw, zh)
             if not sub or not sub[0]:
                 continue
-            # 把 zoomed 图上的像素坐标按比例映回原帧
-            sx = (x1 - x0) / float(zw)
-            sy = (y1 - y0) / float(zh)
+            # 把 zoomed 图上的像素坐标按比例映回原帧（用外扩后的 crop 原点）
+            sx = (cx1 - cx0) / float(zw)
+            sy = (cy1 - cy0) / float(zh)
             mapped = []
             for landmarks in sub[0]:
                 mapped.append([
-                    [lm[0], x0 + lm[1] * sx, y0 + lm[2] * sy,
+                    [lm[0], cx0 + lm[1] * sx, cy0 + lm[2] * sy,
                      lm[3] if len(lm) > 3 else 0.0]
                     for lm in landmarks
                 ])
@@ -220,19 +238,21 @@ class PersonPoseHandTracker(HagridYoloHandTracker):
         raw_data.extend(raw)
 
     def _sr_upscale(self, crop, target):
-        """用 SREngine 把小手 crop 放大到 target；失败退回普通插值。"""
-        self._sr.init()
-        engine = "auto"
-        if self._config is not None:
-            engine = self._config.get("zoom_sr_engine", "auto")
-        actual = self._sr.resolve(engine, max(crop.shape[0], crop.shape[1]), target)
+        """把小手 crop 放大到 target。默认普通插值（self._sr_engine='none'）；
+        仅当 config 显式选了 SR 引擎才走 SREngine 超分，失败也退回插值。"""
+        engine = getattr(self, "_sr_engine", "none")
         zoomed = None
-        if actual == "espcn":
-            zoomed = self._sr.espcn(crop, target)
-        elif actual in ("realesrgan_cpu", "realesrgan_gpu"):
-            zoomed = self._sr.realesrgan(crop, target, prefer_gpu=(actual == "realesrgan_gpu"))
+        actual = "none"
+        if engine != "none":
+            self._sr.init()
+            actual = self._sr.resolve(engine, max(crop.shape[0], crop.shape[1]), target)
+            if actual == "espcn":
+                zoomed = self._sr.espcn(crop, target)
+            elif actual in ("realesrgan_cpu", "realesrgan_gpu"):
+                zoomed = self._sr.realesrgan(crop, target, prefer_gpu=(actual == "realesrgan_gpu"))
         if zoomed is None:
             zoomed = cv2.resize(crop, (target, target), interpolation=cv2.INTER_LINEAR)
+            actual = "none" if engine == "none" else f"none(interp,{actual}_failed)"
         self._sr.log_tier(actual, max(crop.shape[0], crop.shape[1]), target)
         return zoomed
 

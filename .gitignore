@@ -55,8 +55,9 @@ _hf.json
 # SenseVoice ASR 模型 model.int8.onnx 单文件 239MB，超 GitHub 100MB 单文件硬限。
 # 用户按 README 指引手动下载到 models/sense-voice/
 models/sense-voice/
-# HaGRID YOLO 手部检测器：hand_yolov8n.onnx（12MB）已入仓库，供打包与 CI 冒烟；
-# .pt 权重仅重新导出 ONNX 时需要，仍不入库。
+# HaGRID YOLO 手部检测器：hand_yolov8n.onnx（12MB）留在仓库供开发与 CI；
+# 不打包进发布版（AGPL-3.0 与 Apache-2.0 不兼容），用户按 README 自行下载。
+# .pt 权重仅重新导出 ONNX 时需要，不入库。
 models/hand_yolov8n.pt
 # person_pose_hand 引擎的人体姿态模型：yolov8n-pose.onnx（13MB）不入 git，
 # 由 MODEL_PROVENANCE.md 指引按需导出（Ultralytics AGPL，仅本地实验用）。

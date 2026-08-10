@@ -10,18 +10,21 @@ MediaPipe 更强。请配合 analyze_primary_stability.py 使用。
 
 依赖：
   - onnxruntime（已在 requirements.txt 中）
-  - models/hand_yolov8n.onnx（默认检测器，随仓库与安装包分发）
-  - models/hand_landmarker.task（项目已有）
+  - models/hand_yolov8n.onnx（默认检测器，不随安装包分发，需手动下载）
+  - models/hand_landmarker.task（项目已有，随安装包分发）
 
-模型替换（可选）：默认模型已入仓库并在 AirControl.spec 中打包，无需
-手动准备。若要换用其他 HaGRID YOLO 权重（如 YOLOv10n_hands）：
-  1. 下载 HaGRID v2 预训练权重：
-     https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/YOLOv10n_hands.pt
+模型下载（可选）：hand_yolov8n.onnx 因 AGPL-3.0 许可证不打包进发布版。
+如需使用 hagrid_yolo 引擎或 engine_auto_switch 远距自动切换：
+  1. 下载 YOLOv8n 权重：
+     https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt
   2. 导出为 ONNX（需安装 ultralytics）：
      pip install ultralytics
-     yolo export model=YOLOv10n_hands.pt format=onnx opset=13 simplify
-  3. 将导出的 ONNX 放到 models/ 目录下；_resolve_yolo_model 按候选
-     文件名顺序查找，hand_yolov8n.onnx 优先。
+     yolo export model=yolov8n.pt format=onnx opset=13 simplify imgsz=640
+  3. 重命名为 hand_yolov8n.onnx 放到 models/ 目录下。
+
+  或下载 HaGRID v2 预训练权重：
+     https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/YOLOv10n_hands.pt
+  并以相同方式导出。_resolve_yolo_model 按候选文件名顺序查找。
 """
 
 import logging

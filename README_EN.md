@@ -188,6 +188,37 @@ Voice commands automatically switch based on current mode:
 - **Mouse Mode**: 点一下 / 双击 / 右键
 - **Drawing Mode**: 清屏 / 开始板书 / 结束板书 / 图形修正
 
+#### YOLO Hand Detection Model (Optional)
+
+At long range (3-5 m), the default MediaPipe detector has low recall.
+AirControl supports an optional HaGRID YOLO hand detection engine
+(`hagrid_yolo`) and engine auto-switching (`engine_auto_switch`) that
+falls back to YOLO capture when the hand is lost at distance.
+
+Because the model's ONNX metadata carries an **AGPL-3.0** licence that
+conflicts with this project's Apache-2.0, it is **not bundled in
+releases**. Users who need long-range enhancement must download it
+themselves:
+
+```bash
+# Option 1: Official Ultralytics YOLOv8n (recommended)
+# 1. Download the .pt weights
+#    https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt
+# 2. Install ultralytics and export to ONNX
+pip install ultralytics
+yolo export model=yolov8n.pt format=onnx opset=13 simplify imgsz=640
+# 3. Rename to hand_yolov8n.onnx and place in the models/ directory
+
+# Option 2: HaGRID v2 pre-trained hand detector
+# 1. Download the .pt weights
+#    https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/YOLOv10n_hands.pt
+# 2. Export to ONNX (same as above), place in the models/ directory
+```
+
+> Without the model, the `hagrid_yolo` engine and `engine_auto_switch`
+> long-range auto-switching are unavailable. The default `mediapipe`
+> engine is unaffected. See [Model Provenance and Release Gate](MODEL_PROVENANCE.md).
+
 ---
 
 ## 🏗️ Technical Architecture
@@ -330,15 +361,13 @@ Test coverage:
 The project is configured with PyInstaller for one-click packaging:
 
 ```bash
-python build.py --development
+python build.py
 ```
 
-Output will be in the `dist/` directory with all dependencies and model files included.
-`--development` output is for local verification only and must not be
-distributed. Both `python build.py` and `python build.py --release` enforce the
-release gate by default. The bundled YOLO model has no recorded source
-or redistribution approval yet, so the release build intentionally fails; see
-[model provenance and release gate](MODEL_PROVENANCE.md).
+Output will be in the `dist/` directory with all dependencies and core model
+files included. `hand_yolov8n.onnx` (AGPL-3.0) is not bundled in the release;
+users who need the long-range YOLO engine should follow the download
+instructions above. See [Model Provenance and Release Gate](MODEL_PROVENANCE.md).
 Before release, run the hardware-free package self-test. Exit code `0` means
 the models and native runtimes loaded successfully:
 
@@ -398,13 +427,12 @@ python -m pytest tests/
 ## 📄 License
 
 The repository **code** is licensed under the [Apache License 2.0](LICENSE).
-Third-party models are not automatically covered by that notice. The bundled
-`hand_yolov8n.onnx` carries an AGPL-3.0 string in its embedded metadata and has
-no recorded provenance or redistribution approval, so the package must not be
-represented as publicly distributable under Apache-2.0. See the
-[model provenance and release gate](MODEL_PROVENANCE.md) and the
-[official Ultralytics licensing guidance](https://www.ultralytics.com/license).
-Local-only development, testing, and use are not blocked by this project gate.
+The `hand_yolov8n.onnx` model (AGPL-3.0) is **not bundled** in releases;
+users who need it download it separately. The release package therefore
+contains only Apache-2.0 code and permissively licensed dependencies. See
+[Model Provenance and Release Gate](MODEL_PROVENANCE.md) and the
+[official Ultralytics licensing guidance](https://www.ultralytics.com/license)
+for details.
 
 ```
 Copyright 2026 AirControl

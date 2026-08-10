@@ -36,11 +36,32 @@ def test_build_version_comes_from_app_version():
     assert build._get_app_version() == "1.4.0"
 
 
-def test_release_build_rejects_unapproved_yolo_model():
+def test_release_build_excludes_yolo_model():
+    """Release build must not package the AGPL-licensed YOLO model."""
     build = _load_build_module()
 
-    with pytest.raises(RuntimeError, match="拒绝发布构建"):
-        build._check_release_model_provenance()
+    # The check should pass (no exception) because AirControl.spec
+    # intentionally excludes hand_yolov8n.onnx from packaging.
+    build._check_release_model_excluded()
+
+
+def test_release_gate_detects_model_in_spec():
+    """If someone re-adds the YOLO model to the spec, the gate must fire."""
+    build = _load_build_module()
+    spec_path = build.ROOT / "AirControl.spec"
+    original = spec_path.read_text(encoding="utf-8")
+    try:
+        # Simulate someone adding the model back to the spec.
+        injected = original.replace(
+            'add_data_if_present(datas, os.path.join("models", "hand_landmarker.task"), "models")',
+            'add_data_if_present(datas, os.path.join("models", "hand_yolov8n.onnx"), "models")\n'
+            'add_data_if_present(datas, os.path.join("models", "hand_landmarker.task"), "models")',
+        )
+        spec_path.write_text(injected, encoding="utf-8")
+        with pytest.raises(RuntimeError, match="AGPL"):
+            build._check_release_model_excluded()
+    finally:
+        spec_path.write_text(original, encoding="utf-8")
 
 
 def test_default_cli_mode_is_release_safe():
@@ -59,15 +80,7 @@ def test_development_build_requires_explicit_flag():
     assert args.development
 
 
-def test_explicit_development_override_is_loud(capsys):
-    build = _load_build_module()
-
-    build._check_release_model_provenance(allow_unapproved=True)
-
-    assert "不可分发的开发构建" in capsys.readouterr().out
-
-
-def test_ci_checks_release_gate_before_explicit_development_build():
+def test_ci_checks_release_gate_before_development_build():
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
@@ -75,4 +88,3 @@ def test_ci_checks_release_gate_before_explicit_development_build():
     release_check = workflow.index("python build.py --release")
     development_build = workflow.index("python build.py --development")
     assert release_check < development_build
-    assert "$global:LASTEXITCODE = 0" in workflow

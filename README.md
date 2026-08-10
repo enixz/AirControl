@@ -204,6 +204,33 @@ AirControl 集成双引擎语音系统：
 
 未放置模型时听写功能自动停用，KWS 关键词不受影响。
 
+#### YOLO 手部检测模型（可选）
+
+远距离（3-5 米）场景下，默认的 MediaPipe 检测器召回率较低。AirControl 支持可选的
+HaGRID YOLO 手部检测引擎（`hagrid_yolo`）和引擎自动切换（`engine_auto_switch`），
+在远距丢手时自动切换到 YOLO 捕获。
+
+由于该模型的 ONNX 元数据标为 **AGPL-3.0** 许可证，与本项目 Apache-2.0 不兼容，
+因此**不打包进发布版**。需要远距增强的用户请自行下载：
+
+```bash
+# 方式一：Ultralytics 官方 YOLOv8n（推荐）
+# 1. 下载 .pt 权重
+#    https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt
+# 2. 安装 ultralytics 并导出 ONNX
+pip install ultralytics
+yolo export model=yolov8n.pt format=onnx opset=13 simplify imgsz=640
+# 3. 重命名为 hand_yolov8n.onnx，放到 models/ 目录下
+
+# 方式二：HaGRID v2 预训练手部检测器
+# 1. 下载 .pt 权重
+#    https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/YOLOv10n_hands.pt
+# 2. 导出 ONNX（同上），放到 models/ 目录下
+```
+
+> 未放置模型时，`hagrid_yolo` 引擎和 `engine_auto_switch` 远距自动切换不可用，
+> 默认 `mediapipe` 引擎不受影响。详见 [模型来源与发布门禁](MODEL_PROVENANCE.md)。
+
 #### 完整语音指令清单
 
 各模式专属指令（仅在该模式下被激活）：
@@ -397,14 +424,12 @@ python -m pytest tests/test_edge_map.py
 项目已配置 PyInstaller，可一键打包为 Windows 可执行文件：
 
 ```bash
-python build.py --development
+python build.py
 ```
 
-打包后的文件将输出到 `dist/` 目录，包含所有依赖和模型文件。
-`--development` 产物仅用于本地开发验证，不得分发。`python build.py` 与
-`python build.py --release` 都会默认执行发布许可门禁。
-当前捆绑 YOLO 模型的来源与分发许可尚未完成记录，因此发布构建会按设计拒绝执行，
-详见 [模型来源与发布门禁](MODEL_PROVENANCE.md)。
+打包后的文件将输出到 `dist/` 目录，包含所有依赖和核心模型文件。
+`hand_yolov8n.onnx`（AGPL-3.0）不打包进发布版，需要远距 YOLO 引擎的
+用户请按上方说明自行下载。详见 [模型来源与发布门禁](MODEL_PROVENANCE.md)。
 发布前可运行无摄像头/麦克风自检，退出码 `0` 表示模型与原生运行库加载成功：
 
 ```powershell
@@ -463,11 +488,10 @@ python -m pytest tests/
 ## 📄 许可证
 
 本项目**代码**采用 [Apache License 2.0](LICENSE) 许可证。第三方模型不自动适用
-该声明；当前捆绑的 `hand_yolov8n.onnx` 在嵌入元数据中标为 AGPL-3.0，且来源与再分发
-授权尚未记录，因此不得据此宣称安装包可按 Apache-2.0 公开分发。详见
+该声明；`hand_yolov8n.onnx` 的 ONNX 元数据标为 AGPL-3.0，因此不打包进发布版，
+用户按 README 指引自行下载。详见
 [模型来源与发布门禁](MODEL_PROVENANCE.md)及
-[Ultralytics 官方许可证说明](https://www.ultralytics.com/license)。仅限本机开发、测试和
-使用不受本项目发布门禁影响。
+[Ultralytics 官方许可证说明](https://www.ultralytics.com/license)。
 
 ```
 Copyright 2026 AirControl

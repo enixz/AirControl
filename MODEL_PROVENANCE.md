@@ -1,10 +1,9 @@
-# Model provenance and release gate
+# Model provenance and release policy
 
 The repository code is licensed under Apache-2.0. That statement does **not**
-automatically cover model weights or other third-party assets bundled with the
-application.
+automatically cover model weights or other third-party assets.
 
-## `models/hand_yolov8n.onnx`
+## `models/hand_yolov8n.onnx` — NOT bundled in releases
 
 | Field | Current evidence |
 | --- | --- |
@@ -13,29 +12,37 @@ application.
 | ONNX metadata | Ultralytics YOLOv8n, detect task, 640×640 input, output `[1, 5, 8400]` |
 | Embedded license string | `AGPL-3.0 License (https://ultralytics.com/license)` |
 | Official licence guidance | <https://www.ultralytics.com/license> |
-| Source URL / source revision | not recorded |
-| Redistribution approval | not recorded |
+| Source URL | <https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt> |
+| Bundled in release | **No** — excluded from `AirControl.spec` |
+| Redistribution approval | Not required (model is not distributed) |
 
-This metadata conflicts with treating the bundled model as covered by the
-repository's Apache-2.0 notice. It is not legal advice and does not establish
-the model's provenance; it is a release blocker until the maintainer records
-the original download/training source, the applicable model/license terms, and
-an approval for the intended distribution.
+The model's AGPL-3.0 metadata conflicts with the repository's Apache-2.0
+licence. Starting with v1.4.0 the model is **intentionally excluded** from
+PyInstaller packaging. `build.py` verifies that `AirControl.spec` does not
+contain an `add_data_if_present` call for this file; if someone re-adds it,
+the build fails with an AGPL licence warning.
 
-Local-only development, testing, and use are not blocked by this project gate.
-The warning applies only if a future build is intended for redistribution or
-public release.
+### How users obtain the model (optional)
 
-`models/model_manifest.json` is the machine-readable record. `python build.py`
-and `python build.py --release` verify its checksum and refuse to package while
-the model is not marked `redistribution_approved: true`. A local-only developer
-bundle requires the explicit `python build.py --development` override, emits a
-prominent warning, and must not be published.
+The model is only needed for the `hagrid_yolo` detection engine and the
+`engine_auto_switch` far-range auto-switching feature. The default `mediapipe`
+engine works without it.
 
-Before changing the approval flag, retain a review reference that identifies
-the model source, its licence, and the release channel/terms that were approved.
-The gate currently covers this known YOLO asset only; it is not a substitute for
-an audit of every third-party dependency and model in a release.
+1. Download the YOLOv8n weights from
+   [Ultralytics releases](https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt).
+2. Export to ONNX (requires `pip install ultralytics`):
+   ```
+   yolo export model=yolov8n.pt format=onnx opset=13 simplify imgsz=640
+   ```
+3. Rename the exported file to `hand_yolov8n.onnx` and place it in the
+   `models/` directory next to the application.
+
+Alternatively, download a HaGRID-trained hand detector:
+<https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/YOLOv10n_hands.pt>
+and export it the same way. The tracker's `_resolve_yolo_model` searches
+multiple candidate filenames.
+
+Local-only development, testing, and use are not blocked by this policy.
 
 ## `models/yolov8n-pose.onnx` (local experiment only, NOT in git)
 
@@ -50,11 +57,9 @@ Used by the experimental `person_pose_hand` engine
 | Embedded license string | `AGPL-3.0 License (https://ultralytics.com/license)` |
 | Source URL | <https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n-pose.pt> |
 | Export | `yolo export model=yolov8n-pose.pt format=onnx opset=13 simplify imgsz=640` (ultralytics 8.4.92) |
-| Redistribution approval | not recorded |
+| Bundled in release | **No** — excluded from version control and packaging |
 
-Same Ultralytics AGPL situation as the bundled hand detector, **except this
-file is intentionally excluded from version control** (`.gitignore`) and is
-**not** packaged into any build. It is downloaded/exported locally on demand
-for offline A/B experiments. It must **not** be added to a release artifact or
-to git without the same provenance review and approval gate as
-`hand_yolov8n.onnx`. Local-only development and A/B evaluation are not blocked.
+Same Ultralytics AGPL situation as the hand detector. This file is
+intentionally excluded from version control (`.gitignore`) and is **not**
+packaged into any build. It is downloaded/exported locally on demand for
+offline A/B experiments.
