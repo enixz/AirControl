@@ -130,6 +130,8 @@ Control PowerPoint or WPS presentations.
 | 👋 Wave up | Start presentation | F5 |
 | 👋 Wave down | End presentation | Esc |
 | 👍 Thumb up | Switch to target app | - |
+| ✌️ Scissor (hold 2s) | Launch voice assistant | - |
+| 👎 Thumb down | Hang up voice assistant | - |
 | ✊ Fist | Customizable mapping | - |
 
 > 🛡️ **Anti-misfire Design**: Spreading all five fingers and moving freely won't trigger any action; actions won't fire within the first 0.3 seconds of hand entering the frame.
@@ -262,46 +264,58 @@ Available in all modes:
 ## 🏗️ Technical Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                  AirControl Architecture                 │
-├─────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
-│  │  Camera     │  │  Voice      │  │  User       │      │
-│  │  Capture    │  │  Input      │  │  Config     │      │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘      │
-│         │                │                │              │
-│         ▼                ▼                ▼              │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │              InferenceWorker (QThread)           │    │
-│  │  ┌─────────────┐  ┌─────────────┐               │    │
-│  │  │ MediaPipe   │  │ Kalman      │               │    │
-│  │  │ HandLandmark│  │ + EMA       │               │    │
-│  │  └─────────────┘  └─────────────┘               │    │
-│  └─────────────────────────────────────────────────┘    │
-│         │                                                │
-│         ▼                                                │
-│  ┌─────────────────────────────────────────────────┐    │
-│  │              ModeManager                         │    │
-│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐      │    │
-│  │  │Presentat.│  │  Mouse   │  │ Drawing  │      │    │
-│  │  └──────────┘  └──────────┘  └──────────┘      │    │
-│  └─────────────────────────────────────────────────┘    │
-│         │                                                │
-│         ▼                                                │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
-│  │  PPT Ctrl   │  │  Mouse Ctrl │  │  Screen     │      │
-│  │             │  │             │  │  Drawing     │      │
-│  └─────────────┘  └─────────────┘  └─────────────┘      │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    AirControl Architecture                    │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+│  │  Camera     │  │  Voice      │  │  User       │          │
+│  │  Capture    │  │  Input      │  │  Config     │          │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘          │
+│         │                │                │                  │
+│         ▼                ▼                ▼                  │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              InferenceWorker (QThread)               │    │
+│  │  ┌────────────────────────────────────────────────┐  │    │
+│  │  │       Engine Auto-Switcher (state machine)     │  │    │
+│  │  │  ┌──────────┐  ┌──────────┐  ┌─────────────┐  │  │    │
+│  │  │  │MediaPipe │  │YOLO/ONNX │  │Person-Pose  │  │  │    │
+│  │  │  │(near)    │  │(far)     │  │(experimental)│  │  │    │
+│  │  │  └──────────┘  └──────────┘  └─────────────┘  │  │    │
+│  │  └────────────────────────────────────────────────┘  │    │
+│  │  ┌──────────────┐  ┌──────────────┐                  │    │
+│  │  │ Smoothers    │  │ Crop-Zoom    │                  │    │
+│  │  │(1-Euro+Kalman│  │ + SR Engine  │                  │    │
+│  │  │ +Ghost Hand) │  │(ESPCN/RealESR)│                  │    │
+│  │  └──────────────┘  └──────────────┘                  │    │
+│  └─────────────────────────────────────────────────────┘    │
+│         │                                                    │
+│         ▼                                                    │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              ModeManager                             │    │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐          │    │
+│  │  │Presentat.│  │  Mouse   │  │ Drawing  │          │    │
+│  │  └──────────┘  └──────────┘  └──────────┘          │    │
+│  └─────────────────────────────────────────────────────┘    │
+│         │                                                    │
+│         ▼                                                    │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
+│  │  PPT Ctrl   │  │  Mouse Ctrl │  │  Screen     │          │
+│  │             │  │             │  │  Drawing    │          │
+│  └─────────────┘  └─────────────┘  └─────────────┘          │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Core Technology Stack
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| Hand Detection | MediaPipe HandLandmarker | Real-time 21 landmark detection |
-| Gesture Recognition | ML model + rule fallback | Gesture classification (fist, open, scissor, etc.) |
-| Position Smoothing | Kalman filter + EMA | Eliminate jitter, predict on loss |
+| Hand Detection (near-range) | MediaPipe HandLandmarker | Real-time 21 landmark detection |
+| Hand Detection (long-range) | YOLOv8/v10 (ONNX Runtime) | Long-range hand detection (3-5 m), optional |
+| Hand Detection (pose-based) | YOLOv8-Pose (ONNX Runtime) | Person → wrist → hand crop, experimental |
+| Engine Auto-Switching | State machine (`engine_auto_switcher.py`) | NEAR ↔ CAPTURE ↔ FAR_TRACK, hands off between engines |
+| Gesture Recognition | ML model + geometric classifier + rule fallback | Gesture classification (fist, open, scissor, etc.) |
+| Position Smoothing | One Euro filter + Kalman + EMA | Eliminate jitter, predict on loss, handedness-keyed |
+| Crop-Zoom + Super-Resolution | ESPCN / RealESRGAN (ONNX) | Enhance small hand crops at long range |
 | Shape Correction | OpenCV geometry analysis | Auto-correct hand-drawn shapes |
 | GUI | PyQt6 | Floating window, settings panel, overlays |
 | Mouse Control | Win32 API | SetCursorPos, mouse_event |
@@ -319,12 +333,12 @@ Click the ⚙️ settings button on the floating window to adjust:
 |---------|-------------|---------|
 | **Camera** | Async background enumeration of available camera indices; select and save to **hot-swap at runtime** (laptop + external USB camera anytime) | Current |
 | Target App | PowerPoint or WPS | WPS |
-| Model Precision | Lite (faster) / Heavy (more accurate) | Heavy |
-| Interaction Mode | presentation / mouse / draw | presentation |
+| Model Precision | Lite (faster) / Heavy (more accurate) / Full (most accurate) | Heavy |
+| Interaction Mode | presentation / mouse / draw | mouse |
 | Gesture Cooldown | Minimum interval between gestures | 1000 ms |
 | Mouse Sensitivity | Tracking sensitivity in mouse mode | 40% |
-| Pen Width | Stroke width in drawing mode | 20 px |
-| Edge Acceleration | Auto-speed boost near screen edges | Enabled |
+| Pen Width | Stroke width in drawing mode | 15 px |
+| Edge Acceleration | Auto-speed boost near screen edges | Disabled |
 | Voice Assistant | Select voice assistant app | Doubao |
 | Action Mapping | Gesture-to-action mapping | See `config.json` |
 
@@ -332,13 +346,21 @@ Click the ⚙️ settings button on the floating window to adjust:
 
 | Field | Description | Default |
 |-------|-------------|---------|
+| `stability_profile` | Preset that controls multiple stability switches at once: `stable` (conservative, fewest false triggers), `balanced` (edge acceleration + long-range enhancement), `long_range` (maximizes far-distance detection) | `stable` |
+| `detection_engine` | Hand detection engine: `mediapipe` (default, near-range), `hagrid_yolo` (long-range, requires YOLO model), `person_pose_hand` (experimental, pose-based) | `mediapipe` |
 | `camera_width` / `camera_height` | Camera resolution; `null` auto-detects highest ≥ min_fps mode | `null` |
-| `camera_min_fps` | Framerate floor for auto-detection; resolutions below this are skipped | 10 |
+| `camera_min_fps` | Framerate floor for auto-detection; resolutions below this are skipped | 20 |
 | `camera_force_mjpeg` | Force MJPEG encoding (essential for 30fps at 720p on legacy cameras) | true |
 | `dominant_hand` | Hand preference: `Auto` / `Left` / `Right`; Auto selects by motion + height + proximity | `Auto` |
-| `hand_detection_confidence` | Hand detection threshold; lower for long range (0.4-0.6) | 0.4 |
+| `hand_detection_confidence` | Hand detection threshold; lower for long range (0.4-0.6) | 0.5 |
 | `hand_presence_confidence` | Hand presence determination threshold | 0.5 |
 | `hand_tracking_confidence` | Inter-frame tracking threshold | 0.5 |
+| `inference_max_width` | Downscale frame to this width before MediaPipe inference (0 = no downscale); 1080p→720px cuts inference from ~42ms to ~15ms | 720 |
+| `hand_smoothing_min_cutoff` | One Euro filter min cutoff; lower = less jitter when still | 0.5 |
+| `hand_smoothing_beta` | One Euro filter beta; higher = more responsive to motion | 0.015 |
+| `zoom_sr_engine` | Super-resolution engine for crop-zoom: `auto` / `espcn` / `realesrgan_cpu` / `realesrgan_gpu` / `none` | `auto` |
+| `zoom_far_threshold` | Crop-zoom trigger: hand bbox ratio below this activates zoom (smaller = farther before zoom) | 0.008 |
+| `zoom_near_threshold` | Crop-zoom release: hand bbox ratio above this deactivates zoom | 0.04 |
 | `pinch_exit_hysteresis_enabled` | Keeps enter threshold 0.35, requires 0.40 to exit pinch; A/B validated: no added miss/latency, fewer false alarms | true |
 | `pinch_hysteresis_enabled` | Legacy dual-threshold (enter 0.30 / exit 0.40); increases misses, stays off by default | false |
 | `engine_auto_switch` | Only with MediaPipe as near-range baseline: after hand loss, background pre-warmed YOLO captures; hands off to MediaPipe on stable single-hand | false |
@@ -346,10 +368,11 @@ Click the ⚙️ settings button on the floating window to adjust:
 | `pen_width_auto_scale` | Auto-scale pen width by hand distance (off = constant width; cursor sensitivity still adapts to hand size) | false |
 | `mode_switch_hold_sec` | 🤟 mode-switch gesture hold duration (seconds) | 1.0 |
 | `mode_switch_vote_ratio` | 🤟 label frame ratio threshold within hold window; lower if distance causes misreads | 0.6 |
-| `draw_frontality_gate` | Drawing thumb observability gate (palm width / index length). Below this = hand sideways, thumb unreliable, pen state frozen; lower if strokes keep breaking, raise if hover is unresponsive | 0.55 |
+| `draw_frontality_gate` | Drawing thumb observability gate (palm width / index length). Below this = hand sideways, thumb unreliable, pen state frozen; lower if strokes keep breaking, raise if hover is unresponsive | 0.65 |
 | `draw_record_trace` | Record per-frame landmarks to `draw_trace.jsonl` for `simulate_draw.py --replay` offline debugging | false |
 | `dictation_enabled` | Enable SenseVoice offline voice dictation (say "开始板书" in Draw mode) | true |
 | `dictation_language` | Dictation language: `auto`/`zh`/`en`/`ja`/`ko`/`yue` | `auto` |
+| `floating_window_scale` | Scale factor for the floating control window | 1.5 |
 | `wps_exe_path` | Manual override for WPS path when auto-locate fails | (none) |
 | `debug_overlay` | Show FPS/hand count/handedness debug info on startup | false |
 
@@ -368,34 +391,54 @@ AirControl/
 ├── app/
 │   ├── main.py                    # CLI entry (OpenCV window)
 │   ├── main_ui.py                 # GUI entry (PyQt6 floating window)
-│   ├── config_manager.py          # Config file read/write
+│   ├── orchestrator.py            # Central coordinator (camera → inference → modes → output)
+│   ├── config_manager.py          # Config file read/write + schema validation
 │   ├── mode_manager.py            # Mode manager (🤟 hold switch)
 │   ├── drawing_overlay.py         # Drawing mode fullscreen canvas
 │   ├── draw_toolbar.py            # Drawing toolbar
 │   ├── mouse_cursor_overlay.py    # Mouse cursor overlay
+│   ├── crash_handler.py           # Crash logging + recovery
+│   ├── log_config.py              # Logging configuration
+│   ├── runtime_paths.py           # Path resolution (dev / frozen / portable)
+│   ├── version.py                 # Release version string
 │   ├── modes/
 │   │   ├── base.py                # Mode base class (strategy pattern)
 │   │   ├── presentation.py        # Presentation mode
 │   │   ├── mouse_mode.py          # Mouse mode
 │   │   └── draw_mode.py           # Drawing mode
 │   ├── services/
-│   │   ├── camera.py              # Camera service
-│   │   ├── hand_tracker.py        # Hand landmark tracking (MediaPipe + Kalman)
+│   │   ├── camera.py              # Camera service (auto-resolution, MJPEG, hot-swap)
+│   │   ├── base_hand_tracker.py   # Abstract hand tracker interface
+│   │   ├── hand_tracker.py        # MediaPipe hand landmark tracking + Kalman
+│   │   ├── hand_tracker_factory.py # Engine factory (mediapipe / hagrid_yolo / person_pose)
+│   │   ├── hagrid_yolo_hand_tracker.py # YOLO hand detection engine (long-range)
+│   │   ├── person_pose_hand_tracker.py # Person-pose → wrist → hand crop engine
+│   │   ├── engine_auto_switcher.py # Multi-engine state machine (NEAR ↔ CAPTURE ↔ FAR_TRACK)
+│   │   ├── face_guide.py          # Face-guided crop-zoom enhancement
+│   │   ├── smoothers.py           # One Euro filter + handedness-keyed slots
+│   │   ├── sr_engine.py           # Super-resolution (ESPCN / RealESRGAN)
 │   │   ├── gesture_recognizer.py  # Gesture recognition & swipe detection
+│   │   ├── geometric_classifier.py # Geometric gesture classification (fallback)
+│   │   ├── temporal_voter.py      # Temporal voting + FSM (experimental)
 │   │   ├── inference_worker.py    # Async inference worker thread
 │   │   ├── mouse_controller.py    # Mouse control (Win32 API)
 │   │   ├── ppt_controller.py      # PPT/WPS control
 │   │   ├── shape_recognizer.py    # Shape recognizer
+│   │   ├── renderer.py            # Video frame rendering
+│   │   ├── frame_recorder.py      # Raw frame recording for debugging
+│   │   ├── truth_ab.py            # A/B testing truth labels
+│   │   ├── truth_event_logger.py  # Truth event logging
 │   │   ├── voice_assistant.py     # Voice assistant service
 │   │   ├── voice_command.py       # Voice command processing (KWS)
 │   │   └── voice_dictation.py     # Voice dictation (SenseVoice-Small)
 │   └── voice_keywords/            # Voice keyword configs
 ├── models/
-│   ├── kws-zh-wenetspeech/        # Voice wake-up model
+│   ├── kws-zh-wenetspeech/        # Voice keyword spotting model
 │   └── sense-voice/               # SenseVoice-Small ASR model (manual download)
 ├── tests/                         # Unit tests
 ├── config.json                    # User configuration
 ├── requirements.txt               # Python dependencies
+├── requirements-dev.txt           # Development dependencies (PyInstaller, etc.)
 ├── build.py                       # PyInstaller build script
 ├── AirControl.spec                # PyInstaller config
 ├── hand_landmarker.task           # MediaPipe hand model (7.8MB)
@@ -469,8 +512,11 @@ cd AirControl
 python -m venv .venv
 .venv\Scripts\activate
 
-# Install dependencies
+# Install runtime dependencies
 pip install -r requirements.txt
+
+# For building executables, also install dev dependencies
+pip install -r requirements-dev.txt
 
 # Run tests
 python -m pytest tests/
