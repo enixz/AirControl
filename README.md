@@ -1,4 +1,4 @@
-# 🎯 AirControl - 隔空手势+语音控制系统
+# 🎯 AirControl - Gesture + Voice Control System
 
 <div align="center">
 
@@ -8,77 +8,75 @@
 ![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)
 ![Stars](https://img.shields.io/github/stars/enixz/AirControl?style=social)
 
-**🚀 解放双手，隔空操控你的电脑**
+**🚀 Free your hands, control your computer remotely**
 
-*手势控制 · 语音助手 · 多模态交互*
-
-[English](README_EN.md) | [中文](#快速开始)
+*Gesture Control · Voice Assistant · Multimodal Interaction*
 
 </div>
 
 ---
 
-## 🎬 演示动画
+## 🎬 Demo
 
 <div align="center">
 
-### 📊 演示模式
-![演示模式](https://raw.githubusercontent.com/enixz/AirControl/master/gif/演示模式.gif)
+### 📊 Presentation Mode
+![Presentation Mode](https://raw.githubusercontent.com/enixz/AirControl/master/gif/%E6%BC%94%E7%A4%BA%E6%A8%A1%E5%BC%8F.gif)
 
-### 🖱️ 鼠标模式
-![鼠标模式](https://raw.githubusercontent.com/enixz/AirControl/master/gif/鼠标模式.gif)
+### 🖱️ Mouse Mode
+![Mouse Mode](https://raw.githubusercontent.com/enixz/AirControl/master/gif/%E9%BC%A0%E6%A0%87%E6%A8%A1%E5%BC%8F.gif)
 
-### ✏️ 板书模式
-![板书模式](https://raw.githubusercontent.com/enixz/AirControl/master/gif/板书模式.gif)
+### ✏️ Drawing Mode
+![Drawing Mode](https://raw.githubusercontent.com/enixz/AirControl/master/gif/%E6%9D%BF%E4%B9%A6%E6%A8%A1%E5%BC%8F.gif)
 
 </div>
 
 ---
 
-## ✨ 一句话介绍
+## ✨ Introduction
 
-> **AirControl** 是一款基于 MediaPipe + 语音识别的 Windows 空中控制器，让你无需触碰键盘鼠标，仅通过**手势**和**语音**即可控制 PPT 演示、操控鼠标、屏幕板书，甚至启动语音助手。
+> **AirControl** is a Windows air controller based on MediaPipe + voice recognition. Control PPT presentations, mouse cursor, screen annotation, and even launch voice assistants with just **gestures** and **voice** - no keyboard or mouse needed!
 
 ---
 
-## 🎬 功能亮点
+## 🎬 Feature Highlights
 
 <table>
 <tr>
 <td width="50%">
 
-### 🖐️ 手势控制
-- **演示模式**：挥手翻页、开始/结束播放
-- **鼠标模式**：空中鼠标、捏合点击、剪刀滚动
-- **板书模式**：单指书写、握拳清屏、形状校正
+### 🖐️ Gesture Control
+- **Presentation Mode**: Wave to change slides, start/stop playback
+- **Mouse Mode**: Air mouse, pinch to click, scissor to scroll
+- **Drawing Mode**: Finger writing, fist to clear, shape correction
 
 </td>
 <td width="50%">
 
-### 🎤 语音助手
-- **离线关键词识别**：Sherpa-ONNX 直接识别命令短语（无需唤醒词）
-- **离线听写**：SenseVoice-Small 把语音直接写到屏幕（板书模式说"开始板书"）
-- **模式感知**：不同模式自动激活不同指令集，避免误触
+### 🎤 Voice Assistant
+- **Offline Keyword Spotting**: Sherpa-ONNX directly recognizes command phrases (no wake word needed)
+- **Offline Dictation**: SenseVoice-Small writes speech-to-screen (say "开始板书" in Drawing Mode)
+- **Mode-aware**: Different modes auto-activate different command sets, preventing misfires
 
 </td>
 </tr>
 <tr>
 <td>
 
-### 🧠 智能识别
-- **主控手自动选择**：抬哪只手用哪只手，配置零关心
-- **卡尔曼滤波 + 幽灵手恢复**：21 关键点双重平滑，短暂遮挡自动补帧
-- **形状校正**：自动识别并修正手绘图形
-- **笔触距离自适应**：远距离自动变细，近距离自动变粗
+### 🧠 Smart Recognition
+- **Auto Dominant Hand**: Raise whichever hand — it just works, zero config
+- **Kalman Filter + Ghost Hand Recovery**: Dual smoothing for 21 landmarks, auto-fills brief occlusion
+- **Shape Correction**: Auto-detect and correct hand-drawn shapes
+- **Adaptive Pen Width**: Auto-thins at distance, auto-thickens up close
 
 </td>
 <td>
 
-### ⚡ 高性能
-- **自动摄像头分辨率探测**：跨设备零配置，自动选最高 ≥20fps 模式
-- **MJPEG 强制编码**：720p 也能跑满 30fps（HD-3000 等老摄像头友好）
-- **WPS / PPT 自动定位**：扫注册表 + 通配搜索，换电脑无需改路径
-- **断线自动重连**：USB 摄像头被拔出会自动恢复
+### ⚡ High Performance
+- **Auto Camera Resolution**: Cross-device zero-config, picks highest ≥20fps mode
+- **MJPEG Forced Encoding**: 720p at 30fps even on legacy webcams (HD-3000 friendly)
+- **WPS / PPT Auto-locate**: Registry scan + wildcard search, no path editing needed
+- **Auto Reconnect**: USB camera unplugged? Auto-recovers
 
 </td>
 </tr>
@@ -86,351 +84,362 @@
 
 ---
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 1️⃣ 克隆项目
+### 1️⃣ Clone the Project
 
 ```bash
 git clone https://github.com/enixz/AirControl.git
 cd AirControl
 ```
 
-### 2️⃣ 安装依赖
+### 2️⃣ Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3️⃣ 运行程序
+### 3️⃣ Run the Program
 
 ```bash
-# GUI 版本（推荐）
+# GUI version (recommended)
 python -m app.main_ui
 
-# 命令行版本
+# Command-line version
 python -m app.main
 ```
 
-> 💡 **提示**：首次运行会自动下载 MediaPipe 模型文件（约 16MB），请确保网络连接正常。
+> 💡 **Note**: On first run, MediaPipe model files (~16MB) will be downloaded automatically. Please ensure a stable network connection.
 
 ---
 
-## 📖 详细功能
+## 📖 Detailed Features
 
-### 🎭 三种交互模式
+### 🎭 Three Interaction Modes
 
-通过 **单手 🤟 手势保持约 1 秒**（拇指+食指+小指伸出）循环切换模式：
+Switch modes by holding a **single-hand 🤟 gesture** (thumb + index + pinky extended) for about 1 second:
 
-#### 1. 演示模式 📊
+#### 1. Presentation Mode 📊
 
-用于控制 PowerPoint 或 WPS 演示文稿。
+Control PowerPoint or WPS presentations.
 
-| 手势 | 动作 | 快捷键 |
-|------|------|--------|
-| 👋 向右挥手 | 下一页 | → |
-| 👋 向左挥手 | 上一页 | ← |
-| 👋 向上挥手 | 开始播放 | F5 |
-| 👋 向下挥手 | 结束播放 | Esc |
-| 👍 拇指竖起 | 切换到目标软件 | - |
-| ✊ 握拳 | 可自定义映射 | - |
+| Gesture | Action | Shortcut |
+|---------|--------|----------|
+| 👋 Wave right | Next slide | → |
+| 👋 Wave left | Previous slide | ← |
+| 👋 Wave up | Start presentation | F5 |
+| 👋 Wave down | End presentation | Esc |
+| 👍 Thumb up | Switch to target app | - |
+| ✊ Fist | Customizable mapping | - |
 
-> 🛡️ **防误触设计**：五指张开随意移动不会触发任何操作；手刚进入画面的前 0.3 秒内也不会触发动作。
+> 🛡️ **Anti-misfire Design**: Spreading all five fingers and moving freely won't trigger any action; actions won't fire within the first 0.3 seconds of hand entering the frame.
 
-#### 2. 鼠标模式 🖱️
+#### 2. Mouse Mode 🖱️
 
-将你的手变成空中鼠标，屏幕上会显示一个大的圆形光标。
+Transform your hand into an air mouse with a large circular cursor on screen.
 
-| 手势 | 动作 | 视觉反馈 |
-|------|------|----------|
-| ☝️ 中指尖移动 | 控制光标位置 | 白色圆形光标 |
-| 🤏 拇指+食指捏合 | 左键点击 | 蓝色扩散动画 |
-| 🤏 拇指+中指捏合 | 右键点击 | 绿色扩散动画 |
-| ✌️ 剪刀手移动 | 滚轮滚动 | 黄色箭头指示 |
-| 🤏 捏合保持 | 左键拖拽 | 脉冲动画 |
+| Gesture | Action | Visual Feedback |
+|---------|--------|-----------------|
+| ☝️ Middle fingertip move | Control cursor position | White circular cursor |
+| 🤏 Thumb + index pinch | Left click | Blue ripple animation |
+| 🤏 Thumb + middle pinch | Right click | Green ripple animation |
+| ✌️ Scissor hand move | Scroll wheel | Yellow arrow indicator |
+| 🤏 Pinch & hold | Left button drag | Pulse animation |
 
-**边缘加速**：当光标靠近屏幕边缘时，移动速度自动提升 2-3 倍，轻松访问任务栏和屏幕角落。
+**Edge Acceleration**: When the cursor approaches screen edges, movement speed automatically increases 2-3x for easy access to taskbar and screen corners.
 
-#### 3. 板书模式 ✏️
+#### 3. Drawing Mode ✏️
 
-在屏幕上进行手写标注，适合教学或演示讲解。
+Handwriting annotation on screen, perfect for teaching or presentation explanations.
 
-| 手势 | 动作 |
-|------|------|
-| ☝️ 仅伸食指 + 拇指并拢 | 落笔书写 |
-| ☝️ 仅伸食指 + 拇指分开 | 抬笔悬停（需手正对相机，侧面时拇指被遮挡不可信，笔状态冻结） |
-| ✌️ 食指+中指伸出（无需张开，贴紧也算） | 抬笔悬停（侧面也可靠，随时可用） |
-| ✊ 握拳 | 清空画布 |
-| ✊…✊ 单手 1 秒内连续两次握拳 | 切换形状校正开/关 |
-| 🤟 单手保持约 1 秒 | 切换交互模式（演示↔鼠标↔板书） |
+| Gesture | Action |
+|---------|--------|
+| ☝️ Index finger only + thumb closed | Write/Draw |
+| ☝️ Index finger only + thumb open | Hover (requires hand facing camera; from side view thumb is occluded and unreliable, pen state freezes) |
+| ✌️ Index + middle finger (closed together also counts) | Hover (reliable from side view, always available) |
+| ✊ Fist | Clear canvas |
+| ✊…✊ Double fist within 1 second | Toggle shape correction on/off |
+| 🤟 Single hand hold ~1 second | Switch interaction mode (Presentation ↔ Mouse ↔ Drawing) |
 
-**智能形状校正**：开启后，手绘的线条、三角形、矩形、椭圆会自动修正为标准几何图形。
+**Smart Shape Correction**: When enabled, hand-drawn lines, triangles, rectangles, and ellipses are automatically corrected to standard geometric shapes.
 
-> 💡 **🤟 保持切模式** 是全局通用的，不只板书模式。任何模式下单手摆出 🤟（拇指+食指+小指伸出）保持约 1 秒即触发。识别基于 MediaPipe 手势标签而非逐指几何判定，远距离同样可靠；触发后需放下手势才能再次切换。保持时长和判定占比可通过 `mode_switch_hold_sec` / `mode_switch_vote_ratio` 调整。
+> 💡 **🤟 Mode Switch** is globally available, not just in Drawing Mode. In any mode, hold a single-hand 🤟 (thumb + index + pinky extended) for about 1 second to trigger. Recognition is based on MediaPipe gesture labels rather than per-finger geometry, making it reliable at distance. After triggering, release the gesture to switch again. Hold duration and vote ratio are adjustable via `mode_switch_hold_sec` / `mode_switch_vote_ratio`.
 
 ---
 
-### 🎤 语音助手
+### 🎤 Voice Assistant
 
-AirControl 集成双引擎语音系统：
+AirControl integrates a dual-engine voice system:
 
-#### 离线关键词检测（KWS）
-- **引擎**：Sherpa-ONNX（完全离线，保护隐私）
-- **模型**：`kws-zh-wenetspeech`（中文，约 18 MB）
-- **机制**：**无需唤醒词**，直接监听命令短语，命中即执行
-- **指令集随模式切换**：演示模式只听演示相关词，板书模式只听板书相关词，互不干扰
-- **延迟**：典型 ~100 ms 检出
-- **冷却**：1.0 s 防抖，避免一句话连触发两次
+#### Offline Keyword Spotting (KWS)
+- **Engine**: Sherpa-ONNX (fully offline, privacy-first)
+- **Model**: `kws-zh-wenetspeech` (Chinese, ~18MB lightweight model)
+- **Mechanism**: **No wake word needed** — directly listens for command phrases, executes on hit
+- **Mode-aware command sets**: Presentation mode only listens for presentation phrases, Drawing mode only for drawing phrases — no cross-interference
+- **Latency**: ~100ms typical detection
+- **Cooldown**: 1.0s anti-bounce to prevent double triggers
 
-#### 离线语音听写（ASR）
-- **引擎**：SenseVoice-Small（阿里达摩院开源，sherpa-onnx 加载）
-- **场景**：板书模式说 **"开始板书"** 开始录音，说 **"结束板书"** 停止并将语音转为文字写到画布
-- **能力**：自由文本输入；支持中、英、日、韩、粤语自动检测
-- **特性**：完全离线、无 API 配置、ITN 标点自动还原
-- **磁盘占用**：模型约 234 MB（int8 量化）
+#### Offline Dictation (ASR)
+- **Engine**: SenseVoice-Small (Alibaba DAMO Academy open-source, loaded via sherpa-onnx)
+- **Scenario**: Drawing mode "speak-to-screen" — say "开始板书" to start recording,
+  say "结束板书" to stop and type the recognized text onto the canvas
+- **Languages**: Chinese / English / Japanese / Korean / Cantonese (auto-detect)
+- **Privacy**: 100% local, no network calls, no API configuration
+- **Features**: ITN punctuation auto-restored
+- **Disk footprint**: ~234 MB (int8 quantized)
 
-##### 模型下载
+##### Model download
 
 ```bash
-# 从 sherpa-onnx 官方发布页下载 SenseVoice-Small
-# https://github.com/k2-fsa/sherpa-onnx/releases (tag: asr-models)
-# 文件名：sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
+# Download SenseVoice-Small from the sherpa-onnx releases page:
+# https://github.com/k2-fsa/sherpa-onnx/releases  (tag: asr-models)
+# File: sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2
 
-# 解压后将整个目录重命名/移动到 AirControl/models/sense-voice/
-# 期望结构：
+# Extract and move the directory to AirControl/models/sense-voice/
+# Expected layout:
 #   models/sense-voice/
 #     ├── model.int8.onnx
 #     └── tokens.txt
 ```
 
-未放置模型时听写功能自动停用，KWS 关键词不受影响。
+If the model directory is absent, dictation is silently disabled; KWS keywords keep
+working. The model file is gitignored due to GitHub's 100 MB single-file limit.
 
-#### YOLO 手部检测模型（可选）
+#### YOLO Hand Detection Model (Optional)
 
-远距离（3-5 米）场景下，默认的 MediaPipe 检测器召回率较低。AirControl 支持可选的
-HaGRID YOLO 手部检测引擎（`hagrid_yolo`）和引擎自动切换（`engine_auto_switch`），
-在远距丢手时自动切换到 YOLO 捕获。
+At long range (3-5 m), the default MediaPipe detector has low recall.
+AirControl supports an optional HaGRID YOLO hand detection engine
+(`hagrid_yolo`) and engine auto-switching (`engine_auto_switch`) that
+falls back to YOLO capture when the hand is lost at distance.
 
-由于该模型的 ONNX 元数据标为 **AGPL-3.0** 许可证，与本项目 Apache-2.0 不兼容，
-因此**不打包进发布版**。需要远距增强的用户请自行下载：
+Because the model's ONNX metadata carries an **AGPL-3.0** licence that
+conflicts with this project's Apache-2.0, it is **not bundled in
+releases**. Users who need long-range enhancement must download it
+themselves:
 
 ```bash
-# 方式一：Ultralytics 官方 YOLOv8n（推荐）
-# 1. 下载 .pt 权重
+# Option 1: Official Ultralytics YOLOv8n (recommended)
+# 1. Download the .pt weights
 #    https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt
-# 2. 安装 ultralytics 并导出 ONNX
+# 2. Install ultralytics and export to ONNX
 pip install ultralytics
 yolo export model=yolov8n.pt format=onnx opset=13 simplify imgsz=640
-# 3. 重命名为 hand_yolov8n.onnx，放到 models/ 目录下
+# 3. Rename to hand_yolov8n.onnx and place in the models/ directory
 
-# 方式二：HaGRID v2 预训练手部检测器
-# 1. 下载 .pt 权重
+# Option 2: HaGRID v2 pre-trained hand detector
+# 1. Download the .pt weights
 #    https://rndml-team-cv.obs.ru-moscow-1.hc.sbercloud.ru/datasets/hagrid_v2/models/YOLOv10n_hands.pt
-# 2. 导出 ONNX（同上），放到 models/ 目录下
+# 2. Export to ONNX (same as above), place in the models/ directory
 ```
 
-> 未放置模型时，`hagrid_yolo` 引擎和 `engine_auto_switch` 远距自动切换不可用，
-> 默认 `mediapipe` 引擎不受影响。详见 [模型来源与发布门禁](MODEL_PROVENANCE.md)。
+> Without the model, the `hagrid_yolo` engine and `engine_auto_switch`
+> long-range auto-switching are unavailable. The default `mediapipe`
+> engine is unaffected. See [Model Provenance and Release Gate](MODEL_PROVENANCE.md).
 
-#### 完整语音指令清单
+#### Complete Voice Command List
 
-各模式专属指令（仅在该模式下被激活）：
+Mode-specific commands (only active in their respective modes):
 
-| 模式 | 指令 | 动作 |
-|------|------|------|
-| 演示 | `开始播放` `结束播放` `下一页` `上一页` | F5 / Esc / → / ← |
-| 鼠标 | `点一下` `双击` `右键` | 左单击 / 左双击 / 右键 |
-| 板书 | `清屏` `图形修正` | 清空画布 / 切换形状校正 |
-| 板书 | `开始板书` `结束板书` | 启动 / 结束语音听写 |
+| Mode | Command | Action |
+|------|---------|--------|
+| Presentation | `开始播放` `结束播放` `下一页` `上一页` | F5 / Esc / → / ← |
+| Mouse | `点一下` `双击` `右键` | Left click / Double click / Right click |
+| Drawing | `清屏` `图形修正` | Clear canvas / Toggle shape correction |
+| Drawing | `开始板书` `结束板书` | Start / Stop voice dictation |
 
-任意模式下都可用：
+Available in all modes:
 
-| 指令 | 动作 |
-|------|------|
-| `演示模式` `鼠标模式` `板书模式` | 直接跳到指定模式（无需 🤟 手势切换） |
-| `最小化助手` `显示助手` | 最小化 / 还原 AirControl 浮窗 |
-| `召唤豆包` | 启动配置的语音助手应用 |
+| Command | Action |
+|---------|--------|
+| `演示模式` `鼠标模式` `板书模式` | Jump to specified mode (no 🤟 gesture needed) |
+| `最小化助手` `显示助手` | Minimize / Restore AirControl floating window |
+| `召唤豆包` | Launch configured voice assistant app |
 
-> 💡 浮窗上点 🎤 标签可弹出**完整语音指令面板**，当前模式的指令会高亮标注"← 当前"。再点 🎤 关闭面板，也可点面板右上角 ✕ 或直接拖动面板到任意位置。
+> 💡 Click the 🎤 tab on the floating window to open the **full voice command panel**. The current mode's commands are highlighted with "← current". Click 🎤 again to close, or click ✕ in the panel corner, or drag the panel anywhere.
 
 ---
 
-## 🏗️ 技术架构
+## 🏗️ Technical Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    AirControl 架构                       │
+│                  AirControl Architecture                 │
 ├─────────────────────────────────────────────────────────┤
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
-│  │  摄像头采集  │  │  语音输入   │  │  用户配置   │      │
+│  │  Camera     │  │  Voice      │  │  User       │      │
+│  │  Capture    │  │  Input      │  │  Config     │      │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘      │
 │         │                │                │              │
 │         ▼                ▼                ▼              │
 │  ┌─────────────────────────────────────────────────┐    │
 │  │              InferenceWorker (QThread)           │    │
 │  │  ┌─────────────┐  ┌─────────────┐               │    │
-│  │  │ MediaPipe   │  │ 卡尔曼滤波  │               │    │
-│  │  │ HandLandmark│  │ + EMA 平滑  │               │    │
+│  │  │ MediaPipe   │  │ Kalman      │               │    │
+│  │  │ HandLandmark│  │ + EMA       │               │    │
 │  │  └─────────────┘  └─────────────┘               │    │
 │  └─────────────────────────────────────────────────┘    │
 │         │                                                │
 │         ▼                                                │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │              ModeManager (模式管理器)            │    │
+│  │              ModeManager                         │    │
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐      │    │
-│  │  │ 演示模式 │  │ 鼠标模式 │  │ 板书模式 │      │    │
+│  │  │Presentat.│  │  Mouse   │  │ Drawing  │      │    │
 │  │  └──────────┘  └──────────┘  └──────────┘      │    │
 │  └─────────────────────────────────────────────────┘    │
 │         │                                                │
 │         ▼                                                │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐      │
-│  │  PPT 控制   │  │  鼠标控制   │  │  屏幕绘制   │      │
+│  │  PPT Ctrl   │  │  Mouse Ctrl │  │  Screen     │      │
+│  │             │  │             │  │  Drawing     │      │
 │  └─────────────┘  └─────────────┘  └─────────────┘      │
 └─────────────────────────────────────────────────────────┘
 ```
 
-### 核心技术栈
+### Core Technology Stack
 
-| 组件 | 技术 | 用途 |
-|------|------|------|
-| 手部检测 | MediaPipe HandLandmarker | 21 关键点实时检测 |
-| 手势识别 | ML 模型 + 规则回退 | 手势分类（拳头、张开、剪刀等） |
-| 位置平滑 | 卡尔曼滤波 + EMA | 消除抖动，丢失时预测 |
-| 形状校正 | OpenCV 几何分析 | 自动修正手绘图形 |
-| GUI | PyQt6 | 悬浮窗、设置面板、覆盖层 |
-| 鼠标控制 | Win32 API | SetCursorPos、mouse_event |
-| 语音 KWS | Sherpa-ONNX | 离线关键词检测 |
-| 语音 ASR | SenseVoice-Small（ONNX） | 离线语音听写 |
-| 音频采集 | sounddevice | 实时音频流 |
-
----
-
-## ⚙️ 配置选项
-
-点击悬浮窗的 ⚙️ 设置按钮，可调整以下参数：
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| **摄像头** | 后台异步枚举系统可用摄像头索引，下拉选完保存即**运行时切换**（笔记本+外接 USB 摄像头随时切） | 当前 |
-| 控制目标软件 | PowerPoint 或 WPS | WPS |
-| 手势模型精度 | Lite（更快）/ Heavy（更准） | Heavy |
-| 交互模式 | presentation / mouse / draw | presentation |
-| 手势防抖（冷却） | 连续手势间的最小间隔 | 1000 ms |
-| 鼠标灵敏度 | 鼠标模式下的跟踪灵敏度 | 40% |
-| 画笔粗细 | 板书模式下的笔触宽度 | 20 px |
-| 边缘加速 | 鼠标靠近边缘时自动加速 | 开启 |
-| 语音助手 | 选择语音助手应用 | 豆包 |
-| 动作映射 | 各手势对应的具体操作 | 见 `config.json` |
-
-### 进阶配置（直接编辑 `config.json`）
-
-| 字段 | 说明 | 默认 |
-|------|------|------|
-| `camera_width` / `camera_height` | 摄像头分辨率，`null` 时自动探测最高 ≥ min_fps 的模式 | `null` |
-| `camera_min_fps` | 自动探测时帧率下限，达不到的分辨率会被跳过 | 10 |
-| `camera_force_mjpeg` | 强制 MJPEG 编码（老摄像头 720p 上 30fps 必需） | true |
-| `dominant_hand` | 惯用手偏好：`Auto` / `Left` / `Right`，Auto 时纯靠运动+高度+近远自动选 | `Auto` |
-| `hand_detection_confidence` | 手部检测阈值，远距离调低（0.4-0.6） | 0.4 |
-| `hand_presence_confidence` | 手在画面中的判定阈值 | 0.5 |
-| `hand_tracking_confidence` | 帧间跟踪阈值 | 0.5 |
-| `pinch_exit_hysteresis_enabled` | 保留旧捏合进入阈值 0.35，已捏合时以 0.40 才退出；带真值 A/B 未增加漏检/延迟且误报更低 | true |
-| `pinch_hysteresis_enabled` | 旧版双阈值（进入 0.30 / 退出 0.40）；会增加漏检，继续默认关闭 | false |
-| `engine_auto_switch` | 仅以 MediaPipe 为近距基线时启用：无手后由后台预热的 YOLO 捕获，稳定单手后交回 MediaPipe | false |
-| `yolo_max_hands` | YOLO 捕获交给下游的最高置信候选数；远距单主控手默认 1 | 1 |
-| `pen_width_auto_scale` | 笔触粗细随手距自动缩放（关闭则始终同一粗细，光标灵敏度仍随手大小自适应） | false |
-| `mode_switch_hold_sec` | 🤟 切模式手势需保持的时长（秒） | 1.0 |
-| `mode_switch_vote_ratio` | 保持窗口内 🤟 标签帧占比阈值，远距离误检多可适当调低 | 0.6 |
-| `draw_frontality_gate` | 板书拇指可观测性门限（掌宽/食指长）。低于此值视为手侧对相机、拇指不可信，书写状态冻结；横扫时笔画总断可调低，抬笔不灵敏可调高 | 0.55 |
-| `draw_record_trace` | 板书时逐帧录制关键点到 `draw_trace.jsonl`，供 `simulate_draw.py --replay` 离线回放排查断触 | false |
-| `dictation_enabled` | 启用 SenseVoice 离线语音听写（draw 模式说"开始板书"） | true |
-| `dictation_language` | 听写语种：`auto`/`zh`/`en`/`ja`/`ko`/`yue` | `auto` |
-| `wps_exe_path` | 手动覆盖 WPS 路径，自动定位失败时用 | （无） |
-| `debug_overlay` | 启动即显示 FPS/手数/handedness 等调试信息 | false |
-
-> 💡 调试覆盖层也可以**运行时按 F1 切换**——不用改 config 重启。
-
-错误的配置值会被 schema 校验拦截并回退默认值（日志里会打 warning），不会让程序黑屏。
-
-配置会自动保存到 `config.json` 文件中。
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| Hand Detection | MediaPipe HandLandmarker | Real-time 21 landmark detection |
+| Gesture Recognition | ML model + rule fallback | Gesture classification (fist, open, scissor, etc.) |
+| Position Smoothing | Kalman filter + EMA | Eliminate jitter, predict on loss |
+| Shape Correction | OpenCV geometry analysis | Auto-correct hand-drawn shapes |
+| GUI | PyQt6 | Floating window, settings panel, overlays |
+| Mouse Control | Win32 API | SetCursorPos, mouse_event |
+| Voice KWS | Sherpa-ONNX | Offline keyword detection |
+| Voice ASR | SenseVoice-Small (ONNX) | Offline voice dictation |
+| Audio Capture | sounddevice | Real-time audio streaming |
 
 ---
 
-## 📁 项目结构
+## ⚙️ Configuration Options
+
+Click the ⚙️ settings button on the floating window to adjust:
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| **Camera** | Async background enumeration of available camera indices; select and save to **hot-swap at runtime** (laptop + external USB camera anytime) | Current |
+| Target App | PowerPoint or WPS | WPS |
+| Model Precision | Lite (faster) / Heavy (more accurate) | Heavy |
+| Interaction Mode | presentation / mouse / draw | presentation |
+| Gesture Cooldown | Minimum interval between gestures | 1000 ms |
+| Mouse Sensitivity | Tracking sensitivity in mouse mode | 40% |
+| Pen Width | Stroke width in drawing mode | 20 px |
+| Edge Acceleration | Auto-speed boost near screen edges | Enabled |
+| Voice Assistant | Select voice assistant app | Doubao |
+| Action Mapping | Gesture-to-action mapping | See `config.json` |
+
+### Advanced Configuration (edit `config.json` directly)
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `camera_width` / `camera_height` | Camera resolution; `null` auto-detects highest ≥ min_fps mode | `null` |
+| `camera_min_fps` | Framerate floor for auto-detection; resolutions below this are skipped | 10 |
+| `camera_force_mjpeg` | Force MJPEG encoding (essential for 30fps at 720p on legacy cameras) | true |
+| `dominant_hand` | Hand preference: `Auto` / `Left` / `Right`; Auto selects by motion + height + proximity | `Auto` |
+| `hand_detection_confidence` | Hand detection threshold; lower for long range (0.4-0.6) | 0.4 |
+| `hand_presence_confidence` | Hand presence determination threshold | 0.5 |
+| `hand_tracking_confidence` | Inter-frame tracking threshold | 0.5 |
+| `pinch_exit_hysteresis_enabled` | Keeps enter threshold 0.35, requires 0.40 to exit pinch; A/B validated: no added miss/latency, fewer false alarms | true |
+| `pinch_hysteresis_enabled` | Legacy dual-threshold (enter 0.30 / exit 0.40); increases misses, stays off by default | false |
+| `engine_auto_switch` | Only with MediaPipe as near-range baseline: after hand loss, background pre-warmed YOLO captures; hands off to MediaPipe on stable single-hand | false |
+| `yolo_max_hands` | Max high-confidence candidates YOLO passes downstream; 1 for long-range single hand | 1 |
+| `pen_width_auto_scale` | Auto-scale pen width by hand distance (off = constant width; cursor sensitivity still adapts to hand size) | false |
+| `mode_switch_hold_sec` | 🤟 mode-switch gesture hold duration (seconds) | 1.0 |
+| `mode_switch_vote_ratio` | 🤟 label frame ratio threshold within hold window; lower if distance causes misreads | 0.6 |
+| `draw_frontality_gate` | Drawing thumb observability gate (palm width / index length). Below this = hand sideways, thumb unreliable, pen state frozen; lower if strokes keep breaking, raise if hover is unresponsive | 0.55 |
+| `draw_record_trace` | Record per-frame landmarks to `draw_trace.jsonl` for `simulate_draw.py --replay` offline debugging | false |
+| `dictation_enabled` | Enable SenseVoice offline voice dictation (say "开始板书" in Draw mode) | true |
+| `dictation_language` | Dictation language: `auto`/`zh`/`en`/`ja`/`ko`/`yue` | `auto` |
+| `wps_exe_path` | Manual override for WPS path when auto-locate fails | (none) |
+| `debug_overlay` | Show FPS/hand count/handedness debug info on startup | false |
+
+> 💡 Debug overlay can also be **toggled at runtime with F1** — no config change or restart needed.
+
+Invalid config values are caught by schema validation and fall back to defaults (logged as warnings); the program won't black-screen.
+
+Settings are automatically saved to `config.json`.
+
+---
+
+## 📁 Project Structure
 
 ```
 AirControl/
 ├── app/
-│   ├── main.py                    # 命令行版本入口（OpenCV 窗口）
-│   ├── main_ui.py                 # GUI 版本入口（PyQt6 悬浮窗）
-│   ├── config_manager.py          # 配置文件读写管理
-│   ├── mode_manager.py            # 模式管理器（🤟 保持切换）
-│   ├── drawing_overlay.py         # 板书模式全屏画布
-│   ├── draw_toolbar.py            # 画板工具栏
-│   ├── mouse_cursor_overlay.py    # 鼠标光标叠加层
+│   ├── main.py                    # CLI entry (OpenCV window)
+│   ├── main_ui.py                 # GUI entry (PyQt6 floating window)
+│   ├── config_manager.py          # Config file read/write
+│   ├── mode_manager.py            # Mode manager (🤟 hold switch)
+│   ├── drawing_overlay.py         # Drawing mode fullscreen canvas
+│   ├── draw_toolbar.py            # Drawing toolbar
+│   ├── mouse_cursor_overlay.py    # Mouse cursor overlay
 │   ├── modes/
-│   │   ├── base.py                # 模式基类（策略模式）
-│   │   ├── presentation.py        # 演示模式
-│   │   ├── mouse_mode.py          # 鼠标模式
-│   │   └── draw_mode.py           # 板书模式
+│   │   ├── base.py                # Mode base class (strategy pattern)
+│   │   ├── presentation.py        # Presentation mode
+│   │   ├── mouse_mode.py          # Mouse mode
+│   │   └── draw_mode.py           # Drawing mode
 │   ├── services/
-│   │   ├── camera.py              # 摄像头服务
-│   │   ├── hand_tracker.py        # 手部关键点追踪（MediaPipe + 卡尔曼滤波）
-│   │   ├── gesture_recognizer.py  # 手势识别与挥动检测
-│   │   ├── inference_worker.py    # 异步推理工作线程
-│   │   ├── mouse_controller.py    # 鼠标控制（Win32 API）
-│   │   ├── ppt_controller.py      # PPT/WPS 控制
-│   │   ├── shape_recognizer.py    # 形状识别器
-│   │   ├── voice_assistant.py     # 语音助手服务
-│   │   ├── voice_command.py       # 语音命令处理（KWS）
-│   │   └── voice_dictation.py     # 语音听写（SenseVoice-Small）
-│   └── voice_keywords/            # 语音关键词配置
+│   │   ├── camera.py              # Camera service
+│   │   ├── hand_tracker.py        # Hand landmark tracking (MediaPipe + Kalman)
+│   │   ├── gesture_recognizer.py  # Gesture recognition & swipe detection
+│   │   ├── inference_worker.py    # Async inference worker thread
+│   │   ├── mouse_controller.py    # Mouse control (Win32 API)
+│   │   ├── ppt_controller.py      # PPT/WPS control
+│   │   ├── shape_recognizer.py    # Shape recognizer
+│   │   ├── voice_assistant.py     # Voice assistant service
+│   │   ├── voice_command.py       # Voice command processing (KWS)
+│   │   └── voice_dictation.py     # Voice dictation (SenseVoice-Small)
+│   └── voice_keywords/            # Voice keyword configs
 ├── models/
-│   ├── kws-zh-wenetspeech/        # 语音唤醒词模型
-│   └── sense-voice/               # SenseVoice-Small ASR 模型（手动下载）
-├── tests/                         # 单元测试
-├── config.json                    # 用户配置文件
-├── requirements.txt               # Python 依赖
-├── build.py                       # PyInstaller 打包脚本
-├── AirControl.spec                # PyInstaller 配置
-├── hand_landmarker.task           # MediaPipe 手部模型（7.8MB）
-└── gesture_recognizer.task        # 手势识别模型（8.4MB）
+│   ├── kws-zh-wenetspeech/        # Voice wake-up model
+│   └── sense-voice/               # SenseVoice-Small ASR model (manual download)
+├── tests/                         # Unit tests
+├── config.json                    # User configuration
+├── requirements.txt               # Python dependencies
+├── build.py                       # PyInstaller build script
+├── AirControl.spec                # PyInstaller config
+├── hand_landmarker.task           # MediaPipe hand model (7.8MB)
+└── gesture_recognizer.task        # Gesture recognition model (8.4MB)
 ```
 
 ---
 
-## 🧪 测试
+## 🧪 Testing
 
-运行单元测试：
+Run unit tests:
 
 ```bash
-# 运行所有测试
+# Run all tests
 python -m pytest tests/
 
-# 运行特定测试
+# Run specific test
 python -m pytest tests/test_edge_map.py
 ```
 
-测试覆盖：
-- ✅ 配置边界检查
-- ✅ 边缘映射算法
-- ✅ 鼠标控制器兼容性
-- ✅ 光标叠加层
-- ✅ 语音助手集成
-- ✅ UI 集成测试
+Test coverage:
+- ✅ Configuration boundary checks
+- ✅ Edge mapping algorithms
+- ✅ Mouse controller compatibility
+- ✅ Cursor overlay
+- ✅ Voice assistant integration
+- ✅ UI integration tests
 
 ---
 
-## 📦 打包为可执行文件
+## 📦 Build Executable
 
-项目已配置 PyInstaller，可一键打包为 Windows 可执行文件：
+The project is configured with PyInstaller for one-click packaging:
 
 ```bash
 python build.py
 ```
 
-打包后的文件将输出到 `dist/` 目录，包含所有依赖和核心模型文件。
-`hand_yolov8n.onnx`（AGPL-3.0）不打包进发布版，需要远距 YOLO 引擎的
-用户请按上方说明自行下载。详见 [模型来源与发布门禁](MODEL_PROVENANCE.md)。
-发布前可运行无摄像头/麦克风自检，退出码 `0` 表示模型与原生运行库加载成功：
+Output will be in the `dist/` directory with all dependencies and core model
+files included. `hand_yolov8n.onnx` (AGPL-3.0) is not bundled in the release;
+users who need the long-range YOLO engine should follow the download
+instructions above. See [Model Provenance and Release Gate](MODEL_PROVENANCE.md).
+Before release, run the hardware-free package self-test. Exit code `0` means
+the models and native runtimes loaded successfully:
 
 ```powershell
 $p = Start-Process .\dist\AirControl\AirControl.exe -ArgumentList "--self-test" -Wait -PassThru
@@ -439,59 +448,61 @@ $p.ExitCode
 
 ---
 
-## 🤝 贡献指南
+## 🤝 Contributing
 
-欢迎贡献代码、报告问题或提出建议！
+Contributions are welcome! Whether it's bug reports, feature requests, or code contributions.
 
-1. Fork 本项目
-2. 创建功能分支：`git checkout -b feature/your-feature`
-3. 提交更改：`git commit -m 'feat: add your feature'`
-4. 推送分支：`git push origin feature/your-feature`
-5. 创建 Pull Request
+1. Fork the project
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Commit changes: `git commit -m 'feat: add your feature'`
+4. Push to branch: `git push origin feature/your-feature`
+5. Create a Pull Request
 
-### 开发环境
+### Development Setup
 
 ```bash
-# 克隆项目
+# Clone project
 git clone https://github.com/enixz/AirControl.git
 cd AirControl
 
-# 创建虚拟环境
+# Create virtual environment
 python -m venv .venv
 .venv\Scripts\activate
 
-# 安装依赖
+# Install dependencies
 pip install -r requirements.txt
 
-# 运行测试
+# Run tests
 python -m pytest tests/
 ```
 
-### 代码规范
+### Code Standards
 
-- 遵循 PEP 8 代码规范
-- 添加类型注解
-- 编写单元测试
-- 更新文档
-
----
-
-## 🙏 致谢
-
-- [MediaPipe](https://mediapipe.dev/) - 手部检测和关键点追踪
-- [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) - 离线语音识别引擎
-- [PyQt6](https://riverbankcomputing.com/software/pyqt/) - GUI 框架
-- [OpenCV](https://opencv.org/) - 计算机视觉库
+- Follow PEP 8 coding standards
+- Add type annotations
+- Write unit tests
+- Update documentation
 
 ---
 
-## 📄 许可证
+## 🙏 Acknowledgments
 
-本项目**代码**采用 [Apache License 2.0](LICENSE) 许可证。第三方模型不自动适用
-该声明；`hand_yolov8n.onnx` 的 ONNX 元数据标为 AGPL-3.0，因此不打包进发布版，
-用户按 README 指引自行下载。详见
-[模型来源与发布门禁](MODEL_PROVENANCE.md)及
-[Ultralytics 官方许可证说明](https://www.ultralytics.com/license)。
+- [MediaPipe](https://mediapipe.dev/) - Hand detection and landmark tracking
+- [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx) - Offline speech recognition engine
+- [PyQt6](https://riverbankcomputing.com/software/pyqt/) - GUI framework
+- [OpenCV](https://opencv.org/) - Computer vision library
+
+---
+
+## 📄 License
+
+The repository **code** is licensed under the [Apache License 2.0](LICENSE).
+The `hand_yolov8n.onnx` model (AGPL-3.0) is **not bundled** in releases;
+users who need it download it separately. The release package therefore
+contains only Apache-2.0 code and permissively licensed dependencies. See
+[Model Provenance and Release Gate](MODEL_PROVENANCE.md) and the
+[official Ultralytics licensing guidance](https://www.ultralytics.com/license)
+for details.
 
 ```
 Copyright 2026 AirControl
@@ -513,7 +524,7 @@ limitations under the License.
 
 <div align="center">
 
-**如果觉得有用，请给个 ⭐ Star 支持一下！**
+**If you find this useful, please give us a ⭐ Star!**
 
 [![Star History Chart](https://api.star-history.com/svg?repos=enixz/AirControl&type=Date)](https://star-history.com/#enixz/AirControl&Date)
 
@@ -523,6 +534,6 @@ limitations under the License.
 
 <div align="center">
 
-[⬆ 回到顶部](#-aircontrol---隔空手势语音控制系统)
+[⬆ Back to Top](#-aircontrol---gesture--voice-control-system)
 
 </div>

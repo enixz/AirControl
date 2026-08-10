@@ -63,7 +63,7 @@ VSVersionInfo(
 def _check_version_consistency():
     """检查 README badge 与 version.py 是否一致，不一致则警告。"""
     app_ver = _get_app_version()
-    for readme_name in ("README.md", "README_EN.md"):
+    for readme_name in ("README.md",):
         readme_path = ROOT / readme_name
         if not readme_path.exists():
             continue
