@@ -49,6 +49,9 @@ add_data_if_present(
     os.path.join("app", "voice_keywords", "keywords.txt"),
     os.path.join("app", "voice_keywords"),
 )
+# Silero VAD（MIT 许可，629KB）：智能指令端点检测，可安全随包分发。
+# 模型不入 git（.gitignore），构建机缺失时打包跳过、运行时退回能量 VAD。
+add_data_if_present(datas, os.path.join("models", "silero_vad.onnx"), "models")
 
 # Optional assets are packaged when available in the build workspace.
 add_data_if_present(datas, os.path.join("models", "sense-voice"), "models/sense-voice")

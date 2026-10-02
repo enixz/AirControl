@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+AirControl 2.0 cloud intelligence layer (M1–M6): an optional OpenAI-compatible
+LLM layer on top of the fully-local v1.4 core, plus repo hygiene. All cloud
+features are **off by default** and gated behind `cloud.enabled` + an
+environment-variable API key; core gesture/voice features remain 100% local.
+
+- **Cloud provider layer (M1)**: `app/services/cloud/` — provider presets
+  (MoMA / custom OpenAI-compatible), key via env var only (never in
+  config.json), httpx client with retry/backoff (429 minute-window aware),
+  per-call token metering to `logs/token_usage.jsonl`, nested-schema config
+  validation for the `cloud` section.
+- **LLM smart command (M3)**: wake word `小助手` → one-sentence recording →
+  local SenseVoice transcription → cloud LLM intent parsing → whitelisted
+  action execution. Action whitelist derived from `voice_actions.py`,
+  narrowed by current mode; confidence threshold + JSON validation guard
+  against overreach.
+- **Classroom AI (M4)**: `下课总结` (class summary) / `出三道题` (quiz) —
+  accumulated dictation transcript → Markdown summary / practice questions
+  via cloud LLM, exported to `data/notes/` and written to the canvas.
+  Board-to-notes (vision model) implemented, UI wiring pending.
+- **Local voice feedback (M5)**: Windows SAPI spoken confirmations (mode
+  switches, generation results, refusals). Microphone frames are dropped
+  while speaking to prevent self-triggering.
+- **Cloud health monitor (M6)**: heartbeat ping (1-token chat), 3 consecutive
+  failures → degraded; floating-window status dot (gray/green/yellow).
+  Degraded state **blocks cloud features at the trigger** with a spoken hint
+  instead of waiting through retries (`auto_fallback`).
+- **Silero VAD for smart-command endpointing**: neural speech detection
+  (MIT, 629KB, `models/silero_vad.onnx`, auto-downloaded, packaged) replaces
+  the classroom-fragile RMS threshold; energy VAD remains the fallback when
+  the model is absent. Measured: real speech closes the session 1.4s after
+  speech end (RMS method hit the 8s cap).
+- **Fast-channel model A/B (2026-10-02)**: intent-parsing latency p50
+  1.06s on `deepseek-v4.1-flash` vs 2.38s (DeepSeek-V3) / 1.8–6.7s (GLM-5.2);
+  flash stays the default. Measured pitfall documented: `max_tokens < 256`
+  lets reasoning drain the budget and return empty content (see
+  `docs/moma_usable_models.md`).
+- **Repo hygiene**: dead ASR/TTS stub interfaces removed (MoMA free tier
+  verified to exclude cloud voice; recoverable from git history); root-level
+  experiment scripts moved to `scripts/`, handoff/release docs to `docs/`;
+  `logs/` and 软著登记材料/ gitignored; `config.json` local drift reverted.
+- **requirements.lock**: httpx chain (6 packages) pinned from the
+  2026-10-01 verified venv snapshot — new installs no longer crash on the
+  cloud import chain.
+
 ## v1.4.0 - 2026-08-10
 
 AirControl 1.4 consolidates the locally iterated pinch-stability work, the

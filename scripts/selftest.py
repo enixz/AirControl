@@ -37,7 +37,7 @@ for _stream in ("stdout", "stderr"):
         except Exception:
             pass
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 # 检查目标与 CI 保持一致（compileall / ruff 的作用范围），并把本脚本一并纳入自检。
 TARGETS = ["app", "tests", "benchmark_gesture_ab.py", "build.py", "selftest.py"]
 STAGES = ("compile", "lint", "tests")

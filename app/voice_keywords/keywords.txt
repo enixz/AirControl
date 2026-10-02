@@ -15,3 +15,6 @@ b ǎn sh ū m ó sh ì @板书模式
 y ǎn sh ì m ó sh ì @演示模式
 sh ǔ b iāo m ó sh ì @鼠标模式
 t ú x íng x iū zh èng @图形修正
+x ià k è z ǒng j ié @下课总结
+ch ū s ān d ào t í @出三道题
+x iǎo zh ù sh ǒu @小助手

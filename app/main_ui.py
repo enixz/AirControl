@@ -661,8 +661,11 @@ class FloatingWindow(QMainWindow):
         self.orchestrator.fps_updated.connect(self._on_fps_updated)
         self.orchestrator.mode_changed.connect(self._on_mode_changed)
         self.orchestrator.status_updated.connect(self._on_status_updated)
+        self.orchestrator.cloud_status_signal.connect(self._on_cloud_status)
         self.orchestrator.minimize_requested.connect(self.showMinimized)
         self.orchestrator.restore_requested.connect(self._on_restore_requested)
+        # orchestrator 构造期已 emit 过初始云端状态，这里主动取缓存补一次
+        self._on_cloud_status(getattr(self.orchestrator, "cloud_status", "unconfigured"))
 
         self._current_fps = 0.0
         self._preview_ms = deque(maxlen=180)
@@ -843,6 +846,21 @@ class FloatingWindow(QMainWindow):
         self._status_color_cache = (0, 255, 0)
         main_layout.addWidget(self.status_label)
 
+        # 云端状态灯（M6）：绿=云端在线，黄=降级离线，灰=未配置 Key
+        self.cloud_dot = QLabel("●")
+        self.cloud_dot.setFixedHeight(s(14))
+        self.cloud_dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.cloud_dot.setToolTip("云端状态：灰=未配置，绿=在线，黄=离线降级")
+        self._cloud_dot_style = """
+            QLabel {{
+                color: {color};
+                background-color: rgba(0, 0, 0, 180);
+                border-radius: 7px;
+                font-size: {size}px;
+            }}
+        """
+        main_layout.addWidget(self.cloud_dot)
+
         # 角落显示当前摄像头分辨率：浮层徽标（不进布局），左上角紧贴顶栏下方。
         # 文字由 _on_frame_processed 按实际帧尺寸刷新，故反映真实生效分辨率而非 config。
         self.res_label = QLabel(self.video_label)
@@ -982,6 +1000,24 @@ class FloatingWindow(QMainWindow):
             percentile(0.50),
             percentile(0.95),
             len(values),
+        )
+
+    # 云端状态灯配色（M6）：online=绿，degraded=黄，unconfigured=灰
+    _CLOUD_DOT_COLORS = {
+        "online": "#4caf50",
+        "degraded": "#ffb300",
+        "unconfigured": "#9e9e9e",
+    }
+
+    def _on_cloud_status(self, status):
+        """云端状态灯换色（cloud_health 降级/恢复时刷新）。"""
+        dot = getattr(self, "cloud_dot", None)
+        if dot is None:
+            return
+        color = self._CLOUD_DOT_COLORS.get(status, "#9e9e9e")
+        size = 11
+        dot.setStyleSheet(
+            self._cloud_dot_style.format(color=color, size=size)
         )
 
     def _on_voice_status_updated(self, text):
@@ -1452,6 +1488,19 @@ def main():
             voice._current_mode = config.get("interaction_mode", "mouse")
             voice._init_kws()
             voice.stop()
+
+            # Silero VAD 自检（智能指令端点检测）：模型为可选资产，
+            # 缺失时跳过（运行时退回能量 VAD），存在时验证可实例化。
+            from services.silero_vad import SileroVad
+
+            silero = SileroVad.try_create(resource_path("models", "silero_vad.onnx"))
+            if silero is None:
+                logger.info(
+                    "自检: silero_vad.onnx 未安装，智能指令端点检测退回能量 VAD。"
+                )
+            else:
+                silero.reset()
+                logger.info("自检: Silero VAD 加载正常")
         except Exception:
             logger.exception("发布自检失败")
             return 3

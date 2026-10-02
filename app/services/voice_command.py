@@ -18,6 +18,7 @@ import time
 
 import numpy as np
 from runtime_paths import resource_path
+from services.voice_actions import MODE_KEYWORDS, VOICE_KEYWORD_TO_ACTION
 
 try:
     import sounddevice as sd
@@ -33,52 +34,8 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 关键词 → Action 映射
+# 定义见 services.voice_actions（纯数据模块，便于无音频依赖处复用）
 # ---------------------------------------------------------------------------
-
-VOICE_KEYWORD_TO_ACTION = {
-    # 全局：助手 = 本程序窗口；豆包 = 外部 AI 助手
-    "最小化助手": "minimize_assistant",
-    "显示助手": "restore_assistant",
-    "召唤豆包": "launch_voice_assistant",
-    # 演示模式
-    "开始播放": "start_presentation",
-    "结束播放": "end_presentation",
-    "下一页": "next_slide",
-    "上一页": "prev_slide",
-    # 鼠标模式
-    "点一下": "left_click",
-    "双击": "double_click",
-    "右键": "right_click",
-    # 板书模式
-    "清屏": "clear_canvas",
-    "开始板书": "start_dictation",
-    "结束板书": "stop_dictation",
-    # 模式直跳（已经覆盖"切模式"的需求，无需循环切换指令）
-    "板书模式": "switch_to_draw",
-    "鼠标模式": "switch_to_mouse",
-    "演示模式": "switch_to_presentation",
-    # 板书模式 — 图形修正
-    "图形修正": "toggle_shape_correction",
-}
-
-# 各模式可用的关键词（None 表示全部可用）
-MODE_KEYWORDS = {
-    "presentation": [
-        "开始播放", "结束播放", "下一页", "上一页",
-        "最小化助手", "显示助手", "召唤豆包",
-        "板书模式", "鼠标模式",
-    ],
-    "mouse": [
-        "点一下", "双击", "右键",
-        "最小化助手", "显示助手", "召唤豆包",
-        "板书模式", "演示模式",
-    ],
-    "draw": [
-        "清屏", "开始板书", "结束板书", "图形修正",
-        "最小化助手", "显示助手", "召唤豆包",
-        "演示模式", "鼠标模式",
-    ],
-}
 
 
 class VoiceCommandService:
@@ -124,6 +81,13 @@ class VoiceCommandService:
         self._partial_busy = False
         self._last_partial_time = 0.0
 
+        # LLM 智能指令慢通道（M3）：唤醒词触发的一句话录音会话
+        self._llm_session = None
+        self._llm_session_id = 0
+        self._llm_session_lock = threading.Lock()
+        # 本地 TTS 播报服务（M5，注入）：播报期间丢弃麦克风帧
+        self._feedback = None
+
         # 线程安全：保护 _kws 和 _kws_stream 的并发访问
         # _detection_loop（工作线程）和 on_mode_changed（主线程）共享这些对象
         self._kws_lock = threading.Lock()
@@ -143,6 +107,11 @@ class VoiceCommandService:
         cache_root = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
         self._keywords_cache_dir = os.path.join(cache_root, "AirControl", "kws")
         os.makedirs(self._keywords_cache_dir, exist_ok=True)
+
+        # Silero VAD（M3 慢通道首选）：模型缺失/初始化失败时为 None，
+        # 会话内退回能量 VAD（与旧行为一致）。惰性构建：首次启动智能指令时才加载。
+        self._silero_vad = None
+        self._silero_vad_failed = False
 
         # 状态通知（供 UI 绑定）
         self._status_text = ""
@@ -194,6 +163,7 @@ class VoiceCommandService:
         self._dictation_status_callback = None
         self._dictation_partial_callback = None
         self._dictation_session_id += 1
+        self.cancel_llm_command()
         with self._reload_lock:
             self._pending_reload_mode = None
         with self._asr_threads_lock:
@@ -370,6 +340,90 @@ class VoiceCommandService:
     MIN_DICTATION_BEFORE_STOP = 1.5
     # KWS 命中"结束板书"后，用 SenseVoice 复核最近多少秒音频
     STOP_VERIFY_AUDIO_SEC = 3.0
+    # —— LLM 智能指令慢通道（M3）——
+    # 最长录音：说过话后到达上限强制结束
+    LLM_CMD_MAX_DURATION = 8.0
+    # 一直没检测到语音则取消（用户只是误触发唤醒词）
+    LLM_CMD_WAIT_SPEECH_SEC = 5.0
+    # 检测到语音后持续静音多少秒自动结束（说完一句自动停）
+    LLM_CMD_SILENCE_STOP_SEC = 1.2
+    # —— VAD 两级方案 ——
+    # 首选 Silero 神经网络 VAD（教室底噪鲁棒，模型 models/silero_vad.onnx）；
+    # 模型缺失时退回能量 VAD（RMS 阈值，约 -38dBFS）
+    LLM_CMD_SPEECH_RMS = 0.012
+
+    def set_feedback(self, feedback):
+        """注入 VoiceFeedbackService：TTS 播报期间丢弃麦克风帧，避免自触发。"""
+        self._feedback = feedback
+
+    def start_llm_command(self, on_text=None, on_status=None):
+        """启动一次 LLM 智能指令录音（唤醒词触发，说完一句自动停止）。
+
+        音频入独立缓冲，能量 VAD 判定"说完"（静音 1.2s）后自动结束并
+        送本地 SenseVoice 转写，结果经 on_text(text) 回调（worker 线程触发）。
+        会话中忽略所有 KWS 关键词；听写模式优先，互斥。
+
+        Returns:
+            True 表示已进入智能指令会话，False 表示拒绝
+        """
+        if not self._running:
+            logger.warning("语音服务未运行，无法启动智能指令")
+            return False
+        if self._dictation_mode:
+            logger.info("听写进行中，忽略智能指令触发")
+            return False
+        if self.dictation_service is None or not self.dictation_service.is_available():
+            logger.warning("听写服务不可用，智能指令不可用")
+            if on_status:
+                try:
+                    on_status("failed", "model_missing")
+                except Exception:
+                    pass
+            return False
+
+        # 惰性加载 + 重置 Silero VAD：必须在会话创建之前完成，
+        # 否则检测循环线程可能在 reset() 进行中并发 feed_block()。
+        # 首次触发多付一次模型加载（~百毫秒级），之后复用。
+        vad = self._ensure_silero_vad()
+        if vad is not None:
+            vad.reset()
+
+        with self._llm_session_lock:
+            if self._llm_session is not None:
+                logger.info("智能指令会话已在进行中，忽略重复触发")
+                return False
+            self._llm_session_id += 1
+            self._llm_session = {
+                "buffer": bytearray(),
+                "start": time.time(),
+                "has_speech": False,
+                "silence_start": None,
+                "session_id": self._llm_session_id,
+                "on_text": on_text,
+                "on_status": on_status,
+            }
+
+        # 清空唤醒词在 KWS 流里的残留状态，避免会话内误触发
+        try:
+            with self._kws_lock:
+                if self._kws is not None and self._kws_stream is not None:
+                    self._kws.reset_stream(self._kws_stream)
+        except Exception:
+            pass
+
+        if on_status:
+            try:
+                on_status("started", None)
+            except Exception:
+                pass
+        logger.info("智能指令会话已开始（说完一句自动结束，最长 %.0fs）",
+                    self.LLM_CMD_MAX_DURATION)
+        return True
+
+    def cancel_llm_command(self):
+        """取消进行中的智能指令会话（不触发 ASR）。"""
+        with self._llm_session_lock:
+            self._llm_session = None
 
     def start_dictation(self, on_text=None, on_status=None, on_partial=None):
         """切换到听写模式：持续录音直到 stop_dictation() 或超时。
@@ -602,6 +656,10 @@ class VoiceCommandService:
                         self._check_dictation_timeout()
                     continue
 
+                # TTS 播报期间丢弃麦克风帧（M5 防自触发）：既不喂 KWS 也不录音
+                if self._should_drop_audio():
+                    continue
+
                 # 听写模式：音频同时入缓冲 + KWS（检测"结束板书"）
                 if self._dictation_mode:
                     self._dictation_buffer.extend(audio_data)
@@ -614,6 +672,13 @@ class VoiceCommandService:
                     self._check_dictation_timeout()
                     self._maybe_trigger_partial_asr()
                     # 不 continue — 继续往下走 KWS，检测"结束板书"
+
+                # LLM 智能指令会话（M3）：音频入独立缓冲 + VAD 自动结束，
+                # 会话期间关键词被 _handle_keyword 忽略，故不再喂 KWS
+                if self._llm_session is not None:
+                    self._llm_session["buffer"].extend(audio_data)
+                    self._update_llm_vad(audio_data)
+                    continue
 
                 # int16 → float32 归一化
                 samples = np.frombuffer(audio_data, dtype=np.int16).astype(
@@ -844,6 +909,137 @@ class VoiceCommandService:
             except Exception:
                 logger.exception("听写回调异常")
 
+    # ------------------------------------------------------------------
+    # LLM 智能指令慢通道（M3）
+    # ------------------------------------------------------------------
+
+    def _should_drop_audio(self):
+        """TTS 播报期间丢弃麦克风帧（M5 防自触发）。"""
+        feedback = self._feedback
+        return feedback is not None and feedback.is_speaking()
+
+    def _ensure_silero_vad(self):
+        """惰性加载 Silero VAD；失败只试一次（_silero_vad_failed 熔断）。"""
+        if self._silero_vad is not None or self._silero_vad_failed:
+            return self._silero_vad
+        from services.silero_vad import SileroVad
+
+        self._silero_vad = SileroVad.try_create(
+            resource_path("models", "silero_vad.onnx"),
+            min_silence_duration=self.LLM_CMD_SILENCE_STOP_SEC,
+        )
+        if self._silero_vad is None:
+            self._silero_vad_failed = True
+        else:
+            logger.info("Silero VAD 已加载，智能指令端点检测启用神经网络判定")
+        return self._silero_vad
+
+    def _update_llm_vad(self, audio_data):
+        """语音活动检测：检测到语音后静音超过阈值即自动结束会话。
+
+        由检测循环线程调用；结束判定：
+
+        - 从未检测到语音超过 LLM_CMD_WAIT_SPEECH_SEC → 取消（误触发唤醒词）
+        - 说过话后静音超过 LLM_CMD_SILENCE_STOP_SEC → 正常结束
+        - 总时长超过 LLM_CMD_MAX_DURATION → 强制结束
+
+        VAD 两级：Silero（神经网络，模型存在时）优先；否则退回能量 RMS。
+        两级对"正在说话"的判定统一为布尔 speech_now，端点状态机共用。
+        """
+        session = self._llm_session
+        if session is None:
+            return
+        now = time.time()
+
+        vad = self._silero_vad if not self._silero_vad_failed else None
+        if vad is not None:
+            speech_now = vad.feed_block(audio_data)
+        else:
+            samples = np.frombuffer(audio_data, dtype=np.int16).astype(
+                np.float32
+            ) / 32768.0
+            rms = float(np.sqrt(np.mean(samples * samples))) if len(samples) else 0.0
+            speech_now = rms >= self.LLM_CMD_SPEECH_RMS
+
+        if speech_now:
+            session["has_speech"] = True
+            session["silence_start"] = None
+        elif session["has_speech"] and session["silence_start"] is None:
+            session["silence_start"] = now
+
+        elapsed = now - session["start"]
+        if not session["has_speech"] and elapsed >= self.LLM_CMD_WAIT_SPEECH_SEC:
+            logger.info("智能指令会话无语音超时，取消")
+            self._finish_llm_command(cancelled=True)
+        elif (
+            session["has_speech"]
+            and session["silence_start"] is not None
+            and now - session["silence_start"] >= self.LLM_CMD_SILENCE_STOP_SEC
+        ):
+            logger.info("智能指令静音 %.1fs，自动结束", self.LLM_CMD_SILENCE_STOP_SEC)
+            self._finish_llm_command(cancelled=False)
+        elif elapsed >= self.LLM_CMD_MAX_DURATION:
+            logger.info("智能指令会话超时，强制结束")
+            self._finish_llm_command(cancelled=False)
+
+    def _finish_llm_command(self, cancelled=False):
+        """结束智能指令会话：清状态并把音频转写推给后台线程。
+
+        可能从检测循环线程（VAD）/ stop() 调用；ASR 部分扔进 daemon 线程。
+        """
+        with self._llm_session_lock:
+            session = self._llm_session
+            self._llm_session = None
+        if session is None:
+            return
+
+        audio_bytes = bytes(session["buffer"])
+        on_text = session["on_text"]
+        on_status = session["on_status"]
+
+        # 清空会话期间 KWS 流里的残留状态
+        try:
+            with self._kws_lock:
+                if self._kws is not None and self._kws_stream is not None:
+                    self._kws.reset_stream(self._kws_stream)
+        except Exception:
+            pass
+
+        self._start_asr_thread(
+            self._run_llm_asr,
+            audio_bytes,
+            on_text,
+            on_status,
+            cancelled,
+            name="LlmCmdAsrWorker",
+        )
+
+    def _run_llm_asr(self, audio_bytes, on_text, on_status, cancelled):
+        """后台线程：智能指令音频 → SenseVoice 转写 → 回调。"""
+        text = ""
+        min_bytes = int(0.5 * self.SAMPLE_RATE) * 2  # 不足 0.5s 视为没说
+        if not cancelled and len(audio_bytes) >= min_bytes:
+            try:
+                samples = np.frombuffer(audio_bytes, dtype=np.int16).astype(
+                    np.float32
+                ) / 32768.0
+                text = self.dictation_service.dictate(samples, self.SAMPLE_RATE)
+                text = (text or "").strip()
+                logger.info("智能指令转写结果: %r", text)
+            except Exception:
+                logger.exception("智能指令 ASR 失败")
+
+        if on_status:
+            try:
+                on_status("done" if text else "failed", text)
+            except Exception:
+                pass
+        if on_text:
+            try:
+                on_text(text)
+            except Exception:
+                logger.exception("智能指令回调异常")
+
     @staticmethod
     def _strip_stop_keyword(text):
         """去除 ASR 结果中的"结束板书"指令词（含同音误识别变体）。
@@ -863,6 +1059,11 @@ class VoiceCommandService:
     def _handle_keyword(self, keyword):
         """处理检测到的关键词"""
         now = time.time()
+
+        # LLM 智能指令会话中：忽略所有关键词（会话 ≤8s 自动结束）
+        if self._llm_session is not None:
+            logger.debug("智能指令会话中忽略关键词: %s", keyword)
+            return
 
         # 听写模式下：只响应 "结束板书"，忽略其余所有关键词
         if self._dictation_mode:

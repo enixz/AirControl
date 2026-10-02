@@ -35,7 +35,7 @@ from importlib import import_module
 
 import cv2
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ----------------------------------------------------------------- 指标聚合 --

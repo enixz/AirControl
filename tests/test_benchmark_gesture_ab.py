@@ -1,4 +1,10 @@
+import os
+import sys
+
 import pytest
+
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 
 from benchmark_gesture_ab import _compute_freeze_observation
 

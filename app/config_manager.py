@@ -280,6 +280,46 @@ _CONFIG_SCHEMA = {
     "powerpoint_exe_path": ((str, type(None)), _is_optional_string, None),
 }
 
+# cloud 节（嵌套 dict）逐字段校验 schema，与 _CONFIG_SCHEMA 同结构
+_CLOUD_SCHEMA = {
+    "enabled": (bool, _is_bool, False),
+    "provider": (str, lambda v: v in ("moma", "custom"), "moma"),
+    "api_key_env": ((str, type(None)), _is_optional_string, None),
+    "base_url": ((str, type(None)), _is_optional_string, None),
+    "llm_fast_model": ((str, type(None)), _is_optional_string, None),
+    "llm_smart_model": ((str, type(None)), _is_optional_string, None),
+    "llm_vision_model": ((str, type(None)), _is_optional_string, None),
+    "auto_fallback": (bool, _is_bool, True),
+    "health_check_interval_sec": (int, _is_int_in(10, 3600), 60),
+}
+
+
+def _validate_cloud_section(cloud, defaults=None):
+    """cloud 节逐字段校验，风格同 _validate_config。"""
+    warnings = []
+    defaults = defaults or {}
+    if not isinstance(cloud, dict):
+        return dict(defaults), ["cloud 节类型不符（期望 dict），使用默认值"]
+    for key, (expected_type, validator, schema_default) in _CLOUD_SCHEMA.items():
+        if key not in cloud:
+            continue
+        default = defaults.get(key, schema_default)
+        value = cloud[key]
+        if not isinstance(value, expected_type) or (
+            expected_type is int and isinstance(value, bool)
+        ):
+            warnings.append(
+                f"cloud.{key}={value!r} 类型不符（期望 {expected_type}），使用默认值 {default!r}"
+            )
+            cloud[key] = default
+            continue
+        if not validator(value):
+            warnings.append(
+                f"cloud.{key}={value!r} 超出有效范围，使用默认值 {default!r}"
+            )
+            cloud[key] = default
+    return cloud, warnings
+
 
 def _validate_config(cfg, defaults=None):
     """逐字段校验，错误用默认值兜底，返回修正后的 dict 和警告列表。"""
@@ -305,6 +345,12 @@ def _validate_config(cfg, defaults=None):
                 f"{key}={value!r} 超出有效范围，使用默认值 {default!r}"
             )
             cfg[key] = default
+    # 嵌套的 cloud 节单独校验（扁平 schema 管不到 dict 内部字段）
+    if "cloud" in cfg:
+        cfg["cloud"], cloud_warnings = _validate_cloud_section(
+            cfg["cloud"], defaults=defaults.get("cloud", {})
+        )
+        warnings.extend(cloud_warnings)
     return cfg, warnings
 
 
@@ -396,6 +442,18 @@ class ConfigManager:
             "floating_window_scale": 1.5,
             "wps_exe_path": None,
             "powerpoint_exe_path": None,
+            # 云端接入层（AirControl 2.0 M1）：默认关闭，Key 只走环境变量
+            "cloud": {
+                "enabled": False,
+                "provider": "moma",          # moma | custom
+                "api_key_env": None,         # None → 预设默认（moma 为 MOMA_API_KEY）
+                "base_url": None,            # None → 预设默认
+                "llm_fast_model": None,      # None → 预设默认
+                "llm_smart_model": None,
+                "llm_vision_model": None,
+                "auto_fallback": True,
+                "health_check_interval_sec": 60,
+            },
             "gesture_mapping": {
                 "SWIPE_RIGHT": "next_slide",
                 "SWIPE_LEFT": "prev_slide",
@@ -430,9 +488,12 @@ class ConfigManager:
             if not isinstance(published, dict):
                 raise TypeError("config.json 顶层必须是对象")
             published_mapping = published.pop("gesture_mapping", None)
+            published_cloud = published.pop("cloud", None)
             defaults.update(published)
             if isinstance(published_mapping, dict):
                 defaults["gesture_mapping"].update(published_mapping)
+            if isinstance(published_cloud, dict):
+                defaults["cloud"].update(published_cloud)
             defaults, warnings = _validate_config(
                 defaults,
                 defaults=builtin_defaults,
@@ -461,6 +522,13 @@ class ConfigManager:
                     )
                     merged_mapping.update(user_config.get("gesture_mapping", {}))
                     merged["gesture_mapping"] = merged_mapping
+                    # cloud 节与 gesture_mapping 同理做键级合并，
+                    # 避免用户只写了部分 cloud 字段时丢掉默认键
+                    merged_cloud = copy.deepcopy(self.default_config["cloud"])
+                    user_cloud = user_config.get("cloud")
+                    if isinstance(user_cloud, dict):
+                        merged_cloud.update(user_cloud)
+                    merged["cloud"] = merged_cloud
                     # Schema 校验：错误字段用默认值兜底，避免误编辑导致黑屏
                     merged, warnings = _validate_config(
                         merged,

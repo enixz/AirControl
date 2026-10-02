@@ -204,9 +204,9 @@ def process_frame(frame: np.ndarray) -> dict:
 退出码 `0` 表示全部通过：
 
 ```bash
-python selftest.py          # 编译 + lint + 测试
-python selftest.py --cov    # 附带覆盖率
-python selftest.py -k mouse # 聚焦某些测试（参数透传给 pytest）
+python scripts/selftest.py          # 编译 + lint + 测试
+python scripts/selftest.py --cov    # 附带覆盖率
+python scripts/selftest.py -k mouse # 聚焦某些测试（参数透传给 pytest）
 ```
 
 详见 [docs/自测与开发循环.md](docs/自测与开发循环.md)。

@@ -57,6 +57,7 @@
 - **Offline Keyword Spotting**: Sherpa-ONNX directly recognizes command phrases (no wake word needed)
 - **Offline Dictation**: SenseVoice-Small writes speech-to-screen (say "开始板书" in Drawing Mode)
 - **Mode-aware**: Different modes auto-activate different command sets, preventing misfires
+- **Spoken Confirmations**: Local Windows SAPI voice feedback (mode switches, results)
 
 </td>
 </tr>
@@ -68,6 +69,7 @@
 - **Kalman Filter + Ghost Hand Recovery**: Dual smoothing for 21 landmarks, auto-fills brief occlusion
 - **Shape Correction**: Auto-detect and correct hand-drawn shapes
 - **Adaptive Pen Width**: Auto-thins at distance, auto-thickens up close
+- **Cloud Classroom AI** (optional): Class summary / quiz / smart voice commands via LLM
 
 </td>
 <td>
@@ -248,6 +250,7 @@ Mode-specific commands (only active in their respective modes):
 | Mouse | `点一下` `双击` `右键` | Left click / Double click / Right click |
 | Drawing | `清屏` `图形修正` | Clear canvas / Toggle shape correction |
 | Drawing | `开始板书` `结束板书` | Start / Stop voice dictation |
+| Drawing | `下课总结` `出三道题` | Cloud LLM: class summary / 3 practice questions |
 
 Available in all modes:
 
@@ -256,8 +259,56 @@ Available in all modes:
 | `演示模式` `鼠标模式` `板书模式` | Jump to specified mode (no 🤟 gesture needed) |
 | `最小化助手` `显示助手` | Minimize / Restore AirControl floating window |
 | `召唤豆包` | Launch configured voice assistant app |
+| `小助手` | Speak a free-form instruction (cloud LLM intent parsing) |
 
 > 💡 Click the 🎤 tab on the floating window to open the **full voice command panel**. The current mode's commands are highlighted with "← current". Click 🎤 again to close, or click ✕ in the panel corner, or drag the panel anywhere.
+
+---
+
+## ☁️ Cloud LLM Features (Optional, Off by Default)
+
+All core features (gestures, offline voice commands, dictation) run **100%
+locally with zero network calls**. An optional cloud layer adds
+LLM-powered classroom intelligence:
+
+| Feature | Trigger | What it does |
+|---------|---------|--------------|
+| **Class summary** (`下课总结`) | KWS keyword, Drawing mode | Accumulated dictation transcript → Markdown summary (key points / takeaways / open questions), exported to `data/notes/` and written to the canvas |
+| **Practice quiz** (`出三道题`) | KWS keyword, Drawing mode | Transcript → 3 practice questions with collapsible answers |
+| **Board-to-notes** | (API, UI wiring pending) | Canvas screenshot → structured Markdown notes (vision model) |
+| **Smart command** (`小助手`) | KWS keyword, any mode | Record one sentence → local SenseVoice transcription → cloud LLM intent parsing → executes whitelisted action (falls back to fixed keywords offline) |
+
+When the network degrades (health check fails 3 consecutive times), cloud
+features are **blocked at the trigger** with a spoken hint instead of
+letting you wait through retries — local features keep working. The
+floating window shows a cloud status dot: gray = no key configured,
+green = online, yellow = degraded.
+
+### Privacy Disclosure
+
+- **Off by default.** Cloud features activate only when you set `cloud.enabled=true`
+  in `config.json` **and** provide an API key via the environment variable named in
+  `cloud.api_key_env` (default `MOMA_API_KEY`). Keys are never written to `config.json`.
+- **What leaves your machine when enabled**: dictation transcript text
+  (for summary/quiz), one sentence of transcribed speech (for smart command),
+  or a canvas screenshot (for board-to-notes). Hand tracking, gestures, and
+  keyword spotting never send anything.
+- **Configurable endpoint**: any OpenAI-compatible API works (`cloud.provider="custom"`
+  with `base_url`/models); point it at a self-hosted LLM to keep data on-premise.
+- **Token metering** is logged locally to `logs/token_usage.jsonl` (per-call
+  model/tokens/latency), so you can audit exactly what was sent and when.
+
+### Cloud configuration (edit `config.json`)
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `cloud.enabled` | Master switch for all cloud features | `false` |
+| `cloud.provider` | `moma` (China Mobile preset) or `custom` (OpenAI-compatible) | `moma` |
+| `cloud.api_key_env` | Environment variable holding the API key | `MOMA_API_KEY` |
+| `cloud.base_url` | Override endpoint (custom provider requires it) | preset |
+| `cloud.llm_fast_model` / `llm_smart_model` / `llm_vision_model` | Model IDs for intent parsing / content generation / vision | preset |
+| `cloud.health_check_interval_sec` | Health-check heartbeat interval (10–3600) | `60` |
+| `voice_feedback_enabled` / `voice_feedback_volume` | Local spoken confirmations (Windows SAPI, offline) | `true` / `100` |
 
 ---
 
@@ -321,6 +372,9 @@ Available in all modes:
 | Mouse Control | Win32 API | SetCursorPos, mouse_event |
 | Voice KWS | Sherpa-ONNX | Offline keyword detection |
 | Voice ASR | SenseVoice-Small (ONNX) | Offline voice dictation |
+| Voice Activity Detection | Silero VAD (ONNX, MIT) | Neural speech endpoint detection for smart commands |
+| Cloud LLM | OpenAI-compatible API (MoMA preset / custom) | Class summary, quiz, intent parsing — optional |
+| Local TTS | Windows SAPI (pywin32) | Offline spoken confirmations |
 | Audio Capture | sounddevice | Real-time audio streaming |
 
 ---
@@ -369,7 +423,7 @@ Click the ⚙️ settings button on the floating window to adjust:
 | `mode_switch_hold_sec` | 🤟 mode-switch gesture hold duration (seconds) | 1.0 |
 | `mode_switch_vote_ratio` | 🤟 label frame ratio threshold within hold window; lower if distance causes misreads | 0.6 |
 | `draw_frontality_gate` | Drawing thumb observability gate (palm width / index length). Below this = hand sideways, thumb unreliable, pen state frozen; lower if strokes keep breaking, raise if hover is unresponsive | 0.65 |
-| `draw_record_trace` | Record per-frame landmarks to `draw_trace.jsonl` for `simulate_draw.py --replay` offline debugging | false |
+| `draw_record_trace` | Record per-frame landmarks to `draw_trace.jsonl` for `scripts/simulate_draw.py --replay` offline debugging | false |
 | `dictation_enabled` | Enable SenseVoice offline voice dictation (say "开始板书" in Draw mode) | true |
 | `dictation_language` | Dictation language: `auto`/`zh`/`en`/`ja`/`ko`/`yue` | `auto` |
 | `floating_window_scale` | Scale factor for the floating control window | 1.5 |
@@ -434,7 +488,9 @@ AirControl/
 │   └── voice_keywords/            # Voice keyword configs
 ├── models/
 │   ├── kws-zh-wenetspeech/        # Voice keyword spotting model
-│   └── sense-voice/               # SenseVoice-Small ASR model (manual download)
+│   ├── sense-voice/               # SenseVoice-Small ASR model (manual download)
+│   └── silero_vad.onnx            # Silero VAD (MIT, auto-downloaded, optional)
+├── scripts/                       # Offline A/B & evaluation tools, selftest
 ├── tests/                         # Unit tests
 ├── config.json                    # User configuration
 ├── requirements.txt               # Python dependencies

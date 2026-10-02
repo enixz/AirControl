@@ -10,8 +10,13 @@ import numpy as np
 from config_manager import ConfigManager
 from mode_manager import ModeManager
 from modes import MODE_NAME_ZH, DrawMode, MouseMode, PresentationMode
+from runtime_paths import writable_data_dir
 from PyQt6.QtCore import QObject, pyqtSignal
 from services.camera import CameraService, list_available_cameras
+from services.classroom_ai import ClassroomAI, save_markdown
+from services.cloud.cloud_health import CloudHealthMonitor
+from services.cloud.llm_client import LLMClient
+from services.cloud.llm_intent import parse_intent
 from services.engine_auto_switcher import (
     ENGINE_HAGRID_YOLO,
     STATE_CAPTURE,
@@ -32,6 +37,7 @@ from services.temporal_voter import TemporalGestureVoter
 from services.voice_assistant import VoiceAssistantService
 from services.voice_command import VoiceCommandService
 from services.voice_dictation import VoiceDictationService
+from services.voice_feedback import VoiceFeedbackService
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +82,17 @@ class AirControlOrchestrator(QObject):
     minimize_requested = pyqtSignal()
     restore_requested = pyqtSignal()
 
+    # 云端状态灯（M6）：online / degraded / unconfigured
+    cloud_status_signal = pyqtSignal(str)
+
     # Internal voice & dictation signals (marshalled from backend threads to main thread)
     _voice_action_signal = pyqtSignal(str)
     _dictation_status_signal = pyqtSignal(str, object)   # phase, payload
     _dictation_text_signal = pyqtSignal(str, object)     # text, anchor_pos
     _dictation_partial_signal = pyqtSignal(str)          # partial transcription
+    _classroom_text_signal = pyqtSignal(str)             # 课堂智能生成内容（写屏）
+    _llm_command_text_signal = pyqtSignal(str)           # LLM 慢通道转写文本
+    _llm_intent_result_signal = pyqtSignal(object, str)  # 意图解析结果 (action|None, reason)
     _tracker_ready_signal = pyqtSignal(object, object, int, str)
 
     def __init__(
@@ -111,6 +123,9 @@ class AirControlOrchestrator(QObject):
         self._dictation_status_signal.connect(self._on_dictation_status)
         self._dictation_text_signal.connect(self._on_dictation_text)
         self._dictation_partial_signal.connect(self._on_dictation_partial)
+        self._classroom_text_signal.connect(self._on_classroom_text)
+        self._llm_command_text_signal.connect(self._on_llm_command_text)
+        self._llm_intent_result_signal.connect(self._on_llm_intent_result)
         self._tracker_ready_signal.connect(self._on_tracker_ready)
         self._tracker_request_id = 0
         self._closing = False
@@ -124,6 +139,13 @@ class AirControlOrchestrator(QObject):
 
         self._voice_keyword_flash = None
         self._voice_keyword_time = 0.0
+
+        # 课堂智能层（M4）生成防重入标志（服务实例在 init_services 里构造）
+        self._classroom_busy = False
+        self._classroom_busy_lock = threading.Lock()
+
+        # 云端状态缓存（M6 状态灯；cloud_health 回调与 UI 初始化读取）
+        self.cloud_status = "unconfigured"
 
         # 远距引擎自动切换（config engine_auto_switch，默认关闭）：
         # 三态闭环 NEAR/CAPTURE/FAR_TRACK（见 services/engine_auto_switcher.py）。
@@ -322,6 +344,33 @@ class AirControlOrchestrator(QObject):
             dictation_service=self.voice_dictation,
         )
         self.voice_command.set_status_callback(self._on_voice_keyword_detected)
+
+        # 课堂智能层（M4）：云端 LLM 生成课堂小结/随堂题；
+        # cloud 未配置/未启用时构造安全，is_available() 返回 False
+        self.llm_client = LLMClient(self.config)
+        self.classroom_ai = ClassroomAI(self.llm_client)
+
+        # 本地语音播报（M5）：Windows SAPI；播报期间 KWS 丢帧防自触发
+        self.voice_feedback = VoiceFeedbackService(self.config)
+        self.voice_command.set_feedback(self.voice_feedback)
+
+        # 云端健康监控（M6）：心跳失败降级 / 恢复；状态推送悬浮窗状态灯
+        self.cloud_health = None
+        cloud_cfg = self.config.get("cloud") or {}
+        if self.llm_client.is_configured():
+            self.cloud_health = CloudHealthMonitor(
+                self.llm_client,
+                interval_sec=cloud_cfg.get("health_check_interval_sec") or 60,
+            )
+            self.cloud_health.subscribe_degraded(self._on_cloud_degraded)
+            self.cloud_health.subscribe_recovered(self._on_cloud_recovered)
+            self.cloud_health.start()
+        self.cloud_status = (
+            self.cloud_health.status if self.cloud_health is not None
+            else "unconfigured"
+        )
+        self.cloud_status_signal.emit(self.cloud_status)
+
         if self.config.get("voice_command_enabled") is not False:
             try:
                 self.voice_command.start()
@@ -1095,6 +1144,10 @@ class AirControlOrchestrator(QObject):
                 winsound.PlaySound("SystemAsterisk", winsound.SND_ALIAS | winsound.SND_ASYNC)
             except RuntimeError:
                 winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            # 本地 TTS 播报（M5）：模式切换语音确认
+            feedback = getattr(self, "voice_feedback", None)
+            if feedback is not None:
+                feedback.say("已切换到{}模式".format(self._mode_name_zh()))
 
         self.status_text = f"已切换到{self._mode_name_zh()}"
         self.status_color = (0, 255, 255)
@@ -1414,7 +1467,196 @@ class AirControlOrchestrator(QObject):
             logger.error("写文字到画布失败: %s", e, exc_info=True)
             self.voice_status_updated.emit("⚠️ 渲染失败")
             return
+        # 课堂智能层（M4）：转录文本累积到课堂 buffer，供"下课总结/出三道题"生成
+        if getattr(self, "classroom_ai", None) is not None:
+            self.classroom_ai.append_transcript(text)
         self.voice_status_updated.emit(f"✍️ {text[:20]}")
+
+    # ------------------------------------------------------------------
+    # Classroom AI Functions (M4)
+    # ------------------------------------------------------------------
+
+    def _start_classroom_generation(self, kind):
+        """触发课堂智能生成（summary | quiz）。LLM 生成需数秒，转后台线程。"""
+        classroom = getattr(self, "classroom_ai", None)
+        if classroom is None:
+            return
+        if not classroom.is_available():
+            self.voice_status_updated.emit("☁️ 云端未配置，课堂智能不可用")
+            return
+        # auto_fallback：云端已判定 degraded 时直接拦截，不让用户白等
+        # 重试超时（网络错误 3 次重试 × 指数退避 ≈ 半分钟）
+        if self.cloud_status == "degraded":
+            self.voice_status_updated.emit("⚠️ 网络不佳，云端功能暂不可用，稍后自动恢复")
+            feedback = getattr(self, "voice_feedback", None)
+            if feedback is not None:
+                feedback.say("网络不佳，请稍后再试")
+            return
+        if not classroom.get_transcript():
+            self.voice_status_updated.emit("⚠️ 还没有板书内容，先开始板书")
+            return
+        with self._classroom_busy_lock:
+            if self._classroom_busy:
+                self.voice_status_updated.emit("⏳ 正在生成中，请稍候")
+                return
+            self._classroom_busy = True
+
+        if kind == "summary":
+            self.voice_status_updated.emit("☁️ 正在生成课堂小结…")
+        else:
+            self.voice_status_updated.emit("☁️ 正在生成随堂题…")
+        self._start_background_thread(
+            self._generate_classroom_content, "ClassroomAIWorker", args=(kind,)
+        )
+
+    def _generate_classroom_content(self, kind):
+        """后台线程：云端 LLM 生成并导出 Markdown，写屏经信号回 UI 线程。"""
+        classroom = getattr(self, "classroom_ai", None)
+        if classroom is None:
+            return
+        try:
+            if kind == "summary":
+                result = classroom.generate_summary()
+            else:
+                result = classroom.generate_quiz(count=3)
+        except Exception:
+            logger.exception("课堂智能生成异常")
+            self.voice_status_updated.emit("⚠️ 生成异常")
+            return
+        finally:
+            with self._classroom_busy_lock:
+                self._classroom_busy = False
+        if not result.ok:
+            self.voice_status_updated.emit("⚠️ 生成失败：{}".format(result.reason))
+            return
+        notes_dir = os.path.join(writable_data_dir(), "notes")
+        export_path = os.path.join(
+            notes_dir,
+            "{}_{}.md".format(
+                "class_summary" if kind == "summary" else "class_quiz",
+                time.strftime("%Y%m%d-%H%M%S"),
+            ),
+        )
+        if save_markdown(result.text, export_path):
+            self.voice_status_updated.emit("📄 已导出：{}".format(export_path))
+        # 投屏展示：经信号回 UI 线程写画布，不追加进课堂转录 buffer
+        self._classroom_text_signal.emit(result.text)
+
+    def _on_classroom_text(self, text):
+        """UI 线程：生成内容写画布（样式同听写字幕，可撤销/清屏）。"""
+        if hasattr(self, "overlay") and self.overlay is not None:
+            try:
+                self.overlay.clear_dictation_caption()
+                self.overlay.draw_text(text)
+                self.voice_status_updated.emit("✅ 生成完毕，已写屏")
+                feedback = getattr(self, "voice_feedback", None)
+                if feedback is not None:
+                    feedback.say("生成完毕")
+            except Exception as e:
+                logger.error("课堂内容写屏失败: %s", e, exc_info=True)
+                self.voice_status_updated.emit("⚠️ 写屏失败")
+
+    # ------------------------------------------------------------------
+    # LLM Voice Command (M3 慢通道)
+    # ------------------------------------------------------------------
+
+    def _start_llm_command(self):
+        """唤醒词触发：录一句话 → 本地 SenseVoice 转写 → LLM 意图解析。"""
+        classroom = getattr(self, "classroom_ai", None)
+        if classroom is None or not classroom.is_available():
+            self.voice_status_updated.emit("☁️ 云端未配置，智能指令不可用")
+            feedback = getattr(self, "voice_feedback", None)
+            if feedback is not None:
+                feedback.say("云端未配置")
+            return
+        # auto_fallback：degraded 时不开录音会话 —— 录完也解析不了，
+        # 不如当场拒绝，用户改用固定关键词指令（KWS 本地照常可用）
+        if self.cloud_status == "degraded":
+            self.voice_status_updated.emit("⚠️ 网络不佳，请用固定指令，稍后自动恢复")
+            feedback = getattr(self, "voice_feedback", None)
+            if feedback is not None:
+                feedback.say("网络不佳，请用固定指令")
+            return
+        if not hasattr(self, "voice_command") or not self.voice_command.is_running:
+            return
+
+        def on_status(phase, payload):
+            if phase == "started":
+                self.voice_status_updated.emit("🎙️ 请说指令…")
+            elif phase == "failed":
+                self.voice_status_updated.emit("⚠️ 没听清，请再说一次")
+
+        def on_text(text):
+            # ASR worker 线程 → 信号 marshal 回 UI 线程
+            self._llm_command_text_signal.emit(text or "")
+
+        ok = self.voice_command.start_llm_command(on_text=on_text, on_status=on_status)
+        if not ok:
+            self.voice_status_updated.emit("⏳ 请说完当前指令")
+
+    def _on_llm_command_text(self, text):
+        """UI 线程：转写文本 → 后台 LLM 意图解析（快通道 flash 模型）。"""
+        text = (text or "").strip()
+        feedback = getattr(self, "voice_feedback", None)
+        if not text:
+            self.voice_status_updated.emit("⚠️ 没听清，请再说一次")
+            if feedback is not None:
+                feedback.say("没听清，请再说一次")
+            return
+        self.voice_status_updated.emit("🧠 正在理解：{}".format(text[:24]))
+        self._start_background_thread(
+            self._resolve_llm_intent, "LlmIntentWorker", args=(text,)
+        )
+
+    def _resolve_llm_intent(self, text):
+        """后台线程：LLM 意图解析，结果经信号回 UI 线程。"""
+        mode = None
+        mode_manager = getattr(self, "mode_manager", None)
+        if mode_manager is not None:
+            mode = getattr(mode_manager, "current_mode_name", None)
+        try:
+            result = parse_intent(text, self.llm_client, mode=mode)
+        except Exception:
+            logger.exception("LLM 意图解析异常")
+            self._llm_intent_result_signal.emit(None, "error")
+            return
+        if result.accepted:
+            self._llm_intent_result_signal.emit(result.action, "ok")
+        else:
+            self._llm_intent_result_signal.emit(None, result.reason)
+
+    def _on_llm_intent_result(self, action, reason):
+        """UI 线程：执行 action 或礼貌拒绝（TTS 播报）。"""
+        feedback = getattr(self, "voice_feedback", None)
+        if action:
+            self.voice_status_updated.emit("✅ 已执行：{}".format(action))
+            self.execute_action(action)
+        else:
+            self.voice_status_updated.emit("🤔 没听懂，请换种说法")
+            if feedback is not None:
+                feedback.say("没听懂，请换种说法")
+
+    # ------------------------------------------------------------------
+    # 云端健康（M6 降级 / 恢复）
+    # ------------------------------------------------------------------
+
+    def _on_cloud_degraded(self):
+        """健康监控线程回调：连续失败达到阈值 → 离线模式。"""
+        self.cloud_status = "degraded"
+        self.cloud_status_signal.emit("degraded")
+        self.voice_status_updated.emit("⚠️ 网络异常，已切换离线模式")
+        feedback = getattr(self, "voice_feedback", None)
+        if feedback is not None:
+            feedback.say("网络异常，已切换离线模式")
+
+    def _on_cloud_recovered(self):
+        """健康监控线程回调：降级后探测恢复。"""
+        self.cloud_status = "online"
+        self.cloud_status_signal.emit("online")
+        self.voice_status_updated.emit("✅ 云端已恢复")
+        feedback = getattr(self, "voice_feedback", None)
+        if feedback is not None:
+            feedback.say("云端已恢复")
 
     # ------------------------------------------------------------------
     # Action Dispatcher
@@ -1492,6 +1734,12 @@ class AirControlOrchestrator(QObject):
             if self.mode_manager.current_mode_name == "draw":
                 enabled = self.overlay.toggle_shape_correction()
                 self.toolbar.set_shape_correction(enabled)
+        elif action_name == "class_summary":
+            self._start_classroom_generation("summary")
+        elif action_name == "class_quiz":
+            self._start_classroom_generation("quiz")
+        elif action_name == "llm_command":
+            self._start_llm_command()
 
     def close(self, timeout_sec=3.0):
         """Resource release when window is closed."""
@@ -1564,6 +1812,28 @@ class AirControlOrchestrator(QObject):
                     stop_assistant()
                 except Exception:
                     logger.exception("停止语音助手服务失败")
+
+        # 云端健康监控（M6）：停止心跳
+        if getattr(self, "cloud_health", None) is not None:
+            try:
+                self.cloud_health.stop()
+            except Exception:
+                logger.exception("停止云端健康监控失败")
+
+        # 本地语音播报（M5）：停止 TTS
+        feedback = getattr(self, "voice_feedback", None)
+        if feedback is not None:
+            try:
+                feedback.stop()
+            except Exception:
+                logger.exception("停止语音播报失败")
+
+        # 课堂智能层（M4）：关闭云端 LLM 客户端（httpx 连接池）
+        if getattr(self, "llm_client", None) is not None:
+            try:
+                self.llm_client.close()
+            except Exception:
+                logger.exception("关闭云端 LLM 客户端失败")
 
         background_stopped = self._wait_for_background_threads(remaining())
         shutdown_incomplete = shutdown_incomplete or not background_stopped

@@ -63,6 +63,9 @@ models/hand_yolov8n.pt
 # 由 MODEL_PROVENANCE.md 指引按需导出（Ultralytics AGPL，仅本地实验用）。
 models/yolov8n-pose.onnx
 models/yolov8s-pose.onnx
+# Silero VAD 模型（629KB，MIT 许可）：由 build.py 自带下载逻辑，
+# 发布包经 AirControl.spec 打包；开发环境缺失时慢通道自动退回能量 VAD。
+models/silero_vad.onnx
 
 # Claude Code 工作目录（包含 worktree、隔离副本等内部产物）
 .claude/
@@ -85,6 +88,11 @@ raw_capture/
 refactor_backup_*/
 最早对话.md
 AC-trae_问题清单.md
+
+# 云端 token 计量日志（LLMClient 每次调用落盘，本机运行产物）
+logs/
+# 软著登记材料（含个人签章扫描件，永不入库）
+软著登记材料/
 AI_CONTRIBUTIONS.md
 PLAN.md
 DEMO作品帖.md
