@@ -8,6 +8,7 @@ from services.mouse_controller import (
     blended_landmark_point,
     interp_tiers,
 )
+from services.pinch_fsm import PinchButtonStateMachine
 
 from .base import ModeBase, ModeResult
 
@@ -73,6 +74,15 @@ class MouseMode(ModeBase):
         # 新增：状态机初始化
         self._is_left_holding = False
         self._is_right_pinching = False
+        # 捏合按钮状态机（第 3 步）：左右键各自显式状态与转换原因
+        self._left_fsm = PinchButtonStateMachine(log=logger.info)
+        self._right_fsm = PinchButtonStateMachine()
+        self._left_fsm.reset()
+        self._right_fsm.reset()
+        self._prediction_since = None
+        self._last_fresh_features = None
+        self._feature_track_key = None
+        self._pinch_press_since = {}
         # watchdog 触发后阻塞 LEFTDOWN，直到用户真正松开捏合再允许重新按下，
         # 避免主线程恢复后第一帧又把同样的死锁场景重建
         self._left_hold_blocked_until_release = False
@@ -107,6 +117,10 @@ class MouseMode(ModeBase):
             self.mouse.left_up()
             self._is_left_holding = False
             self.cursor_overlay.set_left_hold(False)
+        if getattr(self, '_left_fsm', None):
+            self._left_fsm.force_release("on_exit")
+        if getattr(self, '_right_fsm', None):
+            self._right_fsm.force_release("on_exit")
         self._is_right_pinching = False
         # 清除 freeze-on-pinch 状态
         self._frozen_pos = None
@@ -144,6 +158,7 @@ class MouseMode(ModeBase):
             # 注意：cursor_overlay 是 Qt 控件，主线程被堵时它的 update 也不会刷新，
             # 暂不在此处调用；等主线程恢复后 handle() 自己会同步视觉状态
             self._is_left_holding = False
+            self._left_fsm.force_release("watchdog")
             self._left_hold_blocked_until_release = True
             # 复位时间戳：避免主线程恢复后第一帧又被 watchdog 再次判定为 stuck
             self._last_handle_time = time.time()
@@ -151,6 +166,42 @@ class MouseMode(ModeBase):
     def handle(self, hands_landmarks, hands_gestures, frame_w, frame_h) -> ModeResult:
         self._last_handle_time = time.time()
         self._sync_frame_size(frame_w, frame_h)
+        predicted = bool(hands_gestures and hands_gestures[0].get("predicted", False))
+        now = time.monotonic()
+        if predicted:
+            if getattr(self, "_prediction_since", None) is None:
+                self._prediction_since = now
+            # Predictions may bridge a short hold, but never latch a button
+            # indefinitely or start a new click without fresh detection.
+            if now - self._prediction_since >= 0.12:
+                hands_landmarks = []
+        else:
+            self._prediction_since = None
+        features = None
+        ml_label = hands_gestures[0].get("ml_label") if hands_gestures else None
+        if hands_landmarks:
+            key = hands_gestures[0].get("track_key") if hands_gestures else None
+            if key != getattr(self, "_feature_track_key", None):
+                # 换手：捏合历史不跨手继承（第 2/3 步）
+                self.recognizer.reset_hand_features()
+                self._pinch_press_since.clear()
+                self._left_fsm.reset()
+                self._right_fsm.reset()
+            self._feature_track_key = key
+            if predicted:
+                features = dict(getattr(self, "_last_fresh_features", {}) or {})
+                if not features:
+                    hands_landmarks = []
+                else:
+                    features["thumb_index_pinch"] = self._is_left_holding
+                    features["thumb_middle_pinch"] = self._is_right_pinching
+            else:
+                features = self.recognizer.get_hand_features(hands_landmarks[0])
+                self._last_fresh_features = dict(features)
+            if features:
+                features = dict(features)
+                # 远距小手的按下确认已由 PinchButtonStateMachine（distant 参数）
+                # 统一管理；此处不再二次门控，避免确认窗口互相清零。
         # 除零保护：异常帧（摄像头初始化/重连）时 frame_w/h 可能为 0
 
         # Rate-limited pinch telemetry logging (once every 15 frames) to gesture.log
@@ -158,7 +209,6 @@ class MouseMode(ModeBase):
             self._frame_count = getattr(self, "_frame_count", 0) + 1
             if self._frame_count % 15 == 0:
                 landmarks = hands_landmarks[0]
-                features = self.recognizer.get_hand_features(landmarks)
                 thumb_index = math.hypot(landmarks[4][1] - landmarks[8][1], landmarks[4][2] - landmarks[8][2])
                 thumb_middle = math.hypot(landmarks[4][1] - landmarks[12][1], landmarks[4][2] - landmarks[12][2])
                 hand_width = features.get("hand_width", 40.0)
@@ -187,6 +237,12 @@ class MouseMode(ModeBase):
             return ModeResult(gesture="NONE")
         # 1. 手丢失：释放左键 + 重置
         if not hands_landmarks:
+            self.recognizer.reset_hand_features()
+            self._last_fresh_features = None
+            self._feature_track_key = None
+            self._pinch_press_since.clear()
+            self._left_fsm.force_release("hand_lost")
+            self._right_fsm.force_release("hand_lost")
             if getattr(self, '_is_left_holding', False):
                 self.mouse.left_up()
                 self._is_left_holding = False
@@ -209,7 +265,6 @@ class MouseMode(ModeBase):
             )
 
         landmarks = hands_landmarks[0]
-        features = self.recognizer.get_hand_features(landmarks)
         # 先把中指尖归一化坐标经活动区映射拉伸到全屏（远距离也能轻松跨屏），
         # 再交给 move_to_normalized 做灵敏度平滑+落点。v1.3.6 稳定档默认不再叠加
         # 边缘加速，避免“活动区映射 + 边缘加速”双重放大；用户开启边缘加速时才启用。
@@ -268,54 +323,85 @@ class MouseMode(ModeBase):
                 self.cursor_overlay.trigger_scroll(scroll_dir)
                 # 滚动时不提前 return，继续处理移动和点击，实现边滚边操作
 
-        # 3. 左键按住状态机（使用 recognizer 的 pinch 特征，与老版一致）
-        if features["thumb_index_pinch"]:
-            # watchdog 强制释放过一次后，必须等用户先松手才允许再 LEFTDOWN，
-            # 否则主线程刚解锁就在同一位置再次进入模态循环重新死锁
+        # 3. 左键按住状态机（第 3 步：显式 FSM，每次转换有原因）
+        distant_hand = bool(features.get("hand_width", 0.) / max(frame_w, 1) < 0.03)
+        hw = features.get("hand_width", 0.) or 40.0
+        ti_px = math.hypot(landmarks[4][1] - landmarks[8][1],
+                           landmarks[4][2] - landmarks[8][2])
+        tm_px = math.hypot(landmarks[4][1] - landmarks[12][1],
+                           landmarks[4][2] - landmarks[12][2])
+        clearly_open_index = ti_px / hw >= 0.55 if hw else False
+        clearly_open_middle = tm_px / hw >= 0.55 if hw else False
+        want_hold, left_transition = self._left_fsm.update(
+            pinch=bool(features["thumb_index_pinch"]),
+            fresh=not predicted,
+            ml_label=ml_label,
+            now=now,
+            distant=distant_hand,
+            clearly_open=clearly_open_index,
+        )
+        if left_transition == "press_confirmed":
+            # watchdog 强制释放过一次后，必须等用户先松手才允许再 LEFTDOWN
             if self._left_hold_blocked_until_release:
-                return ModeResult(
-                    gesture="MOUSE_MOVE",
-                    status_text="松手后再按",
-                    status_color=(200, 160, 0),
-                )
-            if not self._is_left_holding:
+                want_hold = False
+            else:
                 self.mouse.left_down()
                 self._is_left_holding = True
                 self.cursor_overlay.set_left_hold(True)
                 # Freeze-on-pinch: 在上升沿记录瞄准点为冻结位置
-                # （screen_x/y 已由上方 move_to_normalized 计算得出）
                 if pinch_freeze_enabled:
                     self._frozen_pos = (screen_x, screen_y)
                     self._freeze_start = time.time()
+        elif left_transition in ("release_confirmed", "hold_max"):
+            if self._is_left_holding:
+                self.mouse.left_up()
+                self._is_left_holding = False
+                self.cursor_overlay.set_left_hold(False)
+            if left_transition == "hold_max":
+                self._left_hold_blocked_until_release = True
+            self._frozen_pos = None
+            self._freeze_start = None
+        elif not want_hold and self._is_left_holding and self._left_fsm.state == self._left_fsm.IDLE:
+            # FSM 已退出 HOLDING（如 blocked 路径）但按钮还按着 → 对齐
+            self.mouse.left_up()
+            self._is_left_holding = False
+            self.cursor_overlay.set_left_hold(False)
+            self._frozen_pos = None
+            self._freeze_start = None
+
+        if want_hold:
+            # 用户松开捏合 → 解除 watchdog 锁定，下次捏合可正常 LEFTDOWN
+            self._left_hold_blocked_until_release = False
             # 按住期间继续移动光标，每帧返回 HOLD 状态
             return ModeResult(
                 gesture="LEFT_HOLD",
                 status_text="Left Button Hold",
                 status_color=(255, 0, 0),
             )
-        else:
-            if self._is_left_holding:
-                self.mouse.left_up()
-                self._is_left_holding = False
-                self.cursor_overlay.set_left_hold(False)
-            # 用户松开捏合 → 解除 watchdog 锁定，下次捏合可正常 LEFTDOWN
-            self._left_hold_blocked_until_release = False
-            # 松开捏合也清除 freeze 状态（grace 是上限，pinch 释放立即解冻）
-            self._frozen_pos = None
-            self._freeze_start = None
+        # 非 HOLDING：松开捏合解除 watchdog 锁定 / 清 freeze
+        self._left_hold_blocked_until_release = False
+        self._frozen_pos = None
+        self._freeze_start = None
 
-        # 4. 右键单击（单次触发：使用 recognizer 的 pinch 特征）
-        if features["thumb_middle_pinch"]:
-            if not self._is_right_pinching:
-                self._is_right_pinching = True
-                self.mouse.right_click()
-                self.cursor_overlay.trigger_right_click(screen_x, screen_y)
-                return ModeResult(
-                    gesture="RIGHT_CLICK",
-                    status_text="Mouse Right Click",
-                    status_color=(80, 220, 120),
-                )
-        else:
+        # 4. 右键单击（单次触发：FSM 只取进入沿）
+        want_right, right_transition = self._right_fsm.update(
+            pinch=bool(features["thumb_middle_pinch"]),
+            fresh=not predicted,
+            ml_label=ml_label,
+            now=now,
+            distant=distant_hand,
+            clearly_open=clearly_open_middle,
+        )
+        if right_transition == "press_confirmed":
+            self._is_right_pinching = True
+            self.mouse.right_click()
+            self.cursor_overlay.trigger_right_click(screen_x, screen_y)
+            return ModeResult(
+                gesture="RIGHT_CLICK",
+                status_text="Mouse Right Click",
+                status_color=(80, 220, 120),
+            )
+        if not want_right:
             self._is_right_pinching = False
 
         return ModeResult(
