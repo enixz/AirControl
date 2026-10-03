@@ -339,6 +339,7 @@ class MouseMode(ModeBase):
             now=now,
             distant=distant_hand,
             clearly_open=clearly_open_index,
+            geometry_reliable=bool(features.get("geometry_reliable", True)),
         )
         if left_transition == "press_confirmed":
             # watchdog 强制释放过一次后，必须等用户先松手才允许再 LEFTDOWN
@@ -391,6 +392,7 @@ class MouseMode(ModeBase):
             now=now,
             distant=distant_hand,
             clearly_open=clearly_open_middle,
+            geometry_reliable=bool(features.get("geometry_reliable", True)),
         )
         if right_transition == "press_confirmed":
             self._is_right_pinching = True

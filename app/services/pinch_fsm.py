@@ -82,7 +82,8 @@ class PinchButtonStateMachine:
             self.blocked_until_open = True
         return was_holding
 
-    def update(self, *, pinch, fresh, ml_label, now, distant=False, clearly_open=False):
+    def update(self, *, pinch, fresh, ml_label, now, distant=False,
+               clearly_open=False, geometry_reliable=True):
         """喂一帧捏合证据，返回 (should_be_down, transition)。
 
         Args:
@@ -94,6 +95,9 @@ class PinchButtonStateMachine:
                 PRESS_CONFIRM_SEC 连续证据；近手立即可按（保持旧延迟）
             clearly_open: 明确张开（比值 ≥0.55，与 recognizer 立即释放
                 规则同界）→ 释放无需等待 RELEASE_CONFIRM_SEC
+            geometry_reliable: 几何可靠性（掌宽相对 EMA 偏离 ≤60%）。
+                不可靠帧（相机预热/关键点跳变）不构成按下确认证据，
+                但也不打断已建立的按住（显示/指针仍可用这些帧）。
 
         Returns:
             (bool, str|None): 该按钮应处状态；发生进入/退出转换时给出原因。
@@ -104,6 +108,10 @@ class PinchButtonStateMachine:
                     and now - self.hold_since >= self.HOLD_MAX_SEC):
                 was = self.force_release("hold_max")
                 return False, ("hold_max" if was else None)
+            return self.state == self.HOLDING, None
+
+        if not geometry_reliable:
+            # 关键点不稳定帧：与预测帧同等对待——可维持按住，不产生新证据
             return self.state == self.HOLDING, None
 
         is_fist = self.FIST_BLOCK and ml_label == "Closed_Fist"

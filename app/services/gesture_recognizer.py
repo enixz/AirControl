@@ -105,6 +105,7 @@ class GestureRecognizer:
         # 仅退出方向滞回：保留旧版 0.35 进入阈值，已捏合时才放宽到 0.40，
         # 以避免完整双阈值方案因 ENTER=0.30 带来的点击漏检。
         self.pinch_exit_hysteresis_enabled = False
+        self._pinch_release_since = {}
         # thumb_extended 旋转不变判定开关（实施方案 Phase 3.3）：默认关闭，
         # 开启后 thumb_extended 使用 perp_ratio 替代旧的 thumb_tip_to_index_mcp 距离。
         # 新旧特征都计算并输出到 features dict，便于 telemetry 并存对照。
@@ -143,6 +144,14 @@ class GestureRecognizer:
         # 首帧或低正面度未初始化时用 raw 值兜底
         hand_width = self._hand_width_ema if self._hand_width_ema is not None else raw_hand_width
 
+        # 几何可靠性（第 4 步）：掌宽相对 EMA 偏离 >60% 的帧视为关键点
+        # 不稳定（相机预热/手入画/检测跳变，实测 hw 60→139 振荡）。这类帧
+        # 仍可用于显示与指针移动，但 pinch_fsm 会限制其触发新按下。
+        geometry_reliable = True
+        if self._hand_width_ema is not None and self._hand_width_ema >= 20.0:
+            deviation = abs(raw_hand_width - self._hand_width_ema) / self._hand_width_ema
+            geometry_reliable = deviation <= 0.60
+
         index_up = landmarks[8][2] < landmarks[6][2]
         middle_up = landmarks[12][2] < landmarks[10][2]
         ring_up = landmarks[16][2] < landmarks[14][2]
@@ -177,6 +186,18 @@ class GestureRecognizer:
             pinch_threshold = hand_width * self.PINCH_RATIO
             thumb_index_pinch = thumb_index < pinch_threshold
             thumb_middle_pinch = thumb_middle < pinch_threshold
+        # The default exit-only profile adds a bounded temporal grace. Keep
+        # the opt-in full-hysteresis experiment's immediate exit semantics.
+        if self.pinch_exit_hysteresis_enabled and not self.pinch_hysteresis_enabled:
+            now = time.monotonic()
+            thumb_index_pinch = self._stabilize_pinch_release(
+                "index", thumb_index / hand_width, thumb_index_pinch,
+                self._was_thumb_index_pinch, now,
+            )
+            thumb_middle_pinch = self._stabilize_pinch_release(
+                "middle", thumb_middle / hand_width, thumb_middle_pinch,
+                self._was_thumb_middle_pinch, now,
+            )
         self._was_thumb_index_pinch = thumb_index_pinch
         self._was_thumb_middle_pinch = thumb_middle_pinch
 
@@ -292,6 +313,8 @@ class GestureRecognizer:
             "middle_extended": middle_extended,
             "two_finger_hover": two_finger_hover,
             "hand_frontality": hand_frontality,
+            # 第 4 步：几何可靠性标志（False = 掌宽突变/关键点不稳定帧）
+            "geometry_reliable": geometry_reliable,
             "thumb_ratio": thumb_tip_to_index_mcp / hand_width,
             "middle_ratio": middle_len / hand_width,
             "middle_index_ratio": middle_index_ratio,
@@ -346,6 +369,23 @@ class GestureRecognizer:
         ))
         return perp / palm_width
 
+    def _stabilize_pinch_release(self, finger, ratio, detected, was_pinching, now):
+        """Bridge brief boundary jitter, with immediate release when clearly open."""
+        if detected or not was_pinching or ratio >= 0.55:
+            self._pinch_release_since.pop(finger, None)
+            return detected
+        since = self._pinch_release_since.setdefault(finger, now)
+        return now - since < 0.08
+
+    def reset_hand_features(self):
+        """Forget geometry history after loss or a primary-hand change."""
+        self._was_thumb_index_pinch = False
+        self._was_thumb_middle_pinch = False
+        self._pinch_release_since.clear()
+        self._hand_width_ema = None
+        self._was_index_extended = False
+        self._was_tucked = False
+
     def _reset_state(self):
         self.last_action_time = time.time()
         self.history_x.clear()
@@ -356,6 +396,7 @@ class GestureRecognizer:
         # 清理 pinch 滞回状态（实施方案 Phase 3.2）
         self._was_thumb_index_pinch = False
         self._was_thumb_middle_pinch = False
+        self._pinch_release_since.clear()
         if hasattr(self, '_scissor_frames'):
             self._scissor_frames = 0
         if hasattr(self, '_scroll_direction'):

@@ -17,9 +17,10 @@ class PinchFSMTest(unittest.TestCase):
     def setUp(self):
         self.fsm = PinchButtonStateMachine()
 
-    def upd(self, pinch, fresh=True, label=None, now=0.0, distant=False, clear=False):
+    def upd(self, pinch, fresh=True, label=None, now=0.0, distant=False, clear=False, geo=True):
         return self.fsm.update(pinch=pinch, fresh=fresh, ml_label=label,
-                               now=now, distant=distant, clearly_open=clear)
+                               now=now, distant=distant, clearly_open=clear,
+                               geometry_reliable=geo)
 
     def test_near_hand_presses_immediately(self):
         down, tr = self.upd(True, now=1.0)
@@ -156,6 +157,23 @@ class PinchFSMTest(unittest.TestCase):
         # 换手后重新确认（无残留证据）
         down, _ = self.upd(True, now=1.01, distant=True)
         self.assertFalse(down)  # distant 需重新积累证据
+
+    def test_unreliable_geometry_blocks_new_press_but_keeps_hold(self):
+        # 不可靠帧（掌宽突变）不能确认新按下
+        down, _ = self.upd(True, now=1.0, distant=False, geo=False)
+        self.assertFalse(down)
+        # 但已建立的按住不被打断
+        self.upd(True, now=1.0)
+        down, _ = self.upd(True, now=1.1, geo=False)
+        self.assertTrue(down)
+        down, _ = self.upd(False, now=1.2, geo=False)
+        self.assertTrue(down)  # 松手证据同样不计入（保持）
+        # 恢复可靠后正常释放
+        down, _ = self.upd(False, now=1.21, geo=True)
+        self.assertTrue(down)   # 释放窗口从这帧起算
+        down, tr = self.upd(False, now=1.30, geo=True)
+        self.assertFalse(down)
+        self.assertEqual(tr, "release_confirmed")
 
     def test_every_transition_has_reason(self):
         self.upd(True, now=1.0)
