@@ -11,6 +11,7 @@
 """
 
 import logging
+import math
 import time
 from abc import ABC, abstractmethod
 
@@ -103,6 +104,9 @@ class BaseHandTracker(ABC):
         # _prev_wrist_keys: [(wrist_pos, key), ...] 上一帧的 wrist 位置和分配的 key
         # 用于双手场景的位置匹配：当前帧手腕与上一帧最近的匹配为同一 smoother
         self._prev_wrist_keys = []
+        # 主控手粘性：上一帧 h0 的 track_key。存在时排序优先保持 h0 不换人
+        # （含短暂预测补帧期间），避免下游模式每帧重置手势特征。
+        self._primary_track_key = None
 
         # 运动追踪
         self._last_wrist_pos = {}
@@ -235,8 +239,11 @@ class BaseHandTracker(ABC):
         self._last_hint_size = old_tracker._last_hint_size
         # 活动手标识：保持幽灵手预测连续
         self._active_handedness = set(old_tracker._active_handedness)
+        self.last_gestures = [dict(g) for g in old_tracker.last_gestures]
         # 位置连续性 smoother key 匹配状态：保持双手场景匹配连续
         self._prev_wrist_keys = list(getattr(old_tracker, '_prev_wrist_keys', []))
+        # 主控手粘性：引擎迁移时保持主控身份连续
+        self._primary_track_key = getattr(old_tracker, '_primary_track_key', None)
         # 平滑器：保持光标位置连续（OneEuroSmoother 是纯 Python 对象，
         # close() 不影响它们，直接复制引用即可）
         self.smoothers = dict(old_tracker.smoothers)
@@ -340,7 +347,7 @@ class BaseHandTracker(ABC):
         predicted_all = []
         gesture_all = []
 
-        for key in sorted(self._active_handedness):
+        for key in self._ordered_active_keys():
             smoother = self.smoothers.get(key)
             if smoother is None:
                 continue
@@ -350,12 +357,13 @@ class BaseHandTracker(ABC):
                 # 复用上一帧的手势标签，标记为 predicted
                 g = None
                 for gg in self.last_gestures:
-                    if gg.get("handedness", "Unknown") == key:
+                    if gg.get("track_key", gg.get("handedness", "Unknown")) == key:
                         g = dict(gg)
                         break
                 if g is None:
                     g = {"handedness": key, "label": "NONE", "ml_label": "None", "score": 0.0}
                 g["predicted"] = True
+                g["track_key"] = key
                 g["skipped"] = True
                 gesture_all.append(g)
                 if draw:
@@ -455,15 +463,14 @@ class BaseHandTracker(ABC):
             if not hands_landmarks:
                 self._zoom_miss_streak += 1
                 # A hand can leave the predicted crop after a quick movement.
-                # Retry the full frame periodically instead of waiting for the
-                # whole zoom miss window to expire before reacquiring it.
-                if self._zoom_miss_streak % 3 == 0:
-                    full_landmarks, full_gestures, full_raw = self._detect(frame)
-                    if full_landmarks:
-                        hands_landmarks = full_landmarks
-                        hands_gestures = full_gestures
-                        raw = full_raw
-                        self._zoom_miss_streak = 0
+                # Retry immediately: with valid small full-frame detections,
+                # waiting for the third miss needlessly loses two fresh frames.
+                full_landmarks, full_gestures, full_raw = self._detect(frame)
+                if full_landmarks:
+                    hands_landmarks = full_landmarks
+                    hands_gestures = full_gestures
+                    raw = full_raw
+                    self._zoom_miss_streak = 0
                 if self._zoom_miss_streak >= self._zoom_miss_threshold:
                     self._crop_zoom_mode = False
                     self._sr.reset_tier()
@@ -506,16 +513,25 @@ class BaseHandTracker(ABC):
 
         return hands_landmarks, hands_gestures, use_crop_zoom
 
-    def _assign_smoother_keys(self, hands_landmarks, hands_gestures):
+    # 位置连续性匹配的最大 wrist 位移（像素，按对角线归一）。超过视为"真换手"，
+    # 不继承 key；旧 key 的 smoother 由 lost_frames 自然过期，捏合历史不跨手继承
+    # （MouseMode 在 track_key 变化时已 reset_hand_features）。
+    _KEY_ADOPT_MAX_WARP = 0.12
+
+    def _assign_smoother_keys(self, hands_landmarks, hands_gestures, frame_w=1920, frame_h=1080):
         """用位置连续性分配 smoother key，替代 handedness。
 
         核心问题：MediaPipe handedness 帧间翻转（Left↔Right）时，旧 handedness
         的 smoother 进入 missing_keys 触发幽灵手 predict()，产生双影和位置跳变。
+        更深一层：单手→双手→单手切换时，"n==1 一律 Primary" 会让留守手顶替
+        消失手的位置（主控手身份跳变），或让静止的次要手在主控手短暂丢失的
+        一两帧里直接变成 Primary——下游 MouseMode 视为换手并重置捏合状态。
 
-        解决方案：
-        - 单手场景：统一用 "Primary"，不依赖 handedness → 翻转不影响 smoother
-        - 双手场景：用 wrist 位置匹配上一帧 → 手不会瞬间从画面左侧跳到右侧
-        - 无历史或匹配失败：回退到 handedness
+        解决方案（全场景位置连续性）：
+        - 当前手 wrist 与上一帧任意已知手的 wrist 足够近（< 对角线×_KEY_ADOPT_MAX_WARP）
+          → 继承那只手的 key，无论本帧手数是 1 还是 2
+        - 真换手（位置跳变超阈值）：拿新 key，旧 key 的 smoother 自然过期
+        - 无历史或全部不匹配：回退到 handedness / Primary
 
         Returns:
             list of str: 每只手对应的 smoother key
@@ -526,10 +542,30 @@ class BaseHandTracker(ABC):
 
         # 单手：统一用 Primary（不依赖 handedness，翻转不影响 smoother）
         if n == 1:
-            key = "Primary"
             wrist = (float(hands_landmarks[0][0][1]), float(hands_landmarks[0][0][2]))
-            self._prev_wrist_keys = [(wrist, key)]
-            return [key]
+            span = self._hand_span(hands_landmarks[0])
+            # 跨手数继承仅在"无歧义"时进行：单手与上一帧某只手的距离
+            # < 0.5×跨度，且与另一只手距离 > 1.5×跨度。
+            # 远距场景：主控手丢失、另一手留在原位 → 后者继承自己的 key，
+            # 主控手回归时两 key 不冲突（t1 案例）。
+            # 近距场景：两手相邻/交叉时单手无法明确归属 → 回退 Primary
+            # 干净起步，避免两手共享 smoother 互相污染姿态（近距实测：
+            # 捏合手比值被静止手姿态拉高 0.16→0.73）。
+            key = None
+            if self._prev_wrist_keys:
+                dists = sorted(
+                    (math.hypot(wrist[0] - pw[0], wrist[1] - pw[1]), pk)
+                    for pw, pk in self._prev_wrist_keys
+                )
+                if len(dists) == 1:
+                    key = dists[0][1] if dists[0][0] <= max(0.5 * span, 30.0) else None
+                else:
+                    near, far = dists[0], dists[1]
+                    if (near[0] <= max(0.5 * span, 30.0)
+                            and far[0] > 1.5 * span):
+                        key = near[1]
+            self._prev_wrist_keys = [(wrist, key or "Primary")]
+            return [key or "Primary"]
 
         # 双手：用 wrist 位置匹配上一帧
         wrists = [
@@ -537,8 +573,13 @@ class BaseHandTracker(ABC):
             for lm in hands_landmarks
         ]
 
-        if not self._prev_wrist_keys or len(self._prev_wrist_keys) != n:
-            # 无历史或手数变化：用 handedness 做初始分配
+        # 位置匹配：当前帧手腕与上一帧最近的匹配为同一 smoother。
+        # 与单手继承同理：仅当上一帧手数与本帧相同时做最近邻继承；
+        # 手数变化（1→2）回退 handedness 初始分配，避免把手继承到
+        # "另一只手"的 smoother 上造成姿态混合。
+        prev_wrists = [wk[0] for wk in self._prev_wrist_keys]
+        prev_keys = [wk[1] for wk in self._prev_wrist_keys]
+        if not prev_wrists or len(self._prev_wrist_keys) != n:
             keys = []
             for g in hands_gestures:
                 h = g.get("handedness", "Unknown")
@@ -546,14 +587,12 @@ class BaseHandTracker(ABC):
                     h = "Primary" if not keys else "Unknown"
                 keys.append(h)
             # 去重：如果两只手分到同一个 key，第二只用另一个
-            if keys[0] == keys[1] and keys[0] in ("Left", "Right"):
+            if len(keys) == 2 and keys[0] == keys[1] and keys[0] in ("Left", "Right"):
                 keys[1] = "Right" if keys[0] == "Left" else "Left"
             self._prev_wrist_keys = list(zip(wrists, keys, strict=True))
             return keys
 
-        # 位置匹配：当前帧手腕与上一帧最近的匹配为同一 smoother
-        prev_wrists = [wk[0] for wk in self._prev_wrist_keys]
-        prev_keys = [wk[1] for wk in self._prev_wrist_keys]
+        max_warp_sq = (self._KEY_ADOPT_MAX_WARP * (frame_w ** 2 + frame_h ** 2) ** 0.5) ** 2
 
         keys = [None] * n
         used_prev = set()
@@ -566,20 +605,26 @@ class BaseHandTracker(ABC):
         pairs.sort()
 
         assigned_current = set()
-        for _dist, i, j in pairs:
+        for dist, i, j in pairs:
             if i in assigned_current or j in used_prev:
+                continue
+            if dist > max_warp_sq:
+                # 位置跳变：这是"新手"（真换手/误检），不继承旧 key
                 continue
             keys[i] = prev_keys[j]
             assigned_current.add(i)
             used_prev.add(j)
 
-        # 未匹配的手用 handedness 兜底
+        # 未匹配的手用 handedness 兜底；key 已被本帧别的手占用时换一个，
+        # 避免"两只手共用同一个 smoother"（输出重复 key，下游状态互相踩踏）
+        used_keys = set(k for k in keys if k)
         for i in range(n):
             if keys[i] is None:
                 h = hands_gestures[i].get("handedness", "Unknown")
-                if h not in self.smoothers:
+                if h not in self.smoothers or h in used_keys:
                     h = "Unknown"
                 keys[i] = h
+                used_keys.add(h)
 
         self._prev_wrist_keys = list(zip(wrists, keys, strict=True))
         return keys
@@ -622,7 +667,7 @@ class BaseHandTracker(ABC):
             self._last_hint_center, self._last_hint_size = hint
 
         # 用位置连续性分配 smoother key（替代 handedness）
-        smoother_keys = self._assign_smoother_keys(hands_landmarks, hands_gestures)
+        smoother_keys = self._assign_smoother_keys(hands_landmarks, hands_gestures, w, h)
 
         smoothed_all = []
         gesture_all = []
@@ -631,7 +676,21 @@ class BaseHandTracker(ABC):
             key = smoother_keys[idx] if idx < len(smoother_keys) else "Unknown"
             if key not in self.smoothers:
                 key = "Unknown"
-            smoothed = self.smoothers[key].update(landmarks)
+            # 跨手采纳保护：该 smoother 上一次跟随的位置若与这只手相距超过
+            # 1.5×手跨度（相邻两手会互相误采纳），先复位再更新——否则 OneEuro
+            # 会把上一只手的姿态混进这只手的输出（近距录像实测：捏合手被
+            # 静止手的张开姿态污染，比值 0.16 → 0.73，整个拖拽段丢失）。
+            # 同一只手短暂丢失后回归（距离 < 阈值）不受影响，保持平滑连续。
+            smoother = self.smoothers[key]
+            if smoother.initialized and smoother.last_landmarks:
+                prev_wrist = (smoother.last_landmarks[0][1],
+                              smoother.last_landmarks[0][2])
+                warp = math.hypot(landmarks[0][1] - prev_wrist[0],
+                                  landmarks[0][2] - prev_wrist[1])
+                span = self._hand_span(landmarks)
+                if span > 0 and warp > 1.5 * span:
+                    smoother.reset()
+            smoothed = smoother.update(landmarks)
             # 几何约束后处理：抑制"手指乱飞"。阶段1默认关闭。
             if self._geometric_constraint_enabled:
                 geo_filter = self._geo_filters.get(key)
@@ -639,6 +698,7 @@ class BaseHandTracker(ABC):
                     smoothed = geo_filter.apply(smoothed)
             seen_keys.add(key)
             smoothed_all.append(smoothed)
+            gesture = dict(gesture, track_key=key, predicted=False)
             gesture_all.append(gesture)
             if draw:
                 self._renderer.draw_points(frame, smoothed, (255, 0, 255))
@@ -647,7 +707,7 @@ class BaseHandTracker(ABC):
         # 单手场景下 active 只有 "Primary"，handedness 翻转不再产生幽灵手
         if self._hand_prediction_enabled:
             missing_keys = self._active_handedness - seen_keys
-            for key in missing_keys:
+            for key in sorted(missing_keys):
                 smoother = self.smoothers.get(key)
                 if smoother is None or smoother.lost_frames >= 5:
                     continue
@@ -663,11 +723,30 @@ class BaseHandTracker(ABC):
                     "handedness_score": 0.0,
                     "bbox_area": 0.0,
                     "predicted": True,
+                    "track_key": key,
                 })
                 seen_keys.add(key)
                 if draw:
                     self._renderer.draw_points(frame, ghost, (255, 0, 255))
 
+        # 主控手粘性（排序修正，在 track_key 分配 + 幽灵手补齐之后）：
+        # 仅当上一帧主控手的本帧输出是"预测补帧"（检测短暂丢失）时，把它保持在
+        # h0，防止 h0 在两手间每帧摇摆、下游每帧 reset_hand_features。
+        # 若上一帧主控手本帧有真实检出，则维持分数排序——不锁定静止手：
+        # 用户双手角色互换（另一只手举起来操作）时，分数高的新手应自然接管。
+        prev_primary = getattr(self, "_primary_track_key", None)
+        if prev_primary and gesture_all:
+            primary_pos = None
+            for pos, gesture in enumerate(gesture_all):
+                if gesture.get("track_key") == prev_primary:
+                    primary_pos = pos
+                    break
+            if primary_pos not in (None, 0) and gesture_all[primary_pos].get("predicted"):
+                re_order = [primary_pos] + [i for i in range(len(gesture_all)) if i != primary_pos]
+                smoothed_all = [smoothed_all[i] for i in re_order]
+                gesture_all = [gesture_all[i] for i in re_order]
+
+        self._primary_track_key = gesture_all[0].get("track_key") if gesture_all else None
         self._active_handedness = seen_keys
         self.last_gestures = gesture_all
 
@@ -678,6 +757,50 @@ class BaseHandTracker(ABC):
 
         return frame, smoothed_all, gesture_all
 
+    def _hand_span(self, landmarks):
+        """手的空间跨度（对角线），用作跨手采纳保护的尺度基准。"""
+        xs = [p[1] for p in landmarks]
+        ys = [p[2] for p in landmarks]
+        return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+
+    def _ordered_active_keys(self):
+        """Keep the primary hand first and metadata aligned during prediction."""
+        ordered = []
+        for gesture in self.last_gestures:
+            key = gesture.get("track_key", gesture.get("handedness", "Unknown"))
+            if key in self._active_handedness and key not in ordered:
+                ordered.append(key)
+        return ordered + sorted(self._active_handedness - set(ordered))
+
+    def _adopt_prev_key(self, wrists, frame_w=1920, frame_h=1080):
+        """当前帧手与上一帧已知手做位置继承；全部跳变则返回 None。
+
+        Returns:
+            list[str] | None: 每只手继承到的 key；无历史或全部超出
+            _KEY_ADOPT_MAX_WARP 时为 None（调用方回退 Primary/handedness）。
+        """
+        if not self._prev_wrist_keys:
+            return None
+        prev_wrists = [wk[0] for wk in self._prev_wrist_keys]
+        prev_keys = [wk[1] for wk in self._prev_wrist_keys]
+        max_warp_sq = (self._KEY_ADOPT_MAX_WARP * (frame_w ** 2 + frame_h ** 2) ** 0.5) ** 2
+        keys = [None] * len(wrists)
+        used_prev = set()
+        pairs = sorted(
+            ((w[0] - pw[0]) ** 2 + (w[1] - pw[1]) ** 2, i, j)
+            for i, w in enumerate(wrists)
+            for j, pw in enumerate(prev_wrists)
+        )
+        for dist, i, j in pairs:
+            if dist > max_warp_sq:
+                break
+            if keys[i] is None and j not in used_prev:
+                keys[i] = prev_keys[j]
+                used_prev.add(j)
+        if any(k is None for k in keys):
+            return None
+        return keys
+
     def _handle_all_lost(self, frame, use_crop_zoom, draw, w_frame, h_frame):
         """全部丢失：尝试预测补帧，否则复位状态并返回空。
 
@@ -686,14 +809,18 @@ class BaseHandTracker(ABC):
         """
         has_prediction = False
         predicted_all = []
+        predicted_gestures = []
         if self._hand_prediction_enabled:
-            for key in sorted(self._active_handedness):
+            for key in self._ordered_active_keys():
                 smoother = self.smoothers.get(key)
                 if smoother is None:
                     continue
                 predicted = smoother.predict()
                 if predicted is not None:
                     predicted_all.append(predicted)
+                    previous = next((g for g in self.last_gestures
+                                     if g.get("track_key", g.get("handedness")) == key), {})
+                    predicted_gestures.append(dict(previous, track_key=key, predicted=True))
                     has_prediction = True
 
         if has_prediction:
@@ -703,8 +830,8 @@ class BaseHandTracker(ABC):
             if use_crop_zoom and self._current_crop_center:
                 frame = self._renderer.apply_visual_zoom(frame, self._current_crop_center, self._current_crop_size)
             if draw:
-                self._renderer.draw_zoom_badge(frame, self.last_gestures, w_frame, h_frame, used_zoom=use_crop_zoom)
-            return frame, predicted_all, list(self.last_gestures)
+                self._renderer.draw_zoom_badge(frame, predicted_gestures, w_frame, h_frame, used_zoom=use_crop_zoom)
+            return frame, predicted_all, predicted_gestures
 
         if any(sm.initialized for sm in self.smoothers.values()):
             logging.info("Tracking fully lost. Resetting smoothers.")
@@ -715,6 +842,8 @@ class BaseHandTracker(ABC):
             self.last_gestures = []
             self._active_handedness.clear()
             self._prev_wrist_keys = []
+            # 全部丢失并复位：主控身份随之失效（真换手）
+            self._primary_track_key = None
             self._crop_zoom_mode = False
             self._sr.reset_tier()
             self._last_hint_center = None
