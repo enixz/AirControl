@@ -45,16 +45,20 @@ class VoiceFeedbackService:
             self._enabled = bool(config is None or
                                 config.get("voice_feedback_enabled") is not False)
         volume = config.get("voice_feedback_volume") if config else None
-        self._volume = max(1, min(100, int(volume or _DEFAULT_VOLUME)))
+        self._volume = (max(0, min(100, int(volume)))
+                        if volume is not None else _DEFAULT_VOLUME)
         rate = config.get("voice_feedback_rate") if config else None
-        self._rate = max(-10, min(10, int(rate or _DEFAULT_RATE)))
+        self._rate = (max(-10, min(10, int(rate)))
+                      if rate is not None else _DEFAULT_RATE)
 
         self._queue = queue.Queue()
         self._speaking = False
         self._speaking_lock = threading.Lock()
+        # 保护 _thread/_stop_event 的 check-then-act：say() 可能同时被 UI 线程
+        # 和云端健康监测线程调用，无锁会起双 worker 共享/覆盖 COM 对象
+        self._worker_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = None
-        self._voice = None  # 仅 worker 线程内访问
 
         if self._enabled and win32com is None:
             logger.warning("pywin32 不可用，本地语音播报禁用")
@@ -85,20 +89,22 @@ class VoiceFeedbackService:
 
     def stop(self, timeout_sec=2.0):
         """停止播报：清空队列并打断当前语音。"""
-        self._stop_event.set()
+        with self._worker_lock:
+            self._stop_event.set()
+            thread = self._thread
+            # 复位以便后续 say() 重启 worker；在跑的 worker 持有自己的
+            # 事件对象（已在 set 状态），换新事件不影响它退出
+            self._thread = None
+            self._stop_event = threading.Event()
         while True:
             try:
                 self._queue.get_nowait()
             except queue.Empty:
                 break
-        thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(max(0.0, float(timeout_sec)))
         with self._speaking_lock:
             self._speaking = False
-        # 复位以便后续 say() 重启 worker
-        self._thread = None
-        self._stop_event = threading.Event()
         return thread is None or not thread.is_alive()
 
     # ------------------------------------------------------------------
@@ -106,13 +112,18 @@ class VoiceFeedbackService:
     # ------------------------------------------------------------------
 
     def _ensure_worker(self):
-        if self._thread is None or not self._thread.is_alive():
-            self._thread = threading.Thread(
-                target=self._worker, name="VoiceFeedbackWorker", daemon=True
-            )
-            self._thread.start()
+        with self._worker_lock:
+            if self._thread is None or not self._thread.is_alive():
+                # 每个 worker 持有独立事件：stop() 换了新事件也不影响在跑的退出
+                stop_event = threading.Event()
+                self._stop_event = stop_event
+                self._thread = threading.Thread(
+                    target=self._worker, args=(stop_event,),
+                    name="VoiceFeedbackWorker", daemon=True,
+                )
+                self._thread.start()
 
-    def _worker(self):
+    def _worker(self, stop_event):
         try:
             pythoncom.CoInitialize()
         except Exception:  # noqa: BLE001 - 无 COM 环境时直接退出
@@ -121,29 +132,30 @@ class VoiceFeedbackService:
                 self._speaking = False
             return
         try:
-            self._voice = win32com.client.Dispatch("SAPI.SpVoice")
+            # voice 仅作本线程局部变量：COM 对象禁止跨线程共享，
+            # 挂到 self 上会被并发 worker 覆盖/置 None
+            voice = win32com.client.Dispatch("SAPI.SpVoice")
             try:
-                self._voice.Volume = self._volume
-                self._voice.Rate = self._rate
+                voice.Volume = self._volume
+                voice.Rate = self._rate
             except Exception:  # noqa: BLE001
                 pass
-            while not self._stop_event.is_set():
+            while not stop_event.is_set():
                 try:
                     text = self._queue.get(timeout=0.2)
                 except queue.Empty:
                     with self._speaking_lock:
                         self._speaking = False
                     continue
-                if self._stop_event.is_set():
+                if stop_event.is_set():
                     break
                 try:
-                    self._voice.Speak(text, _SVSF_DEFAULT)
+                    voice.Speak(text, _SVSF_DEFAULT)
                 except Exception:  # noqa: BLE001
                     logger.warning("SAPI 播报失败", exc_info=True)
                 with self._speaking_lock:
                     self._speaking = not self._queue.empty()
         finally:
-            self._voice = None
             try:
                 pythoncom.CoUninitialize()
             except Exception:  # noqa: BLE001

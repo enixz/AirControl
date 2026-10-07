@@ -45,6 +45,7 @@ class CloudHealthMonitor:
         self._stop_event = threading.Event()
         self._thread = None
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
 
     @property
     def status(self):
@@ -64,19 +65,21 @@ class CloudHealthMonitor:
             self._status = self.STATUS_UNCONFIGURED
             logger.info("云端未配置，健康监控不启动")
             return False
-        self.check_once()  # 启动 ping
-        self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._heartbeat_loop, name="CloudHealthMonitor", daemon=True
-        )
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                return not self._stop_event.is_set()
+            self._stop_event.clear()
+            self._thread = threading.Thread(
+                target=self._heartbeat_loop, name="CloudHealthMonitor", daemon=True
+            )
+            self._thread.start()
         return True
 
     def stop(self, timeout_sec=3.0):
         """停止心跳线程。"""
-        self._stop_event.set()
-        thread = self._thread
-        self._thread = None
+        with self._lifecycle_lock:
+            self._stop_event.set()
+            thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(max(0.0, float(timeout_sec)))
         return thread is None or not thread.is_alive()
@@ -95,6 +98,9 @@ class CloudHealthMonitor:
         return True
 
     def _heartbeat_loop(self):
+        if self._stop_event.is_set():
+            return
+        self.check_once()  # 首次探测也在后台执行，不阻塞窗口初始化
         while not self._stop_event.wait(self._interval_sec):
             self.check_once()
 

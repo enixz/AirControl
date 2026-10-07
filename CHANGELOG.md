@@ -45,6 +45,24 @@ environment-variable API key; core gesture/voice features remain 100% local.
 - **requirements.lock**: httpx chain (6 packages) pinned from the
   2026-10-01 verified venv snapshot — new installs no longer crash on the
   cloud import chain.
+- **External voice assistant client removed (2026-10-05)**: the
+  Doubao/Tongyi desktop-client integration (`voice_assistant.py`, ~640 lines
+  of process hunting / window focus / hotkey injection) is deleted; the
+  MOMA smart-command channel **is** the voice assistant now. Wake it with
+  the `小助手` voice keyword or the ✌️ SCISSOR gesture; THUMB_DOWN now
+  cancels the smart-command session (`cancel_llm_command`) instead of
+  hanging up an external call. `voice_assistant` config key and the
+  assistant-picker UI removed; stale `keywords_raw.txt`/`keywords_active.txt`
+  dropped (only `keywords.txt` is read at runtime). Action name
+  `hang_up_voice_assistant` kept as a hidden alias of cancel for old
+  configs, `launch_voice_assistant` now routes to the MOMA session.
+- **Board captions in a handwriting font (2026-10-05)**: dictation captions
+  (live partials and final board text alike) now render in a true
+  human-handwriting font — 方正硬笔楷书 (hard-pen Kaishu, the way a person
+  writes with a pen) bundled at `app/assets/fonts/` and registered at
+  startup via `QFontDatabase.addApplicationFont` — no dependency on what
+  the machine has installed. Fallback stack: hard-pen Kaishu → KaiTi →
+  system default. Packaged in releases via `AirControl.spec`.
 
 ## v1.4.0 - 2026-08-10
 

@@ -185,8 +185,9 @@ class MouseMode(ModeBase):
                 # 换手：捏合历史不跨手继承（第 2/3 步）
                 self.recognizer.reset_hand_features()
                 self._pinch_press_since.clear()
-                self._left_fsm.reset()
-                self._right_fsm.reset()
+                recovering = getattr(self, "_feature_track_key", None) is None
+                self._left_fsm.reset(preserve_block=recovering)
+                self._right_fsm.reset(preserve_block=recovering)
             self._feature_track_key = key
             if predicted:
                 features = dict(getattr(self, "_last_fresh_features", {}) or {})

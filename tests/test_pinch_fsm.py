@@ -182,6 +182,30 @@ class PinchFSMTest(unittest.TestCase):
         self.upd(False, now=1.13)   # 持续 ≥0.08s → 确认
         self.assertEqual(self.fsm.last_transition_reason, "release_confirmed")
 
+    def test_unreliable_geometry_has_a_bounded_hold_and_requires_reopening(self):
+        self.upd(True, now=1.0)
+        self.assertTrue(self.upd(False, now=1.1, geo=False)[0])
+        down, reason = self.upd(False, now=1.7, geo=False)
+        self.assertFalse(down)
+        self.assertEqual(reason, "geometry_unreliable")
+        self.assertTrue(self.fsm.blocked_until_open)
+        self.assertFalse(self.upd(True, now=1.8)[0])
+        self.upd(False, now=1.9, clear=True)
+        self.assertTrue(self.upd(True, now=2.0)[0])
+
+    def test_reliable_frame_resets_unreliable_hold_window(self):
+        self.upd(True, now=1.0)
+        self.upd(True, now=1.1, geo=False)
+        self.upd(True, now=1.5)
+        self.assertTrue(self.upd(True, now=1.7, geo=False)[0])
+        self.assertTrue(self.upd(True, now=2.0, geo=False)[0])
+
+    def test_hold_max_applies_even_on_unreliable_open_frame(self):
+        self.upd(True, now=1.0)
+        down, reason = self.upd(False, now=100.0, clear=True, geo=False)
+        self.assertFalse(down)
+        self.assertEqual(reason, "hold_max")
+
 
 class MouseModeFSMWiringTest(unittest.TestCase):
     """MouseMode 层：左右键 FSM 联动 + 模式切换释放。"""
@@ -242,6 +266,38 @@ class MouseModeFSMWiringTest(unittest.TestCase):
             self.assertEqual(mouse.right_click.call_count, 2)
         finally:
             mode.on_exit()
+
+    def test_loss_recovery_cannot_repress_either_button_until_reopened(self):
+        from test_pinch_freeze import _features_for, _make_landmarks
+
+        for button in ("left", "right"):
+            with self.subTest(button=button):
+                mode, mouse, recognizer = self._make_mode()
+                mode.on_enter()
+                mode._watchdog_stop.set()
+                mode._watchdog_thread.join()
+                try:
+                    features = _features_for(button == "left")
+                    features["thumb_middle_pinch"] = button == "right"
+                    recognizer.get_hand_features.return_value = features
+                    hand = _make_landmarks(True)
+                    gesture = [{"track_key": "Primary", "predicted": False}]
+                    click = mouse.left_down if button == "left" else mouse.right_click
+                    mode.handle([hand], gesture, 640, 480)
+                    self.assertEqual(click.call_count, 1)
+                    mode.handle([], [], 640, 480)
+                    mode.handle([], [], 640, 480)
+                    mode.handle([hand], gesture, 640, 480)
+                    self.assertEqual(click.call_count, 1)
+                    features["thumb_index_pinch"] = False
+                    features["thumb_middle_pinch"] = False
+                    mode.handle([_make_landmarks(False)], gesture, 640, 480)
+                    features["thumb_index_pinch"] = button == "left"
+                    features["thumb_middle_pinch"] = button == "right"
+                    mode.handle([hand], gesture, 640, 480)
+                    self.assertEqual(click.call_count, 2)
+                finally:
+                    mode.on_exit()
 
 
 if __name__ == "__main__":

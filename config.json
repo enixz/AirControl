@@ -22,7 +22,6 @@
     "edge_y_canvas_enabled": true,
     "edge_y_canvas_deadzone_bottom": 18,
     "edge_y_canvas_deadzone_top": 10,
-    "voice_assistant": "doubao",
     "voice_command_enabled": true,
     "voice_command_threshold": 0.25,
     "zoom_sr_engine": "auto",
@@ -83,6 +82,6 @@
         "FIST": "none",
         "THUMB_UP": "switch_app",
         "SCISSOR": "launch_voice_assistant",
-        "THUMB_DOWN": "hang_up_voice_assistant"
+        "THUMB_DOWN": "cancel_llm_command"
     }
 }

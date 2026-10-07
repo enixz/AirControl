@@ -190,6 +190,24 @@ class TestVoiceShutdown(unittest.TestCase):
         self.assertIs(service._audio_cleanup_thread, first_cleanup)
         self.assertIsNone(service._audio_stream)
 
+    def test_reinit_audio_closes_stale_stream(self):
+        """stop() 超时返回 False 后再次 start()：_init_audio 必须先关闭
+        残留旧流，否则旧 RawInputStream 永不关闭、麦克风被占。"""
+        service = VoiceCommandService(_FakeConfig())
+        stale = mock.MagicMock()
+        service._audio_stream = stale
+
+        new_stream = mock.MagicMock()
+        fake_sd = mock.MagicMock()
+        fake_sd.RawInputStream.return_value = new_stream
+        with mock.patch("services.voice_command.sd", fake_sd):
+            service._init_audio()
+
+        stale.stop.assert_called_once()
+        stale.close.assert_called_once()
+        self.assertIs(service._audio_stream, new_stream)
+        new_stream.start.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,7 @@
 """
 import os
 import sys
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -150,6 +151,53 @@ class TestLLMCommandSession(unittest.TestCase):
         self.svc.cancel_llm_command()
         self.assertIsNone(self.svc._llm_session)
 
+    def test_stale_session_cannot_finish_newer_session(self):
+        """检测循环快照过期场景：start/cancel 在主线程、VAD 在检测线程，
+        旧会话快照触发结束判定时不得误杀已重启的新会话。"""
+        self._start()
+        stale = self.svc._llm_session
+        self.svc.cancel_llm_command()
+        self.assertTrue(self._start())  # 主线程重启会话 B
+        current = self.svc._llm_session
+        self.assertIsNot(stale, current)
+        stale["start"] = time.time() - (self.svc.LLM_CMD_MAX_DURATION + 1)
+        self.svc._update_llm_vad(_silence_frame(), session=stale)
+        self.assertIs(self.svc._llm_session, current)
+
+    def test_cancel_discards_asr_result_already_in_flight(self):
+        self._start()
+        self.svc._llm_session["buffer"].extend(_speech_frame() * 10)
+        jobs = []
+        self.svc._start_asr_thread = lambda target, *args, **kwargs: jobs.append((target, args))
+        self.svc._finish_llm_command()
+        self.svc.cancel_llm_command()
+        target, args = jobs[0]
+        target(*args)
+        self.assertEqual(self.texts, [])
+        self.assertEqual(self.status, ["started"])
+
+    def test_cancel_during_native_asr_suppresses_callback(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def dictate(*args):
+            entered.set()
+            release.wait(2)
+            return "下一页"
+
+        self.svc.dictation_service.dictate.side_effect = dictate
+        self._start()
+        self.svc._llm_session["buffer"].extend(_speech_frame() * 10)
+        self.svc._finish_llm_command()
+        try:
+            self.assertTrue(entered.wait(2))
+            self.svc.cancel_llm_command()
+        finally:
+            release.set()
+            self.assertTrue(self.svc._join_asr_threads(time.monotonic() + 2))
+        self.assertEqual(self.texts, [])
+        self.assertEqual(self.status, ["started"])
+
 
 class TestOrchestratorLLMWiring(unittest.TestCase):
     def setUp(self):
@@ -167,6 +215,7 @@ class TestOrchestratorLLMWiring(unittest.TestCase):
         self.orch.llm_client = MagicMock()
         self.orch.ppt = MagicMock()
         self.orch.mouse = MagicMock()
+        self.orch.mode_manager = MagicMock(current_mode_name="presentation")
 
     # ------------------------------------------------------------------
     # 触发与分发
@@ -243,6 +292,53 @@ class TestOrchestratorLLMWiring(unittest.TestCase):
         self.assertEqual(executed, ["prev_slide"])
         self.assertTrue(any("已执行" in s for s in self.status))
 
+    def test_delayed_intent_does_not_clear_board_after_mode_switch(self):
+        self.orch.mode_manager.current_mode_name = "draw"
+        context = {"mode": "draw", "mode_epoch": self.orch._mode_epoch}
+
+        def delayed_parse(*_args, **_kwargs):
+            self.orch.mode_manager.current_mode_name = "presentation"
+            return MagicMock(accepted=True, action="clear_canvas")
+
+        with patch("orchestrator.parse_intent", side_effect=delayed_parse), \
+             patch.object(self.orch, "execute_action") as execute:
+            self.orch._resolve_llm_intent("清屏", context)
+        execute.assert_not_called()
+        self.assertTrue(any("已取消旧指令" in text for text in self.status))
+
+    def test_intent_is_discarded_even_after_switching_back_to_original_mode(self):
+        self.orch.mode_manager.current_mode_name = "draw"
+        result = {"mode": "draw", "mode_epoch": self.orch._mode_epoch,
+                  "action": "clear_canvas"}
+        self.orch._mode_epoch += 2
+        with patch.object(self.orch, "execute_action") as execute:
+            self.orch._on_llm_intent_result(result, "ok")
+        execute.assert_not_called()
+
+    def test_mode_epoch_tracks_real_changes_and_ignores_duplicate_set_mode(self):
+        manager = self.orch.mode_manager
+        manager.switch_to.side_effect = lambda name: setattr(manager, "current_mode_name", name)
+        self.orch.set_mode("presentation", sound=False)
+        initial_epoch = self.orch._mode_epoch
+        self.orch.set_mode("presentation", sound=False)
+        self.assertEqual(self.orch._mode_epoch, initial_epoch)
+        self.orch.set_mode("draw", sound=False)
+        # Gesture switching changes ModeManager before set_mode is called.
+        manager.current_mode_name = "presentation"
+        self.orch.set_mode("presentation", sound=False)
+        self.assertEqual(self.orch._mode_epoch, initial_epoch + 2)
+
+    def test_current_intent_executes_and_invalid_queued_voice_action_is_dropped(self):
+        result = {"mode": "presentation", "mode_epoch": self.orch._mode_epoch,
+                  "action": "prev_slide"}
+        with patch.object(self.orch, "execute_action") as execute:
+            self.orch._on_llm_intent_result(result, "ok")
+            self.orch._execute_voice_action("clear_canvas")
+            self.orch._execute_voice_action("next_slide")
+        self.assertEqual([call.args for call in execute.call_args_list],
+                         [("prev_slide",), ("next_slide",)])
+
+
     def test_rejected_intent_speaks_refusal(self):
         self.orch._on_llm_intent_result(None, "no_action")
         self.feedback.say.assert_called_once_with("没听懂，请换种说法")
@@ -258,7 +354,61 @@ class TestOrchestratorLLMWiring(unittest.TestCase):
         with patch('orchestrator.parse_intent') as pi:
             pi.return_value = MagicMock(accepted=False, reason="no_action")
             self.orch._resolve_llm_intent("今天天气不错")
-        self.assertEqual(received, [(None, "no_action")])
+        self.assertEqual(received, [({"mode": "presentation", "mode_epoch": 0,
+                                     "request_id": 0, "action": None}, "no_action")])
+
+    def test_cancel_discards_queued_transcript_and_pending_llm_result(self):
+        self.voice_command.start_llm_command.return_value = True
+        self.orch._start_llm_command()
+        callback = self.voice_command.start_llm_command.call_args.kwargs["on_text"]
+        context = {"mode": "presentation", "mode_epoch": self.orch._mode_epoch,
+                   "request_id": self.orch._llm_request_id, "action": "next_slide"}
+        self.orch.execute_action("cancel_llm_command")
+        with patch.object(self.orch, "_start_background_thread") as bg:
+            callback("下一页")
+            bg.assert_not_called()
+        with patch.object(self.orch, "execute_action") as execute:
+            self.orch._on_llm_intent_result(context, "ok")
+            self.orch._on_llm_intent_result({**context, "action": None}, "error")
+            execute.assert_not_called()
+        self.feedback.say.assert_not_called()
+        self.voice_command.cancel_llm_command.assert_called_once()
+
+    def test_mode_change_during_asr_discards_old_text_even_after_return(self):
+        self.voice_command.start_llm_command.return_value = True
+        self.orch._start_llm_command()
+        callback = self.voice_command.start_llm_command.call_args.kwargs["on_text"]
+        manager = self.orch.mode_manager
+        manager.switch_to.side_effect = lambda name: setattr(manager, "current_mode_name", name)
+        self.orch.set_mode("mouse", sound=False)
+        self.orch.set_mode("presentation", sound=False)
+        with patch.object(self.orch, "_start_background_thread") as bg:
+            callback("下一页")
+            bg.assert_not_called()
+
+    def test_pending_cloud_request_prevents_duplicate_wake(self):
+        self.voice_command.start_llm_command.return_value = True
+        self.orch._start_llm_command()
+        initial_id = self.orch._llm_request_id
+        self.orch._start_llm_command()
+        self.assertEqual(self.orch._llm_request_id, initial_id)
+        self.voice_command.start_llm_command.assert_called_once()
+        self.orch._on_llm_intent_result({"mode": "presentation", "mode_epoch": 0,
+                                       "request_id": initial_id, "action": None}, "no_action")
+        self.orch._start_llm_command()
+        self.assertEqual(self.voice_command.start_llm_command.call_count, 2)
+
+    def test_old_cloud_result_does_not_clear_new_session_after_restart(self):
+        self.voice_command.start_llm_command.return_value = True
+        self.orch._start_llm_command()
+        old = {"mode": "presentation", "mode_epoch": 0,
+               "request_id": self.orch._llm_request_id, "action": "next_slide"}
+        self.orch.execute_action("hang_up_voice_assistant")
+        self.orch._start_llm_command()
+        with patch.object(self.orch, "execute_action") as execute:
+            self.orch._on_llm_intent_result(old, "ok")
+            execute.assert_not_called()
+        self.assertTrue(self.orch._llm_command_pending)
 
     # ------------------------------------------------------------------
     # 云端健康（M6）

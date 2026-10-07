@@ -10,23 +10,19 @@ import numpy as np
 from config_manager import ConfigManager
 from mode_manager import ModeManager
 from modes import MODE_NAME_ZH, DrawMode, MouseMode, PresentationMode
-from runtime_paths import writable_data_dir
 from PyQt6.QtCore import QObject, pyqtSignal
+from runtime_paths import writable_data_dir
 from services.camera import CameraService, list_available_cameras
 from services.classroom_ai import ClassroomAI, save_markdown
 from services.cloud.cloud_health import CloudHealthMonitor
 from services.cloud.llm_client import LLMClient
-from services.cloud.llm_intent import parse_intent
+from services.cloud.llm_intent import allowed_actions, parse_intent
 from services.engine_auto_switcher import (
     ENGINE_HAGRID_YOLO,
     STATE_CAPTURE,
     STATE_FAR_TRACK,
     EngineAutoSwitcher,
 )
-
-# 远距 CAPTURE 态可选捕获引擎（在 ENGINE_HAGRID_YOLO 基础上扩展）
-ENGINE_PERSON_POSE = "person_pose_hand"
-_CAPTURE_ENGINES = (ENGINE_HAGRID_YOLO, ENGINE_PERSON_POSE)
 from services.geometric_classifier import WeightedVoteClassifier
 from services.gesture_recognizer import GestureRecognizer
 from services.hand_tracker_factory import create_hand_tracker
@@ -34,10 +30,13 @@ from services.inference_worker import InferenceWorker
 from services.mouse_controller import MouseController
 from services.ppt_controller import PptController
 from services.temporal_voter import TemporalGestureVoter
-from services.voice_assistant import VoiceAssistantService
 from services.voice_command import VoiceCommandService
 from services.voice_dictation import VoiceDictationService
 from services.voice_feedback import VoiceFeedbackService
+
+# 远距 CAPTURE 态可选捕获引擎（在 ENGINE_HAGRID_YOLO 基础上扩展）
+ENGINE_PERSON_POSE = "person_pose_hand"
+_CAPTURE_ENGINES = (ENGINE_HAGRID_YOLO, ENGINE_PERSON_POSE)
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +90,7 @@ class AirControlOrchestrator(QObject):
     _dictation_text_signal = pyqtSignal(str, object)     # text, anchor_pos
     _dictation_partial_signal = pyqtSignal(str)          # partial transcription
     _classroom_text_signal = pyqtSignal(str)             # 课堂智能生成内容（写屏）
-    _llm_command_text_signal = pyqtSignal(str)           # LLM 慢通道转写文本
+    _llm_command_text_signal = pyqtSignal(object)        # 转写文本 + 唤醒时的会话上下文
     _llm_intent_result_signal = pyqtSignal(object, str)  # 意图解析结果 (action|None, reason)
     _tracker_ready_signal = pyqtSignal(object, object, int, str)
 
@@ -119,7 +118,7 @@ class AirControlOrchestrator(QObject):
             )
 
         # Connect internal threads signals to safe handler methods in UI thread
-        self._voice_action_signal.connect(self.execute_action)
+        self._voice_action_signal.connect(self._execute_voice_action)
         self._dictation_status_signal.connect(self._on_dictation_status)
         self._dictation_text_signal.connect(self._on_dictation_text)
         self._dictation_partial_signal.connect(self._on_dictation_partial)
@@ -129,6 +128,14 @@ class AirControlOrchestrator(QObject):
         self._tracker_ready_signal.connect(self._on_tracker_ready)
         self._tracker_request_id = 0
         self._closing = False
+        # 已构建完成但就绪信号尚未投递的 tracker：close() 时兜底关闭，
+        # 防止信号滞留 Qt 队列随事件循环结束而泄漏原生句柄
+        self._pending_ready_lock = threading.Lock()
+        self._pending_ready_trackers = set()
+        self._mode_epoch = 0
+        self._last_action_mode = None
+        self._llm_request_id = 0
+        self._llm_command_pending = False
         self._closing_event = threading.Event()
         self._background_threads = set()
         self._background_threads_lock = threading.Lock()
@@ -176,8 +183,6 @@ class AirControlOrchestrator(QObject):
 
     def set_hwnd(self, hwnd):
         self.aircontrol_hwnd = hwnd
-        if hasattr(self, 'voice_assistant'):
-            self.voice_assistant.aircontrol_hwnd = hwnd
 
     def _start_background_thread(self, target, name, args=()):
         """Start and track a bounded-lifecycle helper owned by the orchestrator."""
@@ -326,12 +331,6 @@ class AirControlOrchestrator(QObject):
         )
         self.ppt = PptController(target_app=self.config.get("target_app"), config=self.config)
 
-        self.voice_assistant = VoiceAssistantService(
-            assistant=self.config.get("voice_assistant")
-        )
-        if self.aircontrol_hwnd:
-            self.voice_assistant.aircontrol_hwnd = self.aircontrol_hwnd
-
         # Voice dictation service (SenseVoice-Small offline ASR)
         self.voice_dictation = VoiceDictationService(self.config)
         if not self.voice_dictation.is_available():
@@ -409,7 +408,7 @@ class AirControlOrchestrator(QObject):
             or self.config.get("detection_engine", "mediapipe"),
             self.config.get("model_type"),
             self.config.get("dominant_hand", "Right"),
-            self.config.get("hand_detection_confidence", 0.6),
+            self.config.get("hand_detection_confidence", 0.5),
             self.config.get("hand_presence_confidence", 0.5),
             self.config.get("hand_tracking_confidence", 0.5),
             self.config.get("hand_smoothing_min_cutoff", 0.5),
@@ -552,7 +551,7 @@ class AirControlOrchestrator(QObject):
 
         self._start_background_thread(build, "YoloTrackerPrewarm")
 
-    def _maybe_auto_switch_engine(self, hands_landmarks, hand_bbox_ratio=0.0):
+    def _maybe_auto_switch_engine(self, hands_landmarks, hand_bbox_ratio=0.0, hands_gestures=None, frame_area=1):
         """远距三态自动切换：逐帧喂检出结果给 FSM，按目标态执行迁移。
 
         仅主流程生效；AIRCONTROL_ENGINE 环境变量强制引擎时（自检/回放类场景）
@@ -567,7 +566,14 @@ class AirControlOrchestrator(QObject):
         # FSM 发起的 tracker 重建仍在途：等其落地，避免重复发起
         if self._engine_switch_pending:
             return
-        target = switcher.update(len(hands_landmarks or []), hand_bbox_ratio)
+        if hands_gestures is None:
+            target = switcher.update(len(hands_landmarks or []), hand_bbox_ratio)
+        else:
+            from services.engine_auto_switcher import primary_hand_evidence
+            count, ratio, valid = primary_hand_evidence(
+                hands_landmarks or [], hands_gestures, frame_area,
+            )
+            target = switcher.update(count, ratio, primary_valid=valid)
         if target is None:
             return
         logger.info("引擎自动切换: 目标态 %s（%s）", target, switcher.last_reason)
@@ -592,8 +598,8 @@ class AirControlOrchestrator(QObject):
         elif target == STATE_FAR_TRACK:
             self._engine_override = "mediapipe"
             self._fsm_far_track_active = True
-            # CAPTURE→FAR_TRACK 总是 yolo→mediapipe 的引擎变化，必走重建；
-            # 落地时把 YOLO 最后的手部 hint 播种给新 MP tracker 的 crop-zoom。
+            # CAPTURE 或已检出小手的 NEAR 都可进入；重建落地时把当前
+            # 主手 hint 播种给新 MP tracker 的 crop-zoom。
             self._request_fsm_rebuild(seed=True)
         else:  # STATE_NEAR：撤掉 FSM 覆盖，回到用户配置档
             self._engine_override = None
@@ -723,9 +729,11 @@ class AirControlOrchestrator(QObject):
         except Exception as e:
             lines.append(f"[BAD]  语音指令检查失败: {e}")
 
-        # Voice assistant
-        assistant = self.config.get("voice_assistant") or "未配置"
-        lines.append(f"[OK]   语音助手: {assistant}")
+        # Voice assistant（外部客户端已移除，语音助手 = MOMA 智能指令慢通道）
+        if getattr(self, "llm_client", None) is not None and self.llm_client.is_configured():
+            lines.append("[OK]   语音助手: MOMA 智能指令（说「小助手」唤醒）")
+        else:
+            lines.append("[BAD]  MOMA 云端未配置，智能指令不可用")
 
         lines.append("=" * 60)
         lines.append("")
@@ -946,7 +954,6 @@ class AirControlOrchestrator(QObject):
         self.overlay.set_pen_auto_scale(
             self.config.get("pen_width_auto_scale") is not False
         )
-        self.voice_assistant.set_assistant(self.config.get("voice_assistant"))
         if hasattr(self, "inference_worker"):
             self.inference_worker.set_debug_overlay(
                 bool(self.config.get("debug_overlay"))
@@ -1032,6 +1039,10 @@ class AirControlOrchestrator(QObject):
                 if callable(close):
                     close()
                 return
+            if tracker is not None:
+                # 登记"已建好未投递"：若信号滞留 Qt 队列，close() 兜底关闭
+                with self._pending_ready_lock:
+                    self._pending_ready_trackers.add(tracker)
             self._tracker_ready_signal.emit(
                 tracker, signature, request_id, error
             )
@@ -1039,6 +1050,9 @@ class AirControlOrchestrator(QObject):
         self._start_background_thread(build, "TrackerBuildWorker")
 
     def _on_tracker_ready(self, tracker, signature, request_id, error):
+        if tracker is not None:
+            with self._pending_ready_lock:
+                self._pending_ready_trackers.discard(tracker)
         if self._closing or request_id != self._tracker_request_id:
             close = getattr(tracker, "close", None)
             if callable(close):
@@ -1137,6 +1151,12 @@ class AirControlOrchestrator(QObject):
 
     def set_mode(self, mode_name, sound=True):
         self.mode_manager.switch_to(mode_name)
+        current_mode = self.mode_manager.current_mode_name
+        if current_mode != self._last_action_mode:
+            self._mode_epoch += 1
+            self._last_action_mode = current_mode
+            if self._llm_command_pending:
+                self._cancel_llm_command()
         if hasattr(self, 'voice_command') and self.voice_command.is_running:
             self.voice_command.on_mode_changed(mode_name)
         if sound:
@@ -1147,7 +1167,7 @@ class AirControlOrchestrator(QObject):
             # 本地 TTS 播报（M5）：模式切换语音确认
             feedback = getattr(self, "voice_feedback", None)
             if feedback is not None:
-                feedback.say("已切换到{}模式".format(self._mode_name_zh()))
+                feedback.say(f"已切换到{self._mode_name_zh()}模式")
 
         self.status_text = f"已切换到{self._mode_name_zh()}"
         self.status_color = (0, 255, 255)
@@ -1304,15 +1324,10 @@ class AirControlOrchestrator(QObject):
     def _process_frame_results(self, frame, hands_landmarks, hands_gestures):
         frame_h, frame_w = frame.shape[:2]
 
-        # 远距三态自动切换：逐帧喂检出结果（回放/benchmark 不经过这里，不受影响）。
-        # hand_bbox_ratio 供 FAR_TRACK 判"手变大/走近"；幽灵手预测补帧 bbox_area=0，
-        # 不会虚增该比值；≤5 帧的幽灵手在 60/90 帧阈值下影响可忽略。
-        hand_bbox_ratio = 0.0
-        if hands_gestures:
-            hand_bbox_ratio = max(
-                float(g.get("bbox_area", 0.0)) for g in hands_gestures
-            ) / float(max(frame_w * frame_h, 1))
-        self._maybe_auto_switch_engine(hands_landmarks, hand_bbox_ratio)
+        self._maybe_auto_switch_engine(
+            hands_landmarks, hands_gestures=hands_gestures,
+            frame_area=frame_w * frame_h,
+        )
 
         # 全局模式切换手势必须在时序稳定化之前判断。TemporalGestureVoter 的
         # FSM 会把 ILoveYou 延迟/过滤为 None/OTHER，导致 ModeManager 看不到
@@ -1527,7 +1542,7 @@ class AirControlOrchestrator(QObject):
             with self._classroom_busy_lock:
                 self._classroom_busy = False
         if not result.ok:
-            self.voice_status_updated.emit("⚠️ 生成失败：{}".format(result.reason))
+            self.voice_status_updated.emit(f"⚠️ 生成失败：{result.reason}")
             return
         notes_dir = os.path.join(writable_data_dir(), "notes")
         export_path = os.path.join(
@@ -1538,7 +1553,7 @@ class AirControlOrchestrator(QObject):
             ),
         )
         if save_markdown(result.text, export_path):
-            self.voice_status_updated.emit("📄 已导出：{}".format(export_path))
+            self.voice_status_updated.emit(f"📄 已导出：{export_path}")
         # 投屏展示：经信号回 UI 线程写画布，不追加进课堂转录 buffer
         self._classroom_text_signal.emit(result.text)
 
@@ -1562,6 +1577,8 @@ class AirControlOrchestrator(QObject):
 
     def _start_llm_command(self):
         """唤醒词触发：录一句话 → 本地 SenseVoice 转写 → LLM 意图解析。"""
+        if self._closing:
+            return
         classroom = getattr(self, "classroom_ai", None)
         if classroom is None or not classroom.is_available():
             self.voice_status_updated.emit("☁️ 云端未配置，智能指令不可用")
@@ -1579,8 +1596,20 @@ class AirControlOrchestrator(QObject):
             return
         if not hasattr(self, "voice_command") or not self.voice_command.is_running:
             return
+        if self._llm_command_pending:
+            self.voice_status_updated.emit("⏳ 请说完当前指令")
+            return
+        self._llm_request_id += 1
+        self._llm_command_pending = True
+        context = {
+            "request_id": self._llm_request_id,
+            "mode": self.mode_manager.current_mode_name,
+            "mode_epoch": self._mode_epoch,
+        }
 
         def on_status(phase, payload):
+            if not self._is_current_llm_request(context):
+                return
             if phase == "started":
                 self.voice_status_updated.emit("🎙️ 请说指令…")
             elif phase == "failed":
@@ -1588,48 +1617,100 @@ class AirControlOrchestrator(QObject):
 
         def on_text(text):
             # ASR worker 线程 → 信号 marshal 回 UI 线程
-            self._llm_command_text_signal.emit(text or "")
+            self._llm_command_text_signal.emit({**context, "text": text or ""})
 
         ok = self.voice_command.start_llm_command(on_text=on_text, on_status=on_status)
         if not ok:
+            self._llm_command_pending = False
             self.voice_status_updated.emit("⏳ 请说完当前指令")
+
+    def _cancel_llm_command(self):
+        """UI 线程使录音、转写、云端解析及已排队结果一并失效。"""
+        self._llm_request_id += 1
+        self._llm_command_pending = False
+        if hasattr(self, "voice_command"):
+            self.voice_command.cancel_llm_command()
+
+    def _is_current_llm_request(self, context):
+        return (
+            not self._closing
+            and context.get("request_id", self._llm_request_id) == self._llm_request_id
+            and context.get("mode") == self.mode_manager.current_mode_name
+            and context.get("mode_epoch") == self._mode_epoch
+        )
 
     def _on_llm_command_text(self, text):
         """UI 线程：转写文本 → 后台 LLM 意图解析（快通道 flash 模型）。"""
+        if self._closing:
+            return
+        if isinstance(text, dict):
+            context = {key: text[key] for key in ("request_id", "mode", "mode_epoch")}
+            if not self._is_current_llm_request(context):
+                return
+            text = text.get("text")
+        else:
+            context = {
+                "request_id": self._llm_request_id,
+                "mode": self.mode_manager.current_mode_name,
+                "mode_epoch": self._mode_epoch,
+            }
         text = (text or "").strip()
         feedback = getattr(self, "voice_feedback", None)
         if not text:
+            self._llm_command_pending = False
             self.voice_status_updated.emit("⚠️ 没听清，请再说一次")
             if feedback is not None:
                 feedback.say("没听清，请再说一次")
             return
-        self.voice_status_updated.emit("🧠 正在理解：{}".format(text[:24]))
+        self.voice_status_updated.emit(f"🧠 正在理解：{text[:24]}")
         self._start_background_thread(
-            self._resolve_llm_intent, "LlmIntentWorker", args=(text,)
+            self._resolve_llm_intent, "LlmIntentWorker", args=(text, context)
         )
 
-    def _resolve_llm_intent(self, text):
+    def _resolve_llm_intent(self, text, request_context=None):
         """后台线程：LLM 意图解析，结果经信号回 UI 线程。"""
         mode = None
         mode_manager = getattr(self, "mode_manager", None)
         if mode_manager is not None:
             mode = getattr(mode_manager, "current_mode_name", None)
+        context = request_context if request_context is not None else {
+            "mode": mode,
+            "mode_epoch": self._mode_epoch,
+            "request_id": self._llm_request_id,
+        }
         try:
-            result = parse_intent(text, self.llm_client, mode=mode)
+            result = parse_intent(text, self.llm_client, mode=context["mode"])
         except Exception:
             logger.exception("LLM 意图解析异常")
-            self._llm_intent_result_signal.emit(None, "error")
+            self._llm_intent_result_signal.emit({**context, "action": None}, "error")
             return
         if result.accepted:
-            self._llm_intent_result_signal.emit(result.action, "ok")
+            self._llm_intent_result_signal.emit(
+                {**context, "action": result.action}, "ok"
+            )
         else:
-            self._llm_intent_result_signal.emit(None, result.reason)
+            self._llm_intent_result_signal.emit({**context, "action": None}, result.reason)
 
     def _on_llm_intent_result(self, action, reason):
         """UI 线程：执行 action 或礼貌拒绝（TTS 播报）。"""
+        if self._closing:
+            return
+        current_mode = getattr(getattr(self, "mode_manager", None), "current_mode_name", None)
+        if isinstance(action, dict):
+            if action.get("request_id", self._llm_request_id) != self._llm_request_id:
+                return
+            if (action.get("mode") != current_mode
+                    or action.get("mode_epoch") != self._mode_epoch):
+                self.voice_status_updated.emit("模式已变化，已取消旧指令")
+                return
+            action = action.get("action")
+        self._llm_command_pending = False
+        if action and action not in allowed_actions(current_mode):
+            self.voice_status_updated.emit("当前模式不支持该指令")
+            return
         feedback = getattr(self, "voice_feedback", None)
         if action:
-            self.voice_status_updated.emit("✅ 已执行：{}".format(action))
+            self.voice_status_updated.emit(f"✅ 已执行：{action}")
             self.execute_action(action)
         else:
             self.voice_status_updated.emit("🤔 没听懂，请换种说法")
@@ -1669,6 +1750,16 @@ class AirControlOrchestrator(QObject):
         "switch_to_presentation": "presentation",
     }
 
+    def _execute_voice_action(self, action_name):
+        """Revalidate queued voice actions when they reach the UI thread."""
+        if self._closing:
+            return
+        mode = self.mode_manager.current_mode_name
+        if action_name not in allowed_actions(mode):
+            logger.info("当前模式 %s 丢弃过期语音动作: %s", mode, action_name)
+            return
+        self.execute_action(action_name)
+
     def execute_action(self, action_name):
         # —— 简单委托类动作：字典分发，避免长 if-elif 链 ——
         # 用 lambda 延迟属性访问，避免动作不需要的控制器被强制引用。
@@ -1684,13 +1775,15 @@ class AirControlOrchestrator(QObject):
             handler()
             return
 
-        voice_actions = {
-            "launch_voice_assistant": lambda: self.voice_assistant.activate(),
-            "hang_up_voice_assistant": lambda: self.voice_assistant.hang_up(),
+        assistant_actions = {
+            # MOMA 智能指令慢通道（原外部豆包客户端已移除，手势统一转向 MOMA）
+            "launch_voice_assistant": self._start_llm_command,
+            "hang_up_voice_assistant": self._cancel_llm_command,
+            "cancel_llm_command": self._cancel_llm_command,
         }
-        handler = voice_actions.get(action_name)
+        handler = assistant_actions.get(action_name)
         if handler is not None:
-            self._start_background_thread(handler, "VoiceAssistantAction")
+            handler()
             return
 
         window_actions = {
@@ -1804,15 +1897,6 @@ class AirControlOrchestrator(QObject):
             # ASR worker may still own the recognizer. Never release it here.
             shutdown_incomplete = True
 
-        # 停止语音助手服务（释放可能持有的窗口句柄引用）
-        if hasattr(self, 'voice_assistant'):
-            stop_assistant = getattr(self.voice_assistant, "stop", None)
-            if callable(stop_assistant):
-                try:
-                    stop_assistant()
-                except Exception:
-                    logger.exception("停止语音助手服务失败")
-
         # 云端健康监控（M6）：停止心跳
         if getattr(self, "cloud_health", None) is not None:
             try:
@@ -1837,6 +1921,19 @@ class AirControlOrchestrator(QObject):
 
         background_stopped = self._wait_for_background_threads(remaining())
         shutdown_incomplete = shutdown_incomplete or not background_stopped
+
+        # 后台线程已 join：就绪信号滞留在 Qt 队列里的 tracker 不会再被投递，
+        # 这里兜底关闭，避免原生句柄泄漏到进程退出
+        with self._pending_ready_lock:
+            pending_trackers = list(self._pending_ready_trackers)
+            self._pending_ready_trackers.clear()
+        for pending in pending_trackers:
+            close_pending = getattr(pending, "close", None)
+            if callable(close_pending):
+                try:
+                    close_pending()
+                except Exception:
+                    logger.exception("关闭未投递 tracker 失败")
 
         if inference_stopped:
             if hasattr(self, "inference_worker"):

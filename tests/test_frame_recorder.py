@@ -7,6 +7,7 @@ import time
 import unittest
 from unittest import mock
 
+import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
@@ -15,6 +16,43 @@ from services.frame_recorder import FrameRecorder
 
 
 class TestFrameRecorder(unittest.TestCase):
+    def test_resolution_change_preserves_video_and_metadata_alignment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = FrameRecorder(out_root=temp_dir, codec="ffv1")
+            recorder.write(np.zeros((32, 32, 3), dtype=np.uint8))
+            recorder.write(np.full((32, 64, 3), 100, dtype=np.uint8), meta={
+                "primary_wrist": [32.0, 16.0], "wrists": [[32.0, 16.0]],
+                "crop_center": [32.0, 16.0], "crop_size": 16.0,
+            })
+            self.assertTrue(recorder.close())
+            with open(os.path.join(recorder.dir, "meta.jsonl"), encoding="utf-8") as stream:
+                rows = [json.loads(line) for line in stream]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(recorder._count, 2)
+            paths = [os.path.join(recorder.dir, name) for name in ("frames.mkv", "frames.mp4")]
+            video_path = next((p for p in paths if os.path.isfile(p)), None)
+            self.assertIsNotNone(video_path, "A video encoder is required for this regression")
+            cap = cv2.VideoCapture(video_path)
+            frames = []
+            try:
+                while True:
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    frames.append(frame)
+            finally:
+                cap.release()
+            self.assertEqual(len(frames), len(rows))
+            self.assertEqual(frames[1].shape[:2], (32, 32))
+            np.testing.assert_array_equal(frames[1][0], 0)
+            self.assertEqual(rows[1]["primary_wrist"], [16.0, 16.0])
+            self.assertEqual(rows[1]["crop_center"], [16.0, 16.0])
+            self.assertEqual(rows[1]["crop_size"], 8.0)
+            self.assertEqual(rows[1]["wrists"], [[16.0, 16.0]])
+            self.assertEqual((rows[1]["w"], rows[1]["h"]), (32, 32))
+            self.assertEqual((rows[1]["source_w"], rows[1]["source_h"]), (64, 32))
+            self.assertEqual(rows[1]["source_meta"]["primary_wrist"], [32.0, 16.0])
+
     def test_close_timeout_never_evicts_a_queued_frame_for_sentinel(self):
         class BlockingWriter:
             def __init__(self):

@@ -497,6 +497,9 @@ class DrawingOverlay(QWidget):
     CAPTION_RADIUS = 16
     CAPTION_FONT_MIN = 28
     CAPTION_FONT_MAX = 56
+    # 手写体字体栈（板书感）：方正硬笔楷书（项目自带 app/assets/fonts/）
+    # → 楷体 → 系统默认。setFamilies 是回退列表：字体缺失时自动落到下一级。
+    CAPTION_FONT_FAMILIES = ["FZYingBiKaiShu-S15S", "KaiTi"]
 
     def _caption_layout(self, text):
         """计算字幕布局：黑底随实际文字宽×高伸缩，避免短文本时遮挡整个屏幕。
@@ -516,6 +519,7 @@ class DrawingOverlay(QWidget):
                       min(int(canvas_h * self.CAPTION_FONT_RATIO),
                           self.CAPTION_FONT_MAX))
         font = QFont()
+        font.setFamilies(self.CAPTION_FONT_FAMILIES)
         font.setPixelSize(font_pt)
         font.setBold(True)
         metrics = QFontMetrics(font)

@@ -43,6 +43,33 @@ from version import __version__
 logger = logging.getLogger(__name__)
 
 
+def _register_bundled_fonts(_app=None):
+    """把项目自带字体注册进 Qt（板书字幕手写体）。
+
+    字体目录 app/assets/fonts/（PyInstaller 打包后随 _MEIPASS 走）。
+    加载失败只记日志 — 字体栈会回退到楷体/系统字体，不阻断启动。
+    必须在 QApplication 创建后调用；幂等（Qt 对同一文件重复注册返回同一 id）。
+    """
+    from PyQt6.QtGui import QFontDatabase
+
+    fonts_dir = resource_path("app", "assets", "fonts")
+    if not os.path.isdir(fonts_dir):
+        return
+    for name in sorted(os.listdir(fonts_dir)):
+        if not name.lower().endswith((".ttf", ".otf")):
+            continue
+        path = os.path.join(fonts_dir, name)
+        font_id = QFontDatabase.addApplicationFont(path)
+        if font_id == -1:
+            logger.warning("自带字体加载失败（字幕将回退系统字体）: %s", path)
+        else:
+            logger.info(
+                "自带字体已注册: %s → %s",
+                name,
+                ", ".join(QFontDatabase.applicationFontFamilies(font_id)),
+            )
+
+
 def _make_preview_pixmap(frame, target_width, target_height):
     """Create a display-sized pixmap without copying the full source frame."""
     source_height, source_width, channels = frame.shape
@@ -165,7 +192,7 @@ class SettingsDialog(QDialog):
         self.app_combo.setCurrentText(self.config.get("target_app"))
 
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["Lite", "Heavy"])
+        self.model_combo.addItems(["Lite", "Full", "Heavy"])
         self.model_combo.setCurrentText(self.config.get("model_type"))
 
         self.mode_combo = QComboBox()
@@ -195,40 +222,51 @@ class SettingsDialog(QDialog):
         gesture_actions = [
             "next_slide", "prev_slide", "start_presentation",
             "end_presentation", "switch_app",
-            "launch_voice_assistant", "hang_up_voice_assistant", "none",
+            "launch_voice_assistant", "cancel_llm_command", "none",
         ]
+
+        def mapping_action(gesture):
+            action = self.config.get_mapping(gesture)
+            return "cancel_llm_command" if action == "hang_up_voice_assistant" else action
+
+        # Preserve custom mappings even if a newer/older build does not know them.
+        for gesture in ("SWIPE_RIGHT", "SWIPE_LEFT", "SWIPE_UP", "SWIPE_DOWN",
+                        "FIST", "THUMB_UP", "SCISSOR", "THUMB_DOWN"):
+            action = mapping_action(gesture)
+            if action not in gesture_actions:
+                gesture_actions.append(action)
 
         self.right_combo = QComboBox()
         self.right_combo.addItems(gesture_actions)
-        self.right_combo.setCurrentText(self.config.get_mapping("SWIPE_RIGHT"))
+        self.right_combo.setCurrentText(mapping_action("SWIPE_RIGHT"))
 
         self.left_combo = QComboBox()
         self.left_combo.addItems(gesture_actions)
-        self.left_combo.setCurrentText(self.config.get_mapping("SWIPE_LEFT"))
+        self.left_combo.setCurrentText(mapping_action("SWIPE_LEFT"))
 
         self.up_combo = QComboBox()
         self.up_combo.addItems(gesture_actions)
-        self.up_combo.setCurrentText(self.config.get_mapping("SWIPE_UP"))
+        self.up_combo.setCurrentText(mapping_action("SWIPE_UP"))
 
         self.down_combo = QComboBox()
         self.down_combo.addItems(gesture_actions)
-        self.down_combo.setCurrentText(self.config.get_mapping("SWIPE_DOWN"))
+        self.down_combo.setCurrentText(mapping_action("SWIPE_DOWN"))
 
         self.fist_combo = QComboBox()
         self.fist_combo.addItems(gesture_actions)
-        self.fist_combo.setCurrentText(self.config.get_mapping("FIST"))
+        self.fist_combo.setCurrentText(mapping_action("FIST"))
 
         self.thumb_combo = QComboBox()
         self.thumb_combo.addItems(gesture_actions)
-        self.thumb_combo.setCurrentText(self.config.get_mapping("THUMB_UP"))
+        self.thumb_combo.setCurrentText(mapping_action("THUMB_UP"))
 
         self.scissor_combo = QComboBox()
         self.scissor_combo.addItems(gesture_actions)
-        self.scissor_combo.setCurrentText(self.config.get_mapping("SCISSOR"))
+        self.scissor_combo.setCurrentText(mapping_action("SCISSOR"))
 
         self.thumb_down_combo = QComboBox()
         self.thumb_down_combo.addItems(gesture_actions)
-        self.thumb_down_combo.setCurrentText(self.config.get_mapping("THUMB_DOWN"))
+        self.thumb_down_combo.setCurrentText(mapping_action("THUMB_DOWN"))
 
         # 鼠标
         self.sensitivity_spin = QSpinBox()
@@ -270,14 +308,6 @@ class SettingsDialog(QDialog):
         self.pen_spin.setRange(1, 100)
         self.pen_spin.setValue(int(self.config.get("pen_width")))
         self.pen_spin.setToolTip("板书模式下的笔触宽度（像素），可配合笔粗距离自适应使用")
-
-        # 语音
-        self.voice_combo = QComboBox()
-        self.voice_combo.addItem("豆包", "doubao")
-        self.voice_combo.addItem("通义千问", "qianwen")
-        idx = self.voice_combo.findData(self.config.get("voice_assistant"))
-        if idx >= 0:
-            self.voice_combo.setCurrentIndex(idx)
 
         self.zoom_sr_combo = QComboBox()
         self.zoom_sr_combo.addItem("自动调整 (Auto)", "auto")
@@ -339,9 +369,8 @@ class SettingsDialog(QDialog):
         w_pen.setLayout(tab_pen)
         tabs.addTab(w_pen, "画笔")
 
-        # Tab 5: 语音
+        # Tab 5: 语音（助手 = MOMA 智能指令，无外部客户端选择）
         tab_voice = QFormLayout()
-        tab_voice.addRow("语音助手:", self.voice_combo)
         tab_voice.addRow("手势缩放超分引擎:", self.zoom_sr_combo)
         w_voice = QWidget()
         w_voice.setLayout(tab_voice)
@@ -383,9 +412,6 @@ class SettingsDialog(QDialog):
         self.y_dz_bottom_spin.setValue(int(defaults.get("edge_y_canvas_deadzone_bottom", 18)))
         self.y_dz_top_spin.setValue(int(defaults.get("edge_y_canvas_deadzone_top", 10)))
         self.pen_spin.setValue(int(defaults.get("pen_width", 20)))
-        idx = self.voice_combo.findData(defaults.get("voice_assistant", "doubao"))
-        if idx >= 0:
-            self.voice_combo.setCurrentIndex(idx)
         idx_sr = self.zoom_sr_combo.findData(defaults.get("zoom_sr_engine", "auto"))
         if idx_sr >= 0:
             self.zoom_sr_combo.setCurrentIndex(idx_sr)
@@ -599,7 +625,6 @@ class SettingsDialog(QDialog):
                 self.config.set("edge_y_canvas_deadzone_bottom", self.y_dz_bottom_spin.value())
                 self.config.set("edge_y_canvas_deadzone_top", self.y_dz_top_spin.value())
                 self.config.set("pen_width", self.pen_spin.value())
-                self.config.set("voice_assistant", self.voice_combo.currentData())
                 self.config.set("zoom_sr_engine", self.zoom_sr_combo.currentData())
                 self.config.set_mapping("SWIPE_RIGHT", self.right_combo.currentText())
                 self.config.set_mapping("SWIPE_LEFT", self.left_combo.currentText())
@@ -1115,7 +1140,7 @@ class FloatingWindow(QMainWindow):
         elif mode == "draw":
             return "🤟保持切模式 | 食指书写 | ✌️抬笔 | 握拳就绪 | 张掌清屏"
         else:
-            return "🤟保持切模式 | 剪刀手唤醒AI | 拇指向下挂断 | 并掌翻页 | 点赞切WPS"
+            return "🤟保持切模式 | 剪刀手唤醒AI | 拇指向下取消 | 并掌翻页 | 点赞切WPS"
 
     # ------------------------------------------------------------------
     # 语音指令帮助提示 (Dialog & Tooltip)
@@ -1123,7 +1148,7 @@ class FloatingWindow(QMainWindow):
 
     _VOICE_COMMANDS_BY_MODE = {
         "global": [
-            ("召唤豆包", "呼出豆包 AI 助手"),
+            ("小助手", "唤醒 MOMA AI，说一句话即可执行"),
             ("最小化助手", "最小化本程序"),
             ("显示助手", "从最小化恢复本程序"),
         ],
@@ -1523,6 +1548,9 @@ def main():
     install_crash_handler()
 
     app = QApplication(sys.argv)
+    # 板书字幕手写体：方正硬笔楷书随项目自带（app/assets/fonts/），不依赖
+    # 机器装没装。失败只降级（回退楷体/系统字体），不阻断启动。
+    _register_bundled_fonts(app)
     window = FloatingWindow()
     window.show()
     exit_code = app.exec()

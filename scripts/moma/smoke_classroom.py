@@ -37,11 +37,11 @@ def main():
         ai.append_transcript(line)
 
     summary = ai.generate_summary()
-    print("=== 课堂小结 ===  reason={} usage={}".format(summary.reason, summary.usage))
+    print(f"=== 课堂小结 ===  reason={summary.reason} usage={summary.usage}")
     print(summary.text)
 
     quiz = ai.generate_quiz(count=3)
-    print("\n=== 随堂出题 ===  reason={} usage={}".format(quiz.reason, quiz.usage))
+    print(f"\n=== 随堂出题 ===  reason={quiz.reason} usage={quiz.usage}")
     print(quiz.text)
     client.close()
 

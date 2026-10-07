@@ -148,9 +148,9 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sys.path.insert(0, str(args.source / "app"))
-    from modes.mouse_mode import MouseMode          # noqa: E402
+    from config_manager import ConfigManager  # noqa: E402
+    from modes.mouse_mode import MouseMode  # noqa: E402
     from services.gesture_recognizer import GestureRecognizer  # noqa: E402
-    from config_manager import ConfigManager        # noqa: E402
 
     evaluation = load_module("evaluation", EVAL / "run_eval.py")
     metrics = load_module("metrics", EVAL / "aggregate_eval.py")

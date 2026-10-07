@@ -369,7 +369,10 @@ class DrawMode(ModeBase):
             landmarks[5][1] / frame_w, landmarks[5][2] / frame_h,
             update=not freeze, span_floor=span_floor,
         )
-        x_screen, y_screen = self.mouse.to_screen(nx, ny, apply_accel=False)
+        # QPainter expects logical coordinates local to this screen's canvas,
+        # not physical coordinates spanning the Windows virtual desktop.
+        x_screen = int(nx * max(0, self.overlay.width() - 1))
+        y_screen = int(ny * max(0, self.overlay.height() - 1))
         self.overlay.update_cursor(x_screen, y_screen)
 
         # 笔粗距离自适应（默认关闭，见 config pen_width_auto_scale）：

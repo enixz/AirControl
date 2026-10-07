@@ -15,7 +15,7 @@ import httpx
 KEY = os.environ.get("MOMA_API_KEY")
 ZHENZE = "https://zhenze-huhehaote.cmecloud.cn/v1"
 MOMA = "https://moma.cmecloud.cn"
-H = {"Authorization": "Bearer {}".format(KEY), "Content-Type": "application/json"}
+H = {"Authorization": f"Bearer {KEY}", "Content-Type": "application/json"}
 
 
 def probe(label, method, url, headers=None, json_body=None, timeout=30):
@@ -24,9 +24,9 @@ def probe(label, method, url, headers=None, json_body=None, timeout=30):
         r = httpx.request(method, url, headers=headers or H, json=json_body, timeout=timeout)
         dt = round((time.time() - t) * 1000)
         body = r.text.replace("\n", " ")[:220]
-        print("[{}] {} {}ms  {}".format(label, r.status_code, dt, body))
+        print(f"[{label}] {r.status_code} {dt}ms  {body}")
     except Exception as e:  # noqa: BLE001
-        print("[{}] ERROR: {}: {}".format(label, type(e).__name__, e))
+        print(f"[{label}] ERROR: {type(e).__name__}: {e}")
 
 
 def main():

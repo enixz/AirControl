@@ -12,12 +12,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"))
 
-from services.person_pose_hand_tracker import (
-    PersonPoseHandTracker,
-    _KP_RIGHT_WRIST,
-    _KP_RIGHT_ELBOW,
-)
 from services.hand_tracker_factory import create_hand_tracker
+from services.person_pose_hand_tracker import (
+    _KP_RIGHT_ELBOW,
+    _KP_RIGHT_WRIST,
+    PersonPoseHandTracker,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 HAS_MODELS = all(
@@ -35,8 +35,10 @@ def _make_pose_output(persons):
     n = max(8, len(persons) + 1)
     out = np.zeros((1, 56, n), dtype=np.float32)
     for col, p in enumerate(persons):
-        out[0, 0, col] = p["cx"]; out[0, 1, col] = p["cy"]
-        out[0, 2, col] = p["w"];  out[0, 3, col] = p["h"]
+        out[0, 0, col] = p["cx"]
+        out[0, 1, col] = p["cy"]
+        out[0, 2, col] = p["w"]
+        out[0, 3, col] = p["h"]
         out[0, 4, col] = p.get("conf", 0.9)
         for kp_idx, (x, y, c) in p.get("kps", {}).items():
             base = 5 + 3 * kp_idx

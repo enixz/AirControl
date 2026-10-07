@@ -30,7 +30,8 @@ dist/
 *.log
 gesture.log
 
-# User config (keep config.json as default template, ignore local changes)
+# Runtime user config; published defaults live in config.defaults.json.
+# config.json remains tracked for compatibility with existing source checkouts.
 # config.json
 
 # OS
@@ -44,7 +45,6 @@ Thumbs.db
 deliverables/
 creai_ppt/
 frontend/
-docs/
 _hf.json
 
 # PyInstaller spec backup
@@ -63,8 +63,9 @@ models/hand_yolov8n.pt
 # 由 MODEL_PROVENANCE.md 指引按需导出（Ultralytics AGPL，仅本地实验用）。
 models/yolov8n-pose.onnx
 models/yolov8s-pose.onnx
-# Silero VAD 模型（629KB，MIT 许可）：由 build.py 自带下载逻辑，
-# 发布包经 AirControl.spec 打包；开发环境缺失时慢通道自动退回能量 VAD。
+# Silero VAD 模型（629KB，MIT 许可）：手动下载到 models/（见 README），
+# 构建发布包时经 AirControl.spec add_data_if_present 随包分发；
+# 开发环境缺失时智能指令慢通道自动退回能量 VAD。
 models/silero_vad.onnx
 
 # Claude Code 工作目录（包含 worktree、隔离副本等内部产物）
@@ -83,6 +84,9 @@ draw_trace.jsonl
 
 # 原始视频录制（replay_video.py 回放用，体积大，按需录到本地）
 raw_capture/
+
+# 实验与评测产物（A/B 基准、识别评估、点击诊断等本地输出）
+artifacts/
 
 # 重构备份与开发笔记（不进仓库）
 refactor_backup_*/
@@ -105,3 +109,7 @@ t.txt
 .coverage
 coverage.xml
 htmlcov/
+
+# 旧关键词残留文件（已删，仅防误提交）
+app/voice_keywords/keywords_raw.txt
+app/voice_keywords/keywords_active.txt

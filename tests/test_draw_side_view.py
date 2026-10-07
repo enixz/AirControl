@@ -75,6 +75,8 @@ def make_draw_mode(extra_config=None):
     overlay = mock.MagicMock()
     overlay.REFERENCE_HAND_SIZE = 100.0
     overlay.isVisible.return_value = True
+    overlay.width.return_value = 1920
+    overlay.height.return_value = 1080
     mouse = mock.MagicMock()
     mouse.to_screen.return_value = (500, 500)
     cfg = {"draw_record_trace": False}
@@ -99,6 +101,20 @@ def step(dm, landmarks, label="OTHER"):
 
 class TwoFingerFeatureTest(unittest.TestCase):
     """特征层：双指判定必须宽松（贴紧也算）。"""
+
+    def test_draw_maps_to_canvas_logical_size_instead_of_virtual_desktop(self):
+        dm, overlay = make_draw_mode()
+        # A 1920x1080 display at 150% DPI has a 1280x720 logical canvas.
+        overlay.width.return_value = 1280
+        overlay.height.return_value = 720
+        dm._region_mapper.map = mock.MagicMock(return_value=(0.5, 0.5))
+        step(dm, make_hand())
+        overlay.update_cursor.assert_called_with(639, 359)
+        dm.mouse.to_screen.assert_not_called()
+        dm._region_mapper.map.return_value = (1.0, 1.0)
+        step(dm, make_hand())
+        overlay.update_cursor.assert_called_with(1279, 719)
+
 
     def test_two_fingers_together_counts_as_hover_but_not_scissor(self):
         r = GestureRecognizer()

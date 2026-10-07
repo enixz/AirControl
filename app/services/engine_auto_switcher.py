@@ -23,11 +23,14 @@
   - 多手约束：≥2 只手的帧视为疑似误检，不计入也不清零
     （见 counts_toward_hand_streak）。
 
-本模块是纯算法、无 Qt 依赖，由 orchestrator 在主流程逐帧喂检测结果；
-replay_video.py / benchmark 脚本不经过这里，行为不受影响。
+生产调用额外传入 primary_valid：只用新鲜的主控手证据，预测手和次要手
+不延迟救援。持续丢失 1.2 秒启动捕获，恢复须稳定 0.25 秒；持续检出小主手
+0.5 秒则直接启用远距跟踪。省略 primary_valid 的旧调用保留帧数判据。
+本模块是纯算法、无 Qt 依赖，由 orchestrator 在主流程逐帧喂检测结果。
 """
 
 import logging
+import math
 import time
 
 logger = logging.getLogger(__name__)
@@ -38,6 +41,27 @@ ENGINE_HAGRID_YOLO = "hagrid_yolo"
 STATE_NEAR = "near"
 STATE_CAPTURE = "capture"
 STATE_FAR_TRACK = "far_track"
+
+
+def primary_hand_evidence(hands, gestures, frame_area):
+    """Fresh primary evidence; secondary or predicted hands cannot mask loss."""
+    def fresh(index):
+        if index >= len(gestures) or gestures[index].get("predicted", False):
+            return False
+        points = hands[index]
+        return (len(points) == 21 and all(
+            len(point) >= 3 and all(math.isfinite(float(v)) for v in point[1:3])
+            for point in points
+        ))
+
+    count = sum(fresh(i) for i in range(len(hands)))
+    valid = bool(hands) and fresh(0)
+    if not valid:
+        return count, 0.0, False
+    xs = [point[1] for point in hands[0]]
+    ys = [point[2] for point in hands[0]]
+    area = (max(xs) - min(xs)) * (max(ys) - min(ys))
+    return count, area / max(float(frame_area), 1.0), area > 0
 
 
 def counts_toward_hand_streak(hand_count):
@@ -75,6 +99,9 @@ class EngineAutoSwitcher:
         self._near_streak = 0
         self._last_switch_time = None
         self.last_reason = ""
+        self._loss_since = None
+        self._valid_since = None
+        self._small_since = None
 
     def configure(self, *, enabled=None, no_hand_frames=None, hand_frames=None,
                   near_frames=None, near_bbox_ratio=None, cooldown_sec=None):
@@ -105,15 +132,21 @@ class EngineAutoSwitcher:
         self._near_streak = 0
         self._last_switch_time = None
         self.last_reason = ""
+        self._reset_evidence()
 
-    def update(self, hand_count, hand_bbox_ratio=0.0, now=None):
+    def _reset_evidence(self):
+        self._loss_since = None
+        self._valid_since = None
+        self._small_since = None
+
+    def update(self, hand_count, hand_bbox_ratio=0.0, now=None, *, primary_valid=None):
         """喂一帧的检出结果，返回应迁移到的目标状态名或 None。
 
         Args:
             hand_count:      本帧检出的手数量（0/1/2...）
-            hand_bbox_ratio: 最大手 bbox 面积占全帧比（无手传 0.0），
-                             仅 FAR_TRACK 态用于"手变大/走近"判定
+            hand_bbox_ratio: 主控手 bbox 面积占全帧比（无手传 0.0）
             now:             可选时间戳（测试注入），默认 self._clock()
+            primary_valid:   新鲜有效主手证据；None 保留旧计帧接口
         """
         if not self.enabled:
             return None
@@ -125,7 +158,39 @@ class EngineAutoSwitcher:
         if (self._last_switch_time is not None
                 and now - self._last_switch_time < self.cooldown_sec):
             self._reset_streaks()
+            self._reset_evidence()
             return None
+
+        # Production supplies fresh primary evidence. Keep the legacy frame
+        # interface for callers without metadata. Wall time bounds rescue even
+        # at low FPS; a fleeting detection must not restart the loss window.
+        if primary_valid is not None:
+            if primary_valid:
+                if self._valid_since is None:
+                    self._valid_since = now
+                if now - self._valid_since >= 0.25:
+                    self._loss_since = None
+            else:
+                self._valid_since = None
+                if self._loss_since is None:
+                    self._loss_since = now
+            if self.state in (STATE_NEAR, STATE_FAR_TRACK):
+                if self._loss_since is not None and now - self._loss_since >= 1.2:
+                    return self._mark_switch(STATE_CAPTURE, now,
+                                             "活动主手持续丢失 1.2 秒，启动捕获")
+            # A small hand already located by MP can go straight to crop-zoom;
+            # it does not need to disappear before receiving distant tracking.
+            if self.state == STATE_NEAR and primary_valid and 0 < hand_bbox_ratio < 0.005:
+                if self._small_since is None:
+                    self._small_since = now
+                if now - self._small_since >= 0.5:
+                    return self._mark_switch(STATE_FAR_TRACK, now,
+                                             "持续检出小主手，启用远距跟踪")
+            else:
+                self._small_since = None
+            # Once metadata is available, count the selected active hand,
+            # not all visible hands (a resting second hand cannot block handoff).
+            hand_count = int(primary_valid)
 
         if self.state == STATE_NEAR:
             return self._update_near(hand_count, now)
@@ -212,6 +277,7 @@ class EngineAutoSwitcher:
         self.state = target_state
         self._last_switch_time = now
         self._reset_streaks()
+        self._reset_evidence()
         self.last_reason = reason
         logger.info("引擎自动切换迁移: %s", reason)
         return target_state

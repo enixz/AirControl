@@ -31,10 +31,10 @@ _APP_LOCATORS = {
             r"C:\Program Files (x86)\Kingsoft\WPS Office\*\office6\wpp.exe",
             r"C:\Program Files\WPS Office\*\office6\wpp.exe",
             r"C:\Users\*\AppData\Local\Kingsoft\WPS Office\*\office6\wpp.exe",
-            r"F:\WPS Office\*\office6\wpp.exe",  # 兼容自定义安装盘
-            r"D:\WPS Office\*\office6\wpp.exe",
-            r"E:\WPS Office\*\office6\wpp.exe",
         ],
+        # 自定义安装盘（X:\<相对路径>）：按本机实际存在的盘符动态展开，
+        # 不再硬编码 D/E/F（装在其他盘的机器也能找到）
+        "custom_drive_relative_glob": r"WPS Office\*\office6\wpp.exe",
         "path_fallback": ["wpp.exe", "wpp"],
         "preferred_filename": "wpp.exe",  # 同目录优先精确文件名
     },
@@ -55,6 +55,16 @@ _APP_LOCATORS = {
 
 # 跨实例缓存，避免重复扫描注册表 / 文件系统
 _EXECUTABLE_CACHE = {}
+
+
+def _custom_drive_patterns(relative_glob):
+    """把自定义安装盘的相对通配路径展开到本机实际存在的每个盘符。"""
+    patterns = []
+    for i in range(26):
+        root = chr(ord("A") + i) + ":\\"
+        if os.path.isdir(root):
+            patterns.append(root + relative_glob)
+    return patterns
 
 
 def _query_app_paths(key_name):
@@ -139,7 +149,11 @@ def find_executable(app_id):
 
     # 3. 通配搜索（同一目录可能有多个版本号子目录，取最新）
     if not found:
-        for pattern in cfg["glob_patterns"]:
+        patterns = list(cfg["glob_patterns"])
+        drive_glob = cfg.get("custom_drive_relative_glob")
+        if drive_glob:
+            patterns += _custom_drive_patterns(drive_glob)
+        for pattern in patterns:
             expanded = os.path.expandvars(pattern)
             matches = sorted(glob.glob(expanded), reverse=True)
             for m in matches:

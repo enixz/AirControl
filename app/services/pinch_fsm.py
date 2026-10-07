@@ -29,9 +29,6 @@
 不改变 recognizer 层阈值（ENTER 0.35 / EXIT 0.40 / 滞回 0.08s 原样）。
 """
 
-import time
-
-
 class PinchButtonStateMachine:
     """单个按钮（左键 hold / 右键 click）的捏合状态机。
 
@@ -43,6 +40,7 @@ class PinchButtonStateMachine:
     PRESS_CONFIRM_SEC = 0.05       # 新按下需要连续 fresh pinch 证据（原 distant gate）
     RELEASE_CONFIRM_SEC = 0.08     # 释放需要持续非 pinch（原 recognizer 滞回等值）
     HOLD_MAX_SEC = 8.0             # 保持上限（防预测帧长锁；正常拖拽 << 8s）
+    UNRELIABLE_HOLD_MAX_SEC = 0.5  # 几何不可靠仅桥接短暂抖动，不能长期维持按住
     # Closed_Fist 标签期间禁止新按下（握拳≠捏合）。实测远距录像：
     # 真握拳 0.9s 误触与远距真实捏合（Closed_Fist 误标）不可靠区分，
     # 默认关闭；待第 4 步几何可靠性门控落地后再启用（config: pinch_fist_block）
@@ -57,6 +55,7 @@ class PinchButtonStateMachine:
         self.release_evidence_since = None  # 连续 fresh 非 pinch 起点
         self.hold_since = None
         self.blocked_until_open = False     # 强制释放后需明确张开
+        self.unreliable_since = None
         self.last_transition_reason = "init"
         self._log = log
 
@@ -72,13 +71,14 @@ class PinchButtonStateMachine:
         self.press_evidence_since = None
         self.release_evidence_since = None
         self.hold_since = None
+        self.unreliable_since = None
         if self.state != self.IDLE:
             self._transition(self.IDLE, reason)
         # 仅当强制释放真的打断了一次按住时，才要求"明确张开"才能再按：
         # 丢手时正在按住 → 手回来若仍捏着，不能立即重建按下（残留捏合）。
         # 没有按住时的丢失（启动/重连/预测帧无历史）不应阻塞后续按下。
         # hold_max 同理：预测帧长锁释放后，残留捏合不能立即重建。
-        if was_holding and reason in ("hand_lost", "watchdog", "hold_max"):
+        if was_holding and reason in ("hand_lost", "watchdog", "hold_max", "geometry_unreliable"):
             self.blocked_until_open = True
         return was_holding
 
@@ -102,17 +102,25 @@ class PinchButtonStateMachine:
         Returns:
             (bool, str|None): 该按钮应处状态；发生进入/退出转换时给出原因。
         """
-        if not fresh:
-            # 预测补帧：不构成任何新证据（既不确认按下也不确认释放）
-            if (self.state == self.HOLDING
-                    and now - self.hold_since >= self.HOLD_MAX_SEC):
-                was = self.force_release("hold_max")
-                return False, ("hold_max" if was else None)
+        if (self.state == self.HOLDING
+                and now - self.hold_since >= self.HOLD_MAX_SEC):
+            self.force_release("hold_max")
+            return False, "hold_max"
+
+        if fresh and not geometry_reliable:
+            if self.state == self.HOLDING:
+                if self.unreliable_since is None:
+                    self.unreliable_since = now
+                if now - self.unreliable_since >= self.UNRELIABLE_HOLD_MAX_SEC:
+                    self.force_release("geometry_unreliable")
+                    return False, "geometry_unreliable"
             return self.state == self.HOLDING, None
 
-        if not geometry_reliable:
-            # 关键点不稳定帧：与预测帧同等对待——可维持按住，不产生新证据
+        if not fresh:
+            # 预测补帧：不构成任何新证据（既不确认按下也不确认释放）
             return self.state == self.HOLDING, None
+
+        self.unreliable_since = None
 
         is_fist = self.FIST_BLOCK and ml_label == "Closed_Fist"
         confirm_needed = self.PRESS_CONFIRM_SEC if distant else 0.0
@@ -141,9 +149,6 @@ class PinchButtonStateMachine:
         if pinch:
             # 保持证据：重置释放计时
             self.release_evidence_since = None
-            if now - self.hold_since >= self.HOLD_MAX_SEC:
-                self.force_release("hold_max")
-                return False, "hold_max"
             return True, None
         # 非 pinch：明确张开立即释放；边界抖动进入释放确认窗口
         if clearly_open:
@@ -160,11 +165,13 @@ class PinchButtonStateMachine:
             return False, "release_confirmed"
         return True, None
 
-    def reset(self):
+    def reset(self, preserve_block=False):
         """身份切换（换手）时彻底清零：捏合历史不跨手继承。"""
         self.state = self.IDLE
         self.press_evidence_since = None
         self.release_evidence_since = None
         self.hold_since = None
-        self.blocked_until_open = False
+        if not preserve_block:
+            self.blocked_until_open = False
+        self.unreliable_since = None
         self.last_transition_reason = "reset_identity"

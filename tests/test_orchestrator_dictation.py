@@ -89,7 +89,6 @@ class TestOrchestratorDictation(unittest.TestCase):
         orchestrator.ppt = MagicMock()
         orchestrator.mouse = MagicMock()
         orchestrator.overlay = MagicMock()
-        orchestrator.voice_assistant = MagicMock()
         orchestrator.voice_command = MagicMock()
         orchestrator.mode_manager = MagicMock(current_mode_name="mouse")
         orchestrator._tracker_signature = MagicMock(return_value="same")

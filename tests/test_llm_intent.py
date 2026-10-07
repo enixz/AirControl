@@ -52,7 +52,7 @@ class TestAllowedActions(unittest.TestCase):
         draw = llm_intent.allowed_actions("draw")
         self.assertNotIn("next_slide", draw)
         self.assertIn("clear_canvas", draw)
-        self.assertIn("hang_up_voice_assistant", draw)
+        self.assertIn("cancel_llm_command", draw)
         self.assertEqual(
             llm_intent.allowed_actions("unknown-mode"),
             llm_intent.allowed_actions(),
@@ -114,14 +114,14 @@ class TestParseIntent(unittest.TestCase):
         self.assertEqual(result.candidate, "clear_canvas")
 
     def test_mode_allows_global_extra_action(self):
-        """EXTRA 全局动作（挂断）不受模式限制。"""
+        """EXTRA 全局动作（取消指令）不受模式限制。"""
         client = _client()
         client.call_fast.return_value = _reply(
-            {"action": "hang_up_voice_assistant", "confidence": 0.9}
+            {"action": "cancel_llm_command", "confidence": 0.9}
         )
-        result = llm_intent.parse_intent("挂断", client, mode="draw")
+        result = llm_intent.parse_intent("取消", client, mode="draw")
         self.assertTrue(result.accepted)
-        self.assertEqual(result.action, "hang_up_voice_assistant")
+        self.assertEqual(result.action, "cancel_llm_command")
 
     def test_null_action(self):
         client = _client()

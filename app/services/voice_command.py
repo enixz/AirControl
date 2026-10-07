@@ -421,9 +421,10 @@ class VoiceCommandService:
         return True
 
     def cancel_llm_command(self):
-        """取消进行中的智能指令会话（不触发 ASR）。"""
+        """取消录音并使尚未返回的 ASR 结果失效。"""
         with self._llm_session_lock:
             self._llm_session = None
+            self._llm_session_id += 1
 
     def start_dictation(self, on_text=None, on_status=None, on_partial=None):
         """切换到听写模式：持续录音直到 stop_dictation() 或超时。
@@ -515,7 +516,7 @@ class VoiceCommandService:
             decoder=decoder,
             joiner=int8_joiner,
             keywords_file=keywords_file,
-            keywords_threshold=self.config.get("voice_command_threshold") or 0.25,
+            keywords_threshold=self._kws_threshold(),
             num_threads=2,
             provider="cpu",
             max_active_paths=4,
@@ -523,8 +524,16 @@ class VoiceCommandService:
         self._kws_stream = self._kws.create_stream()
         logger.info("KWS 引擎初始化成功，模型: %s", self._model_dir)
 
+    def _kws_threshold(self):
+        """KWS 触发阈值：schema 允许 0.0，不能用 `or` 兜底（会吞掉合法的 0）。"""
+        value = self.config.get("voice_command_threshold")
+        return 0.25 if value is None else float(value)
+
     def _init_audio(self):
         """初始化 sounddevice 麦克风采集"""
+        # stop() 超时返回 False 后再次 start() 时旧流可能仍开着；
+        # 先释放再建，避免旧流永不关闭、麦克风被占/回调重复投递
+        self._cleanup_audio()
         self._audio_queue = queue.Queue(maxsize=20)
         self._audio_stream = sd.RawInputStream(
             samplerate=self.SAMPLE_RATE,
@@ -622,7 +631,7 @@ class VoiceCommandService:
             decoder=decoder,
             joiner=int8_joiner,
             keywords_file=keywords_file,
-            keywords_threshold=self.config.get("voice_command_threshold") or 0.25,
+            keywords_threshold=self._kws_threshold(),
             num_threads=2,
             provider="cpu",
             max_active_paths=4,
@@ -674,10 +683,13 @@ class VoiceCommandService:
                     # 不 continue — 继续往下走 KWS，检测"结束板书"
 
                 # LLM 智能指令会话（M3）：音频入独立缓冲 + VAD 自动结束，
-                # 会话期间关键词被 _handle_keyword 忽略，故不再喂 KWS
-                if self._llm_session is not None:
-                    self._llm_session["buffer"].extend(audio_data)
-                    self._update_llm_vad(audio_data)
+                # 会话期间关键词被 _handle_keyword 忽略，故不再喂 KWS。
+                # 锁内取快照：cancel/stop 可能在主线程把 _llm_session 置 None
+                with self._llm_session_lock:
+                    llm_session = self._llm_session
+                if llm_session is not None:
+                    llm_session["buffer"].extend(audio_data)
+                    self._update_llm_vad(audio_data, session=llm_session)
                     continue
 
                 # int16 → float32 归一化
@@ -934,7 +946,7 @@ class VoiceCommandService:
             logger.info("Silero VAD 已加载，智能指令端点检测启用神经网络判定")
         return self._silero_vad
 
-    def _update_llm_vad(self, audio_data):
+    def _update_llm_vad(self, audio_data, session=None):
         """语音活动检测：检测到语音后静音超过阈值即自动结束会话。
 
         由检测循环线程调用；结束判定：
@@ -945,8 +957,12 @@ class VoiceCommandService:
 
         VAD 两级：Silero（神经网络，模型存在时）优先；否则退回能量 RMS。
         两级对"正在说话"的判定统一为布尔 speech_now，端点状态机共用。
+
+        session 由检测循环在锁内快照后显式传入，避免与 cancel/stop 竞态；
+        缺省（测试直调）时读当前会话。
         """
-        session = self._llm_session
+        if session is None:
+            session = self._llm_session
         if session is None:
             return
         now = time.time()
@@ -970,28 +986,30 @@ class VoiceCommandService:
         elapsed = now - session["start"]
         if not session["has_speech"] and elapsed >= self.LLM_CMD_WAIT_SPEECH_SEC:
             logger.info("智能指令会话无语音超时，取消")
-            self._finish_llm_command(cancelled=True)
+            self._finish_llm_command(cancelled=True, expected=session)
         elif (
             session["has_speech"]
             and session["silence_start"] is not None
             and now - session["silence_start"] >= self.LLM_CMD_SILENCE_STOP_SEC
         ):
             logger.info("智能指令静音 %.1fs，自动结束", self.LLM_CMD_SILENCE_STOP_SEC)
-            self._finish_llm_command(cancelled=False)
+            self._finish_llm_command(cancelled=False, expected=session)
         elif elapsed >= self.LLM_CMD_MAX_DURATION:
             logger.info("智能指令会话超时，强制结束")
-            self._finish_llm_command(cancelled=False)
+            self._finish_llm_command(cancelled=False, expected=session)
 
-    def _finish_llm_command(self, cancelled=False):
+    def _finish_llm_command(self, cancelled=False, expected=None):
         """结束智能指令会话：清状态并把音频转写推给后台线程。
 
         可能从检测循环线程（VAD）/ stop() 调用；ASR 部分扔进 daemon 线程。
+        expected：调用方持有的会话快照；与当前会话不一致说明会话已被
+        cancel/restart 更换，放弃本次结束（不得误杀新会话）。
         """
         with self._llm_session_lock:
             session = self._llm_session
+            if session is None or (expected is not None and session is not expected):
+                return
             self._llm_session = None
-        if session is None:
-            return
 
         audio_bytes = bytes(session["buffer"])
         on_text = session["on_text"]
@@ -1011,10 +1029,11 @@ class VoiceCommandService:
             on_text,
             on_status,
             cancelled,
+            session["session_id"],
             name="LlmCmdAsrWorker",
         )
 
-    def _run_llm_asr(self, audio_bytes, on_text, on_status, cancelled):
+    def _run_llm_asr(self, audio_bytes, on_text, on_status, cancelled, session_id):
         """后台线程：智能指令音频 → SenseVoice 转写 → 回调。"""
         text = ""
         min_bytes = int(0.5 * self.SAMPLE_RATE) * 2  # 不足 0.5s 视为没说
@@ -1029,6 +1048,9 @@ class VoiceCommandService:
             except Exception:
                 logger.exception("智能指令 ASR 失败")
 
+        with self._llm_session_lock:
+            if session_id != self._llm_session_id:
+                return
         if on_status:
             try:
                 on_status("done" if text else "failed", text)
@@ -1087,6 +1109,13 @@ class VoiceCommandService:
                 )
             else:
                 logger.debug("听写中忽略关键词: %s", keyword)
+            return
+
+        # The old KWS instance remains active during an asynchronous reload.
+        # Its detections must obey the newly selected mode immediately.
+        keywords = MODE_KEYWORDS.get(self._current_mode)
+        if keywords is not None and keyword not in keywords:
+            logger.debug("当前模式 %s 忽略旧关键词: %s", self._current_mode, keyword)
             return
 
         # 冷却期防抖

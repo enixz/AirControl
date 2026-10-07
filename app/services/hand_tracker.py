@@ -6,6 +6,7 @@
 """
 
 import logging
+import math
 import os
 import sys
 import time
@@ -210,7 +211,7 @@ class HandTracker(BaseHandTracker):
         detection_result,
         frame_w,
         frame_h,
-        min_area_ratio=0.005,
+        min_area_ratio=0.0,
         coord_transform=None,
     ):
         """从 MediaPipe detection_result 提取标准格式。"""
@@ -223,6 +224,15 @@ class HandTracker(BaseHandTracker):
         min_area = frame_w * frame_h * min_area_ratio
 
         for i, hand_landmarks_list in enumerate(detection_result.hand_landmarks):
+            # Detection/presence confidence is already enforced by MediaPipe.
+            # A frame-relative area cutoff discards valid distant hands. Only
+            # reject malformed/degenerate geometry here (not small hands).
+            if len(hand_landmarks_list) != 21 or not all(
+                math.isfinite(float(value))
+                for lm in hand_landmarks_list
+                for value in (lm.x, lm.y, getattr(lm, "z", 0.0))
+            ):
+                continue
             if coord_transform is not None:
                 pixel_coords = [
                     coord_transform(lm.x, lm.y) for lm in hand_landmarks_list
@@ -236,7 +246,7 @@ class HandTracker(BaseHandTracker):
             box_w = max(xs_px) - min(xs_px)
             box_h = max(ys_px) - min(ys_px)
             bbox_area = box_w * box_h
-            if bbox_area < min_area:
+            if not math.isfinite(bbox_area) or bbox_area <= 0 or bbox_area < min_area:
                 continue
 
             landmarks = []

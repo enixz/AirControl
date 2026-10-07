@@ -222,6 +222,32 @@ class TestHideSystemCursorIdempotency(unittest.TestCase):
         self.assertTrue(overlay._system_cursor_hidden)
 
 
+class TestCursorCoordinateMapping(unittest.TestCase):
+    def test_cursor_and_click_follow_destination_screen_in_logical_coordinates(self):
+        overlay = _make_overlay()
+        physical_target = (-1440, 600)
+        qt_global_pos = object()
+        destination_geometry = object()
+        screen = MagicMock()
+        screen.geometry.return_value = destination_geometry
+        screen.devicePixelRatio.return_value = 1.5
+        overlay.geometry = MagicMock(return_value=object())
+        overlay.setGeometry = MagicMock()
+        local = MagicMock()
+        local.x.return_value = 320
+        local.y.return_value = 400
+        overlay.mapFromGlobal = MagicMock(return_value=local)
+        with patch.object(_overlay_module.QCursor, "pos", return_value=qt_global_pos), \
+             patch.object(mock_qt_app, "screenAt", return_value=screen):
+            overlay.update_cursor(*physical_target)
+            overlay.trigger_right_click(*physical_target)
+        self.assertEqual(overlay._pos, (320, 400))
+        self.assertEqual(overlay._click[2:], (320, 400))
+        self.assertEqual(overlay._dpr, 1.5)
+        overlay.setGeometry.assert_called_with(destination_geometry)
+        overlay.mapFromGlobal.assert_called_with(qt_global_pos)
+
+
 class TestShowSystemCursorIdempotency(unittest.TestCase):
     """Test _show_system_cursor() is idempotent."""
 

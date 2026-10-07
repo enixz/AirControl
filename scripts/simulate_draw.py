@@ -216,6 +216,8 @@ class CurrentDrawGate:
         self.overlay = mock.MagicMock()
         self.overlay.REFERENCE_HAND_SIZE = 100.0
         self.overlay.isVisible.return_value = True
+        self.overlay.width.return_value = 1920
+        self.overlay.height.return_value = 1080
         mouse = mock.MagicMock()
         mouse.to_screen.return_value = (500, 500)
         self.mode = DrawMode(

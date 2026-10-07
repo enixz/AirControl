@@ -41,7 +41,7 @@ def main():
           "| actions:", len(llm_intent.allowed_actions()))
     for text, mode, note in CASES:
         result = llm_intent.parse_intent(text, client, mode=mode)
-        print("[{}] {!r} mode={} -> {}".format(note, text, mode, result))
+        print(f"[{note}] {text!r} mode={mode} -> {result}")
     client.close()
 
 

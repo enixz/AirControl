@@ -27,7 +27,7 @@ for package in ("mediapipe", "sherpa_onnx"):
     datas += collect_data_files(package)
     binaries += collect_dynamic_libs(package)
 
-add_data_if_present(datas, "config.json", ".")
+add_data_if_present(datas, "config.defaults.json", ".")
 add_data_if_present(datas, "gesture_recognizer.task", ".")
 add_data_if_present(datas, os.path.join("models", "hand_landmarker.task"), "models")
 # hand_yolov8n.onnx 不打包：其 ONNX 元数据标为 AGPL-3.0，与仓库 Apache-2.0
@@ -52,6 +52,10 @@ add_data_if_present(
 # Silero VAD（MIT 许可，629KB）：智能指令端点检测，可安全随包分发。
 # 模型不入 git（.gitignore），构建机缺失时打包跳过、运行时退回能量 VAD。
 add_data_if_present(datas, os.path.join("models", "silero_vad.onnx"), "models")
+
+# 板书字幕手写体（方正硬笔楷书，WPS 随机附带的商用字体，本机复制）。
+# 随包分发到 app/assets/fonts/，运行时 main_ui._register_bundled_fonts 注册。
+add_data_if_present(datas, os.path.join("app", "assets", "fonts"), "app/assets/fonts")
 
 # Optional assets are packaged when available in the build workspace.
 add_data_if_present(datas, os.path.join("models", "sense-voice"), "models/sense-voice")

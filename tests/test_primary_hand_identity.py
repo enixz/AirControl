@@ -10,7 +10,6 @@
 import os
 import sys
 import unittest
-from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
@@ -66,9 +65,9 @@ class TestKeyAssignment(unittest.TestCase):
 
     def test_control_hand_dropout_does_not_promote_other_hand(self):
         # 双手(Left 主控 + Right 静止) → 主控手消失 1 帧 → 静止手不能变成 Primary
-        l, lg = make_hand(600, 300, handedness="Left")
+        left, lg = make_hand(600, 300, handedness="Left")
         r, rg = make_hand(1400, 850, handedness="Right")
-        keys = self.assign([l, r], [lg, rg])
+        keys = self.assign([left, r], [lg, rg])
         self.assertEqual(sorted(keys), ["Left", "Right"])
         # 主控 Left 消失，只剩 Right（几乎没动）：无歧义继承自己的 Right
         r2, rg2 = make_hand(1402, 852, handedness="Right")
@@ -77,9 +76,9 @@ class TestKeyAssignment(unittest.TestCase):
 
     def test_control_hand_returns_after_dropout(self):
         # 双手 → 单手(Left 消失) → Left 回来：key 不变
-        l, lg = make_hand(600, 300, handedness="Left")
+        left, lg = make_hand(600, 300, handedness="Left")
         r, rg = make_hand(1400, 850, handedness="Right")
-        self.assign([l, r], [lg, rg])
+        self.assign([left, r], [lg, rg])
         r2, rg2 = make_hand(1401, 851, handedness="Right")
         self.assertEqual(self.assign([r2], [rg2]), ["Right"])
         # Left 回到原位（右手几乎没动 → 无歧义继承）
@@ -90,9 +89,9 @@ class TestKeyAssignment(unittest.TestCase):
 
     def test_handedness_flip_keeps_positional_identity(self):
         # 双手场景标签翻转（Left 手被标成 Right）：位置不变 → key 不变
-        l, lg = make_hand(600, 300, handedness="Left")
+        left, lg = make_hand(600, 300, handedness="Left")
         r, rg = make_hand(1400, 850, handedness="Right")
-        keys1 = self.assign([l, r], [lg, rg])
+        keys1 = self.assign([left, r], [lg, rg])
         # 标签翻转：两只手的 handedness 互换
         l2, lg2 = make_hand(601, 301, handedness="Right")  # 同一物理手，标签翻了
         r2, rg2 = make_hand(1399, 849, handedness="Left")
@@ -101,9 +100,9 @@ class TestKeyAssignment(unittest.TestCase):
 
     def test_true_hand_swap_gets_new_key(self):
         # 原手离开画面，另一只手在完全不同的位置出现：不继承，拿新 key
-        l, lg = make_hand(600, 300, handedness="Left")
+        left, lg = make_hand(600, 300, handedness="Left")
         r, rg = make_hand(1400, 850, handedness="Right")
-        self.assign([l, r], [lg, rg])
+        self.assign([left, r], [lg, rg])
         # Left 消失，新右手出现在远处（>0.12 对角线）；旧 "Right" 的位置
         # 也远离它 → 无可继承 → 单手回退 Primary
         far, fg = make_hand(300, 900, handedness="Right")
@@ -115,8 +114,8 @@ class TestKeyAssignment(unittest.TestCase):
 
     def test_occlusion_recovery_keeps_key(self):
         # 遮挡：无检出若干帧（_prev_wrist_keys 被清）→ 恢复后从头分配，稳定即可
-        l, lg = make_hand(600, 300, handedness="Left")
-        self.assign([l], [lg])
+        left, lg = make_hand(600, 300, handedness="Left")
+        self.assign([left], [lg])
         self.t._prev_wrist_keys = []  # simulate full loss reset
         l2, lg2 = make_hand(605, 305, handedness="Right")  # 恢复时标签也变了
         keys = self.assign([l2], [lg2])

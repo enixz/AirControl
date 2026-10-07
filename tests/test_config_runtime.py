@@ -36,7 +36,7 @@ class TestConfigRuntime(unittest.TestCase):
                     "record_truth_marker": "space,mbutton",
                 }
                 with open(
-                    os.path.join(resource_dir, "config.json"),
+                    os.path.join(resource_dir, "config.defaults.json"),
                     "w",
                     encoding="utf-8",
                 ) as stream:
@@ -68,6 +68,28 @@ class TestConfigRuntime(unittest.TestCase):
                     config.get("record_truth_marker"),
                     "space,mbutton",
                 )
+
+    def test_local_runtime_settings_do_not_become_published_defaults(self):
+        with tempfile.TemporaryDirectory() as resource_dir, tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(resource_dir, "config.json"), "w", encoding="utf-8") as stream:
+                json.dump({"camera_index": 9, "cloud": {"enabled": True}}, stream)
+            with mock.patch("runtime_paths.resource_root", return_value=resource_dir):
+                config = ConfigManager(os.path.join(td, "config.json"))
+            self.assertEqual(config.get("camera_index"), 0)
+            self.assertIs(config.get("cloud")["enabled"], False)
+
+    def test_existing_user_settings_are_preserved(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "config.json")
+            user = {"camera_index": 1, "camera_width": 1920, "camera_height": 1080,
+                    "cloud": {"enabled": True}, "interaction_mode": "draw"}
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(user, stream)
+            config = ConfigManager(path)
+            for key in ("camera_index", "camera_width", "camera_height", "interaction_mode"):
+                self.assertEqual(config.get(key), user[key])
+            self.assertIs(config.get("cloud")["enabled"], True)
+            self.assertIs(config.default_config["cloud"]["enabled"], False)
 
     def test_extended_schema_rejects_invalid_runtime_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:

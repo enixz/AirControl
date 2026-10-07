@@ -243,7 +243,7 @@ class TestEngineAutoSwitchConfigSchema(unittest.TestCase):
     def test_defaults_present_in_fresh_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = ConfigManager(os.path.join(temp_dir, "config.json"))
-            self.assertIs(config.get("engine_auto_switch"), True)
+            self.assertIs(config.get("engine_auto_switch"), False)
             self.assertEqual(config.get("engine_auto_switch_no_hand_frames"), 60)
             self.assertEqual(config.get("engine_auto_switch_hand_frames"), 30)
             self.assertEqual(config.get("engine_auto_switch_near_frames"), 90)
@@ -259,7 +259,7 @@ class TestEngineAutoSwitchConfigSchema(unittest.TestCase):
             "engine_auto_switch_near_bbox_ratio": 0.5,
             "engine_auto_switch_cooldown_sec": -1,
         })
-        self.assertIs(config.get("engine_auto_switch"), True)
+        self.assertIs(config.get("engine_auto_switch"), False)
         self.assertEqual(config.get("engine_auto_switch_no_hand_frames"), 60)
         self.assertEqual(config.get("engine_auto_switch_hand_frames"), 30)
         self.assertEqual(config.get("engine_auto_switch_near_frames"), 90)
@@ -451,7 +451,6 @@ class TestOrchestratorThreeState(unittest.TestCase):
         orch.ppt = MagicMock()
         orch.mouse = MagicMock()
         orch.overlay = MagicMock()
-        orch.voice_assistant = MagicMock()
         orch.voice_command = MagicMock()
         orch.mode_manager = MagicMock(current_mode_name="mouse")
         orch._tracker_signature = MagicMock(return_value=sig)

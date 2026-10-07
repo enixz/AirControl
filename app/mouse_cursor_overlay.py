@@ -5,7 +5,7 @@ import math
 import time
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QBrush, QColor, QPainter, QPen
+from PyQt6.QtGui import QBrush, QColor, QCursor, QPainter, QPen
 from PyQt6.QtWidgets import QApplication, QWidget
 
 GWL_EXSTYLE = -20
@@ -124,6 +124,7 @@ class MouseCursorOverlay(QWidget):
         self._click_through_applied = False  # 强制重新应用 Win32 样式
         target = self._resolve_screen(screen)
         self.setGeometry(target.geometry())
+        self._dpr = target.devicePixelRatio()
         self.show()
         self.raise_()
         # 关键：show() 之后再设置点击穿透
@@ -153,9 +154,20 @@ class MouseCursorOverlay(QWidget):
             return QApplication.primaryScreen()
         return screen
 
+    def _cursor_local_pos(self):
+        # Qt converts the actual native cursor position using the destination
+        # screen's DPI. This also respects SetCursorPos clamping in monitor gaps.
+        pos = QCursor.pos()
+        screen = QApplication.screenAt(pos)
+        if screen is not None and self.geometry() != screen.geometry():
+            self.setGeometry(screen.geometry())
+            self._dpr = screen.devicePixelRatio()
+        local = self.mapFromGlobal(pos)
+        return local.x(), local.y()
+
     def update_cursor(self, x, y):
         """更新自定义光标位置。"""
-        self._pos = (int(x / self._dpr), int(y / self._dpr))
+        self._pos = self._cursor_local_pos()
         if self.isVisible():
             self._hide_system_cursor()
             # 鼠标动了就立刻保证可见，不依赖定时器的 50ms 节奏
@@ -177,12 +189,14 @@ class MouseCursorOverlay(QWidget):
     # ---- 视觉反馈 API ----
 
     def trigger_left_click(self, x, y):
-        self._click = ("left", time.time(), int(x / self._dpr), int(y / self._dpr))
+        local_x, local_y = self._cursor_local_pos()
+        self._click = ("left", time.time(), local_x, local_y)
         self._ensure_fast_timer()
         self.update()
 
     def trigger_right_click(self, x, y):
-        self._click = ("right", time.time(), int(x / self._dpr), int(y / self._dpr))
+        local_x, local_y = self._cursor_local_pos()
+        self._click = ("right", time.time(), local_x, local_y)
         self._ensure_fast_timer()
         self.update()
 

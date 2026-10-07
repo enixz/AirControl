@@ -2,12 +2,11 @@
 
 历史问题：
   · gesture_recognizer.py 模块级配置了 "gesture" logger（写 gesture.log）；
-  · voice_assistant.py 用 "voice_assistant" logger（无 handler，打包后丢失）；
   · inference_worker.py 直接调 logging.info()（走 root，无 handler）；
   · orchestrator.py 用 __name__ logger（无 handler）。
 
 本模块在程序入口最早处调用 setup_logging()，配置 root logger 写入
-gesture.log，所有子 logger（含 "gesture"/"voice_assistant"/__name__）
+gesture.log，所有子 logger（含 "gesture"/__name__）
 自动继承 root 的 handler 与级别，确保打包后日志不丢失。
 
 幂等：重复调用不会重复添加 handler。

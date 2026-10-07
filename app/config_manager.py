@@ -186,11 +186,10 @@ _CONFIG_SCHEMA = {
     ),
     "voice_command_threshold": ((int, float), _is_num_in(0.0, 1.0), 0.25),
     "voice_command_enabled": (bool, _is_bool, True),
-    "voice_assistant": (
-        str,
-        lambda v: v in ("doubao", "qianwen"),
-        "doubao",
-    ),
+    # 本地 SAPI 播报（M5）：开关 / 音量 0-100（0=静音）/ 语速 -10~10
+    "voice_feedback_enabled": (bool, _is_bool, True),
+    "voice_feedback_volume": (int, _is_int_in(0, 100), 100),
+    "voice_feedback_rate": (int, _is_int_in(-10, 10), 0),
     "dictation_enabled": (bool, _is_bool, True),
     "dictation_model_dir": (str, lambda v: bool(v.strip()), "models/sense-voice"),
     "dictation_language": (str, lambda v: bool(v.strip()), "auto"),
@@ -232,6 +231,13 @@ _CONFIG_SCHEMA = {
     "person_pose_sr_trigger": (int, _is_int_in(32, 384), 96),
     # 是否对小手做超分（False=纯插值放大，做 SR 开关的 A/B 对照）。
     "person_pose_sr_enabled": (bool, _is_bool, True),
+    # 小手放大用的 SR 引擎：默认 none（普通插值；实测 crop 上 SR 与插值检出率
+    # 一致但每帧贵 ~54ms），显式指定时才启用 SR。
+    "person_pose_sr_engine": (
+        str,
+        lambda v: v in ("auto", "espcn", "realesrgan_cpu", "realesrgan_gpu", "none"),
+        "none",
+    ),
     # 远距 CAPTURE 态使用的捕获引擎：hagrid_yolo（默认）或 person_pose_hand（框人→姿态拿手腕）。
     "engine_auto_switch_capture_engine": (
         str, lambda v: v in ("hagrid_yolo", "person_pose_hand"), "hagrid_yolo"),
@@ -242,10 +248,16 @@ _CONFIG_SCHEMA = {
     # 这些层是 GLM5.2 强化时叠加的，互相打架反而降低识别率/产生闪烁/断笔/不跟手。
     # 默认关闭 = 回到接近原版 aircontrol 的直管线；需要时单独打开做 A/B 验证。
     "adaptive_skip_enabled": (bool, _is_bool, False),       # 自适应跳帧补帧（冻结→跳变）
+    # 跳帧判据：关键点帧间运动幅度低于阈值视为静态；静态时每 N 帧推理 1 次
+    "skip_motion_threshold": ((int, float), _is_num_in(0.01, 1.0), 0.15),
+    "skip_max_interval": (int, _is_int_in(1, 8), 2),
     "long_range_enabled": (bool, _is_bool, False),          # 稳定档默认关闭，远距档位再开启
     "geometric_constraint_enabled": (bool, _is_bool, False),  # 骨长约束滤波（运动时冻结关键点）
     "hand_prediction_enabled": (bool, _is_bool, True),      # 幽灵手/丢手预测补帧（与老版一致，默认开启）
     "temporal_voter_enabled": (bool, _is_bool, False),      # 时序投票器+FSM（阶段2.11默认关闭，回到老版基线）
+    # 几何分类器加权融合：MediaPipe 标签置信度 vs 30+ 维几何特征置信度
+    "geo_ml_weight": ((int, float), _is_num_in(0.0, 1.0), 0.4),
+    "geo_geo_weight": ((int, float), _is_num_in(0.0, 1.0), 0.6),
     "mode_switch_hold_sec": ((int, float), _is_num_in(0.4, 3.0), 1.0),
     "mode_switch_vote_ratio": ((int, float), _is_num_in(0.5, 1.0), 0.6),
     "mode_switch_release_sec": ((int, float), _is_num_in(0.1, 1.0), 0.25),
@@ -351,6 +363,11 @@ def _validate_config(cfg, defaults=None):
             cfg["cloud"], defaults=defaults.get("cloud", {})
         )
         warnings.extend(cloud_warnings)
+    # 非 schema 键：多是拼写错误或已废弃键。只警告不删除（向后兼容），
+    # 让"写错键名导致配置不生效"从静默失败变成日志可见
+    for key in cfg:
+        if key not in _CONFIG_SCHEMA and key not in ("gesture_mapping", "cloud"):
+            warnings.append(f"未知配置键 {key!r}（不在 schema 中，可能是拼写错误）")
     return cfg, warnings
 
 
@@ -387,7 +404,6 @@ class ConfigManager:
             "edge_y_canvas_enabled": True,
             "edge_y_canvas_deadzone_bottom": 18,
             "edge_y_canvas_deadzone_top": 10,
-            "voice_assistant": "doubao",
             "voice_command_enabled": True,
             "voice_command_threshold": 0.25,
             "zoom_sr_engine": "auto",
@@ -461,8 +477,10 @@ class ConfigManager:
                 "SWIPE_DOWN": "end_presentation",
                 "FIST": "none",
                 "THUMB_UP": "switch_app",
+                # 剪刀手 = 唤醒 MOMA 智能指令；拇指下 = 取消智能指令会话
+                # （原外部豆包客户端已移除，语音助手全面转向 MOMA）
                 "SCISSOR": "launch_voice_assistant",
-                "THUMB_DOWN": "hang_up_voice_assistant"
+                "THUMB_DOWN": "cancel_llm_command"
             }
         }
         self.default_config = self._load_published_defaults(self.default_config)
@@ -481,7 +499,7 @@ class ConfigManager:
     def _load_published_defaults(builtin_defaults):
         """Merge the bundled config template over safe built-in fallbacks."""
         defaults = copy.deepcopy(builtin_defaults)
-        template_path = resource_path("config.json")
+        template_path = resource_path("config.defaults.json")
         try:
             with open(template_path, encoding="utf-8") as stream:
                 published = json.load(stream)

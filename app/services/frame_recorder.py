@@ -47,6 +47,7 @@ class FrameRecorder:
         self._dropped = 0
         self._start = None
         self._writer = None        # cv2.VideoWriter 或 None→PNG 回退
+        self._writer_size = None
         self._use_png = False
         self._meta = open(
             os.path.join(self.dir, "meta.jsonl"), "w", encoding="utf-8", buffering=1
@@ -94,6 +95,7 @@ class FrameRecorder:
                 writer = cv2.VideoWriter(cpath, fourcc, 30.0, (int(w), int(h)))
                 if writer.isOpened():
                     self._writer = writer
+                    self._writer_size = (int(w), int(h))
                     if fourcc_str != self._codec.upper():
                         logger.info("录帧编码回退：%s → %s", self._codec, fourcc_str)
                     return
@@ -103,6 +105,41 @@ class FrameRecorder:
         self._use_png = True
         os.makedirs(os.path.join(self.dir, "frames"), exist_ok=True)
         logger.warning("mp4v/FFV1 均不可用，回退 PNG 帧序列（体积更大）")
+
+    def _fit_frame_to_writer(self, frame, meta):
+        """Letterbox changed camera sizes and keep recorded coordinates aligned."""
+        h, w = frame.shape[:2]
+        target_w, target_h = self._writer_size
+        if (w, h) == (target_w, target_h):
+            return frame, meta
+        scale = min(target_w / w, target_h / h)
+        new_w = max(1, min(target_w, round(w * scale)))
+        new_h = max(1, min(target_h, round(h * scale)))
+        left, top = (target_w - new_w) // 2, (target_h - new_h) // 2
+        resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        fitted = cv2.copyMakeBorder(
+            resized, top, target_h - new_h - top,
+            left, target_w - new_w - left, cv2.BORDER_CONSTANT, value=(0, 0, 0),
+        )
+        mapped = dict(meta or {})
+        sx, sy = new_w / w, new_h / h
+        mapped.update(
+            source_w=w, source_h=h, source_meta=dict(meta or {}),
+            record_transform={"scale_x": sx, "scale_y": sy,
+                              "offset_x": left, "offset_y": top},
+        )
+
+        def point(p):
+            return [p[0] * sx + left, p[1] * sy + top]
+
+        for key in ("primary_wrist", "crop_center"):
+            if key in mapped:
+                mapped[key] = point(mapped[key])
+        if "wrists" in mapped:
+            mapped["wrists"] = [point(p) for p in mapped["wrists"]]
+        if "crop_size" in mapped:
+            mapped["crop_size"] *= scale
+        return fitted, mapped
 
     def write(self, frame, meta=None):
         """Queue a clean frame without blocking the inference thread.
@@ -150,6 +187,9 @@ class FrameRecorder:
                         frame,
                     )
                 else:
+                    if self._writer_size is not None:
+                        frame, meta = self._fit_frame_to_writer(frame, meta)
+                        h, w = frame.shape[:2]
                     self._writer.write(frame)
                 row = {"i": index, "t": round(now, 4), "w": int(w), "h": int(h)}
                 if meta:

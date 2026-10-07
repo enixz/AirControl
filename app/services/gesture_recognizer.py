@@ -608,7 +608,7 @@ class GestureRecognizer:
 
         # MediaPipe 直接识别出 Thumb_Down：远距离时关键点抖动导致几何判定
         # (is_thumbs_down) 不可靠，必须信任 ML 标签，否则倒赞会被当作"姿势中断"丢弃，
-        # 导致远处无法挂断豆包通话。（修复：此前缺少 THUMB_DOWN 的 ML 分支。）
+        # 导致远处无法触发拇指下动作。（修复：此前缺少 THUMB_DOWN 的 ML 分支。）
         if ml_label == "THUMB_DOWN":
             logger.info("=> Trigger: THUMB_DOWN (ML: Thumb_Down)")
             self._reset_state()

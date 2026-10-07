@@ -117,7 +117,7 @@ class TestHandPrecision(unittest.TestCase):
         big = np.zeros((1080, 1920, 3), dtype=np.uint8)
         self.assertIs(tracker._downscale_for_inference(big, 1920), big)
 
-    def test_zoom_miss_retries_full_frame_on_third_frame(self):
+    def test_zoom_miss_retries_full_frame_immediately(self):
         tracker = DummyTracker()
         # crop-zoom 属于远距增强，阶段1 默认关闭，需显式开启才会走该路径。
         tracker._long_range_enabled = True
@@ -128,12 +128,14 @@ class TestHandPrecision(unittest.TestCase):
         tracker._current_crop_size = 150.0
         frame = np.zeros((240, 320, 3), dtype=np.uint8)
 
-        tracker.find_hands(frame, draw=False)
+        _, first_hands, _ = tracker.find_hands(frame, draw=False)
+        self.assertEqual(len(first_hands), 1)
+        self.assertEqual(tracker.full_calls, 1)
         tracker.find_hands(frame, draw=False)
         _, hands, _ = tracker.find_hands(frame, draw=False)
 
         self.assertEqual(tracker.crop_calls, 3)
-        self.assertEqual(tracker.full_calls, 1)
+        self.assertEqual(tracker.full_calls, 3)
         self.assertEqual(len(hands), 1)
         self.assertIsInstance(hands[0][0][1], float)
 

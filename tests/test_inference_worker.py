@@ -3,6 +3,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -23,6 +24,37 @@ class FakeTracker:
 
 
 class TestInferenceWorker(unittest.TestCase):
+    def test_capture_exception_reports_error_and_recovers_next_frame(self):
+        frame = np.arange(12, dtype=np.uint8).reshape(2, 2, 3)
+
+        class RecoveringCamera:
+            cap = object()
+            calls = 0
+            releases = 0
+
+            def read_frame(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("camera read failed")
+                worker._capture_stop.set()
+                return True, frame
+
+            def release(self):
+                self.releases += 1
+
+        camera = RecoveringCamera()
+        worker = InferenceWorker(camera=camera, tracker=FakeTracker())
+        errors = []
+        worker.error_occurred.connect(errors.append)
+        with patch.object(worker._capture_stop, "wait", return_value=False):
+            worker._capture_loop()
+
+        self.assertEqual(errors, ["camera read failed"])
+        self.assertEqual(camera.releases, 1)
+        self.assertEqual(camera.calls, 2)
+        self.assertEqual(worker._latest_sequence, 1)
+        np.testing.assert_array_equal(worker._latest_frame[1], frame[:, ::-1])
+
     def test_stop_timeout_is_bounded_and_does_not_release_live_capture(self):
         entered = threading.Event()
         release = threading.Event()

@@ -1,6 +1,7 @@
 """CloudHealthMonitor 测试：mock LLMClient，验证降级/恢复回调与状态机。"""
 import os
 import sys
+import threading
 import unittest
 from unittest import mock
 
@@ -97,9 +98,46 @@ class TestCloudHealth(unittest.TestCase):
         """start 做启动 ping 并启动心跳线程，stop 正常退出。"""
         llm = _make_llm_client()
         monitor = CloudHealthMonitor(llm, interval_sec=3600)
+        pinged = threading.Event()
+        llm.call_fast.side_effect = lambda *a, **kw: pinged.set()
         self.assertTrue(monitor.start())
+        self.assertTrue(pinged.wait(2))
         llm.call_fast.assert_called_once()
         self.assertTrue(monitor.stop())
+
+    def test_start_returns_while_initial_ping_is_still_blocked(self):
+        llm = _make_llm_client()
+        entered = threading.Event()
+        release = threading.Event()
+        returned = threading.Event()
+        ping_threads = []
+
+        def ping(*args, **kwargs):
+            ping_threads.append(threading.current_thread())
+            entered.set()
+            release.wait(2)
+
+        llm.call_fast.side_effect = ping
+        monitor = CloudHealthMonitor(llm, interval_sec=3600)
+
+        def start():
+            monitor.start()
+            returned.set()
+
+        caller = threading.Thread(target=start)
+        caller.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            self.assertTrue(returned.wait(0.5))
+            self.assertIsNot(ping_threads[0], caller)
+            self.assertTrue(monitor.start())
+            llm.call_fast.assert_called_once()
+            self.assertFalse(monitor.stop(timeout_sec=0))
+            self.assertFalse(monitor.start())
+        finally:
+            release.set()
+            caller.join(2)
+            self.assertTrue(monitor.stop())
 
 
 if __name__ == "__main__":

@@ -18,7 +18,8 @@ FAKE_SCREEN_W = 1920
 FAKE_SCREEN_H = 1080
 
 # SM_CXVIRTUALSCREEN=78, SM_CYVIRTUALSCREEN=79 也需要 mock（多显示器支持）
-_VIRTUAL_METRICS = {0: FAKE_SCREEN_W, 1: FAKE_SCREEN_H, 78: FAKE_SCREEN_W, 79: FAKE_SCREEN_H}
+_VIRTUAL_METRICS = {0: FAKE_SCREEN_W, 1: FAKE_SCREEN_H, 76: 0, 77: 0,
+                    78: FAKE_SCREEN_W, 79: FAKE_SCREEN_H}
 mock_user32.GetSystemMetrics = lambda idx: _VIRTUAL_METRICS.get(idx, FAKE_SCREEN_H)
 mock_user32.GetCursorPos = lambda pt: None
 mock_user32.SetCursorPos = lambda x, y: None
@@ -42,6 +43,17 @@ MouseController = _mc_module.MouseController
 
 class TestMouseControllerEdge(unittest.TestCase):
     """验证 MouseController 的向后兼容性与边缘加速功能。"""
+
+    def test_negative_virtual_origin_mapping_and_clamping(self):
+        with patch.dict(_VIRTUAL_METRICS, {76: -1920, 77: -1080, 78: 3840, 79: 2160}):
+            mc = MouseController(sensitivity=100)
+            self.assertEqual(mc.to_screen(0.0, 0.0), (-1920, -1080))
+            self.assertEqual(mc.to_screen(0.5, 0.5), (0, 0))
+            with patch.object(_mc_module, "set_cursor_pos") as move:
+                self.assertEqual(mc.move_to_normalized(-1, -1), (-1920, -1080))
+                self.assertEqual(mc.move_to_normalized(2, 2), (1919, 1079))
+                self.assertEqual(move.call_args.args, (1919, 1079))
+
 
     def test_default_construction(self):
         """默认参数构造不报错，edge_enabled=False，edge_strength=30/100=0.3"""

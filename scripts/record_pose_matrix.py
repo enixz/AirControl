@@ -80,7 +80,6 @@ class PoseMatrixRecorder:
 
     def start_segment(self):
         segment = self.segments[self.idx]
-        seg_dir = self._seg_dir(segment)
         # FrameRecorder 用时间戳建子目录；我们要固定目录名，故先录到临时名再改名。
         self.recorder = FrameRecorder(out_root=self.out_root, max_seconds=self.seconds_per_seg)
         self._tmp_dir = self.recorder.dir

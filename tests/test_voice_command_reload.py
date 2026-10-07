@@ -16,6 +16,33 @@ class FakeConfig:
 
 
 class TestVoiceCommandReload(unittest.TestCase):
+    def test_old_mode_keyword_is_rejected_while_new_model_is_loading(self):
+        actions = []
+        service = VoiceCommandService(FakeConfig(), action_callback=actions.append)
+        service._running = True
+        service._current_mode = "draw"
+        service._kws = object()
+        started = threading.Event()
+        release = threading.Event()
+
+        def build(_mode):
+            started.set()
+            release.wait(2)
+            return object(), object()
+
+        with mock.patch.object(service, "_build_kws_for_mode", side_effect=build):
+            try:
+                service.on_mode_changed("presentation")
+                self.assertTrue(started.wait(1))
+                service._handle_keyword("清屏")
+                self.assertEqual(actions, [])
+                service._handle_keyword("下一页")
+                self.assertEqual(actions, ["next_slide"])
+            finally:
+                release.set()
+                service._reload_thread.join(2)
+                service._running = False
+
     def test_mode_keywords_are_written_outside_repository(self):
         service = VoiceCommandService(FakeConfig())
         with tempfile.TemporaryDirectory() as temp_dir:

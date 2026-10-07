@@ -221,7 +221,8 @@ class PersonPoseHandTracker(HagridYoloHandTracker):
                     for lm in landmarks
                 ])
             for i, lms in enumerate(mapped):
-                xs = [lm[1] for lm in lms]; ys = [lm[2] for lm in lms]
+                xs = [lm[1] for lm in lms]
+                ys = [lm[2] for lm in lms]
                 if i < len(sub[1]):
                     sub[1][i]["bbox_area"] = (max(xs) - min(xs)) * (max(ys) - min(ys))
             self._append_detection((mapped, sub[1], sub[2]),
@@ -344,8 +345,10 @@ class PersonPoseHandTracker(HagridYoloHandTracker):
             cy = (cy - pad_h) / ratio
             bw = bw / ratio
             bh = bh / ratio
-            x0 = max(0, int(cx - bw / 2)); y0 = max(0, int(cy - bh / 2))
-            x1 = min(orig_w, int(cx + bw / 2)); y1 = min(orig_h, int(cy + bh / 2))
+            x0 = max(0, int(cx - bw / 2))
+            y0 = max(0, int(cy - bh / 2))
+            x1 = min(orig_w, int(cx + bw / 2))
+            y1 = min(orig_h, int(cy + bh / 2))
             body_box = (x0, y0, x1, y1, float(confs[i]))
             pk = kps[i].copy()
             pk[:, 0] = (pk[:, 0] - pad_w) / ratio

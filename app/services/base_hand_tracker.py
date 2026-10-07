@@ -65,7 +65,7 @@ class BaseHandTracker(ABC):
         # 这些层是后期"全面强化"叠加的，互相打架反而产生闪烁/断笔/不跟手并降低识别率。
         # 默认关闭 = 回到接近原版的直管线；需要远距板书等场景时再单独打开做 A/B。
         self._long_range_enabled = bool(
-            config.get("long_range_enabled", True)) if config else True
+            config.get("long_range_enabled", False)) if config else False
         self._geometric_constraint_enabled = bool(
             config.get("geometric_constraint_enabled", False)) if config else False
         # 幽灵手预测补帧：默认开启（与 D:\airControl 老版一致）。

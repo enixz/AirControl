@@ -217,6 +217,9 @@ class MouseController:
         """动态获取虚拟屏幕尺寸（跨越所有显示器），支持运行时显示器变化。"""
         return user32.GetSystemMetrics(SM_CXVIRTUALSCREEN), user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
 
+    def _get_screen_origin(self):
+        return user32.GetSystemMetrics(SM_XVIRTUALSCREEN), user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+
     def set_sensitivity(self, sensitivity):
         self.sensitivity = max(10, sensitivity) / 100.0
 
@@ -241,7 +244,8 @@ class MouseController:
             elif self.edge_enabled and self.edge_strength > 0:
                 y_norm = _edge_map(y_norm, self.edge_strength)
         screen_w, screen_h = self._get_screen_size()
-        return int(x_norm * screen_w), int(y_norm * screen_h)
+        origin_x, origin_y = self._get_screen_origin()
+        return origin_x + int(x_norm * screen_w), origin_y + int(y_norm * screen_h)
 
     def move_to_normalized(self, x_norm, y_norm, apply_accel=True):
         # apply_accel=False：坐标已由活动区映射拉伸过（鼠标/板书自带远距离全屏映射），
@@ -258,8 +262,9 @@ class MouseController:
             new_x = self.last_pos[0] + (target_x - self.last_pos[0]) * self.sensitivity
             new_y = self.last_pos[1] + (target_y - self.last_pos[1]) * self.sensitivity
 
-        new_x = max(0, min(screen_w - 1, new_x))
-        new_y = max(0, min(screen_h - 1, new_y))
+        origin_x, origin_y = self._get_screen_origin()
+        new_x = max(origin_x, min(origin_x + screen_w - 1, new_x))
+        new_y = max(origin_y, min(origin_y + screen_h - 1, new_y))
 
         set_cursor_pos(new_x, new_y)
         self.last_pos = (new_x, new_y)

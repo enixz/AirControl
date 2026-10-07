@@ -100,14 +100,29 @@ class InferenceWorker(QThread):
         """Continuously capture frames and retain only the newest one."""
         while not self._capture_stop.is_set():
             started = time.perf_counter()
-            success, frame = self.camera.read_frame()
+            try:
+                success, frame = self.camera.read_frame()
+                if success:
+                    frame = cv2.flip(frame, 1)
+            except Exception as exc:
+                logger.exception("摄像头采集异常，重置设备后重试")
+                self.error_occurred.emit(str(exc))
+                # This thread owns camera access; release only after read has
+                # returned, then let read_frame() use its reconnect backoff.
+                release = getattr(self.camera, "release", None)
+                if callable(release):
+                    try:
+                        release()
+                    except Exception:
+                        logger.exception("重置摄像头失败")
+                self._capture_stop.wait(0.5)
+                continue
             capture_ms = (time.perf_counter() - started) * 1000.0
             if not success:
                 # 处于冷却期或摄像头彻底未打开时，增加休眠避免 100Hz 的极速盲等死循环
                 sleep_time = 0.01 if self.camera.cap is not None else 0.5
                 self._capture_stop.wait(sleep_time)
                 continue
-            frame = cv2.flip(frame, 1)
             captured_at = time.perf_counter()
             with self._capture_condition:
                 self._latest_sequence += 1

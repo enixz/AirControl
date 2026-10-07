@@ -27,7 +27,6 @@ def _make_orchestrator():
     orchestrator.inference_worker = mock.MagicMock()
     orchestrator.voice_command = mock.MagicMock()
     orchestrator.voice_dictation = mock.MagicMock()
-    orchestrator.voice_assistant = mock.MagicMock()
     orchestrator.camera = mock.MagicMock()
     orchestrator.tracker = mock.MagicMock()
     orchestrator.inference_worker.tracker = orchestrator.tracker

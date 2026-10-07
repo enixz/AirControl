@@ -104,14 +104,13 @@ pip install -r requirements.txt
 ### 3️⃣ Run the Program
 
 ```bash
-# GUI version (recommended)
 python -m app.main_ui
-
-# Command-line version
-python -m app.main
 ```
 
-> 💡 **Note**: On first run, MediaPipe model files (~16MB) will be downloaded automatically. Please ensure a stable network connection.
+> 💡 **Note**: The MediaPipe model files (`models/hand_landmarker.task` and
+> `gesture_recognizer.task`) are bundled in the repository — no download is
+> needed on first run. (`app/main.py` is a deprecated stub that only prints
+> a warning and exits.)
 
 ---
 
@@ -209,6 +208,20 @@ AirControl integrates a dual-engine voice system:
 If the model directory is absent, dictation is silently disabled; KWS keywords keep
 working. The model file is gitignored due to GitHub's 100 MB single-file limit.
 
+##### Silero VAD (optional)
+
+The LLM smart-command slow path (M3) uses Silero VAD for speech endpointing.
+It is a manual download (~629 KB, MIT licence) and is gitignored:
+
+```bash
+# Download silero_vad.onnx from the sherpa-onnx releases page:
+# https://github.com/k2-fsa/sherpa-onnx/releases  (tag: asr-models)
+# Place it at models/silero_vad.onnx
+```
+
+If absent, endpointing silently falls back to an energy-based VAD (the
+pre-M3 behaviour).
+
 #### YOLO Hand Detection Model (Optional)
 
 At long range (3-5 m), the default MediaPipe detector has low recall.
@@ -258,8 +271,7 @@ Available in all modes:
 |---------|--------|
 | `演示模式` `鼠标模式` `板书模式` | Jump to specified mode (no 🤟 gesture needed) |
 | `最小化助手` `显示助手` | Minimize / Restore AirControl floating window |
-| `召唤豆包` | Launch configured voice assistant app |
-| `小助手` | Speak a free-form instruction (cloud LLM intent parsing) |
+| `小助手` | Speak a free-form instruction (MOMA cloud LLM intent parsing) |
 
 > 💡 Click the 🎤 tab on the floating window to open the **full voice command panel**. The current mode's commands are highlighted with "← current". Click 🎤 again to close, or click ✕ in the panel corner, or drag the panel anywhere.
 
@@ -393,7 +405,6 @@ Click the ⚙️ settings button on the floating window to adjust:
 | Mouse Sensitivity | Tracking sensitivity in mouse mode | 40% |
 | Pen Width | Stroke width in drawing mode | 15 px |
 | Edge Acceleration | Auto-speed boost near screen edges | Disabled |
-| Voice Assistant | Select voice assistant app | Doubao |
 | Action Mapping | Gesture-to-action mapping | See `config.json` |
 
 ### Advanced Configuration (edit `config.json` directly)
@@ -436,6 +447,10 @@ Invalid config values are caught by schema validation and fall back to defaults 
 
 Settings are automatically saved to `config.json`.
 
+Published defaults live in `config.defaults.json`, which is bundled with releases.
+The runtime `config.json` keeps each user's settings; changes to local cameras,
+resolution, or cloud access do not change defaults for new installations.
+
 ---
 
 ## 📁 Project Structure
@@ -443,7 +458,7 @@ Settings are automatically saved to `config.json`.
 ```
 AirControl/
 ├── app/
-│   ├── main.py                    # CLI entry (OpenCV window)
+│   ├── main.py                    # Deprecated stub (prints warning and exits)
 │   ├── main_ui.py                 # GUI entry (PyQt6 floating window)
 │   ├── orchestrator.py            # Central coordinator (camera → inference → modes → output)
 │   ├── config_manager.py          # Config file read/write + schema validation
@@ -474,6 +489,7 @@ AirControl/
 │   │   ├── gesture_recognizer.py  # Gesture recognition & swipe detection
 │   │   ├── geometric_classifier.py # Geometric gesture classification (fallback)
 │   │   ├── temporal_voter.py      # Temporal voting + FSM (experimental)
+│   │   ├── pinch_fsm.py           # Pinch interaction state machine
 │   │   ├── inference_worker.py    # Async inference worker thread
 │   │   ├── mouse_controller.py    # Mouse control (Win32 API)
 │   │   ├── ppt_controller.py      # PPT/WPS control
@@ -482,14 +498,20 @@ AirControl/
 │   │   ├── frame_recorder.py      # Raw frame recording for debugging
 │   │   ├── truth_ab.py            # A/B testing truth labels
 │   │   ├── truth_event_logger.py  # Truth event logging
-│   │   ├── voice_assistant.py     # Voice assistant service
 │   │   ├── voice_command.py       # Voice command processing (KWS)
-│   │   └── voice_dictation.py     # Voice dictation (SenseVoice-Small)
+│   │   ├── voice_actions.py       # Keyword → action mapping constants
+│   │   ├── voice_dictation.py     # Voice dictation (SenseVoice-Small)
+│   │   ├── voice_feedback.py      # Local SAPI speech feedback (TTS)
+│   │   ├── silero_vad.py          # Silero VAD (LLM command endpointing)
+│   │   ├── classroom_ai.py        # Classroom AI layer (cloud features)
+│   │   └── cloud/                 # Cloud client (LLM, health monitor, metering)
 │   └── voice_keywords/            # Voice keyword configs
 ├── models/
+│   ├── hand_landmarker.task       # MediaPipe hand landmark model (bundled)
+│   ├── hand_yolov8n.onnx          # YOLOv8n hand detector (in repo for CI; excluded from release packages)
 │   ├── kws-zh-wenetspeech/        # Voice keyword spotting model
 │   ├── sense-voice/               # SenseVoice-Small ASR model (manual download)
-│   └── silero_vad.onnx            # Silero VAD (MIT, auto-downloaded, optional)
+│   └── silero_vad.onnx            # Silero VAD (MIT, manual download, optional)
 ├── scripts/                       # Offline A/B & evaluation tools, selftest
 ├── tests/                         # Unit tests
 ├── config.json                    # User configuration
@@ -497,8 +519,7 @@ AirControl/
 ├── requirements-dev.txt           # Development dependencies (PyInstaller, etc.)
 ├── build.py                       # PyInstaller build script
 ├── AirControl.spec                # PyInstaller config
-├── hand_landmarker.task           # MediaPipe hand model (7.8MB)
-└── gesture_recognizer.task        # Gesture recognition model (8.4MB)
+└── gesture_recognizer.task        # MediaPipe GestureRecognizer model (Heavy/Full, bundled)
 ```
 
 ---

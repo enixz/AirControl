@@ -74,7 +74,7 @@ def build_system_prompt(mode=None):
         "无法确定时 action 置 null、confidence 置 0。",
     ]
     if mode:
-        lines.append("当前模式：{}，已只列出该模式下可用的动作。".format(mode))
+        lines.append(f"当前模式：{mode}，已只列出该模式下可用的动作。")
     return "\n".join(lines)
 
 
@@ -96,10 +96,8 @@ class IntentResult:
 
     def __repr__(self):
         return (
-            "IntentResult(action={!r}, args={!r}, confidence={:.2f}, "
-            "reason={!r}, candidate={!r})".format(
-                self.action, self.args, self.confidence, self.reason, self.candidate
-            )
+            f"IntentResult(action={self.action!r}, args={self.args!r}, confidence={self.confidence:.2f}, "
+            f"reason={self.reason!r}, candidate={self.candidate!r})"
         )
 
 
@@ -155,7 +153,7 @@ def parse_intent(text, llm_client, mode=None, threshold=DEFAULT_CONFIDENCE_THRES
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("意图解析 LLM 调用失败: %s", exc)
-        return IntentResult(reason="llm_error:{}".format(type(exc).__name__))
+        return IntentResult(reason=f"llm_error:{type(exc).__name__}")
 
     parsed = _extract_json(content)
     if parsed is None:
