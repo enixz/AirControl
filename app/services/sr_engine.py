@@ -16,6 +16,13 @@ import cv2
 import numpy as np
 from runtime_paths import resource_path
 
+# SR 只在 crop 小于此值时介入。依据（三方数据一致）：
+# - MediaPipe 掌检测器内部输入 192×192、关键点模型 224×224、YOLO letterbox 640，
+#   crop ≥ 192 时任何先行放大都被内部重采样抵消；
+# - 2026-10-07 P0：crop 180-320px 区间 SR 与插值持平甚至丢检出；
+# - 2026-07-26 A4000 远距 A/B：极小手（框 <96px）SR 四项指标全优。
+_SR_ENGAGE_MAX = 192
+
 
 class SREngine:
     """超分引擎调度：ESPCN / Real-ESRGAN(GPU/CPU) 按需加载 + GPU 自适应。"""
@@ -159,11 +166,12 @@ class SREngine:
     def resolve(self, sr_engine, crop_size, target):
         """将配置（含 auto）解析为具体引擎名。
 
-        auto 模式下的 GPU 自适应：
-          1. 检测 GPU 是否可用（ONNX Runtime CUDA EP）
-          2. GPU 可用 + 需要超分 → realesrgan_gpu（质量更好）
-          3. GPU 不可用 + 需要超分 → espcn（CPU 轻量）
-          4. 不需要超分（crop >= target）→ none（纯插值）
+        auto 模式下的三段判定：
+          1. crop >= target → none（下采样场景，超分加不了细节还吃算力）
+          2. crop >= _SR_ENGAGE_MAX(192) → none（检测器内部输入即 192/640，
+             此区间任何放大都被内部重采样抵消——2026-10-07 P0 实测：中距手
+             SR 与插值检出率持平甚至更差，还多花 19-54ms）
+          3. crop < 192 → SR（真·远距小手；2026-07-26 A4000 实测四项指标全优）
 
         例外（近距离关闭 SR）：当 crop_size >= target 时，裁剪框本就 ≥ 目标分辨率，
         这是"下采样"场景——超分加不了任何细节，还白白吃算力。此时直接用普通插值。
@@ -171,10 +179,10 @@ class SREngine:
         if sr_engine == "auto":
             # 滞回判定：是否需要超分
             if self._auto_sr_enabled is None:
-                self._auto_sr_enabled = crop_size < target
-            elif self._auto_sr_enabled and crop_size >= target * 1.10:
+                self._auto_sr_enabled = crop_size < _SR_ENGAGE_MAX
+            elif self._auto_sr_enabled and crop_size >= _SR_ENGAGE_MAX * 1.10:
                 self._auto_sr_enabled = False
-            elif not self._auto_sr_enabled and crop_size <= target * 0.90:
+            elif not self._auto_sr_enabled and crop_size <= _SR_ENGAGE_MAX * 0.90:
                 self._auto_sr_enabled = True
 
             if not self._auto_sr_enabled:

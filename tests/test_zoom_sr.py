@@ -98,44 +98,54 @@ class TestZoomSR(unittest.TestCase):
         self.assertIsNone(tracker._sr._realesrgan_gpu_session)
 
     def test_auto_enables_espcn_when_upscaling(self):
-        """回归：auto 模式在裁剪框 < 目标尺寸（远距离放大）时必须启用 ESPCN。
+        """auto：crop < 192（检测器内部输入尺寸，真·远距小手）时启用 ESPCN。
 
-        旧 bug：crop_size 在调用处被钳制到 >=240，而 auto 门控却用 `crop_size < 160`，
-        两者互斥导致超分永远不触发（死代码）。此测试锁死该回归。
+        2026-10-07 P0 实测：crop ≥ 192 区间 SR 无益（内部重采样抵消一切放大），
+        SR 介入阈值从 target*0.9(≈346) 收紧到 192。
         """
         tracker = self._make_tracker()
         target = tracker._crop_target_size  # 384
-        # 远距离：裁剪框被钳到下限 240 < 384 → 在放大 → 必须启用 espcn（而非 none）
-        self.assertEqual(tracker._sr.resolve("auto", 240, target), "espcn")
-        self.assertEqual(tracker._sr.resolve("auto", target - 1, target), "espcn")
+        self.assertEqual(tracker._sr.resolve("auto", 191, target), "espcn")
+        self.assertEqual(tracker._sr.resolve("auto", 64, target), "espcn")
+        self.assertEqual(tracker._sr.resolve("auto", 33, target), "espcn")
+
+    def test_auto_skips_sr_between_192_and_target(self):
+        """auto：crop 在 [192, target) 区间不再超分（改走直通/插值）。
+
+        依据：MediaPipe 掌检测器内部 192×192，此区间放大被内部重采样抵消。
+        """
+        tracker = self._make_tracker()
+        target = tracker._crop_target_size
+        for cs in (192, 240, target - 1, target, target + 200):
+            self.assertEqual(tracker._sr.resolve("auto", cs, target), "none")
 
     def test_auto_enables_espcn_for_tight_crops(self):
-        """去掉 240 人为下限后：远距离的紧凑裁剪框（远小于 240）仍应启用 ESPCN。
+        """紧凑裁剪框（远小于 192）仍应启用 ESPCN。
 
         裁剪框可一路缩小到机械下限 _crop_min_size，超分一路放大，
         因此 64 这种小裁剪框也必须走 espcn 而非 none。
         """
         tracker = self._make_tracker()
         target = tracker._crop_target_size
-        self.assertLess(tracker._crop_min_size, 240)  # 不再有 240 人为下限
-        for cs in (tracker._crop_min_size, 64, 120, 239):
+        self.assertLess(tracker._crop_min_size, 192)
+        for cs in (tracker._crop_min_size, 64, 120, 172):
             self.assertEqual(tracker._sr.resolve("auto", cs, target), "espcn")
 
     def test_auto_disables_sr_when_downscaling(self):
-        """近距离关闭 SR：auto 模式下裁剪框 >= 目标尺寸（下采样/手较近）时退回普通插值。
+        """auto：crop >= target（下采样/手较近）时关闭超分。
 
         超分对"下采样"加不了任何细节，还白白吃 CPU（实测每段 ZOOM 的 crop 常达
-        1000~1300px 远大于 384px 目标）。因此 crop_size >= target 时 auto 返回 none，
-        把算力还给帧率；只有 crop_size < target（上采样放大小/远手）才用 ESPCN。
+        1000~1300px 远大于 384px 目标）。crop_size >= 192 即返回 none，
+        只有真·远距小手（< 192px，上采样放大）才用 ESPCN。
         """
         tracker = self._make_tracker()
         target = tracker._crop_target_size
         # 下采样（手较近）→ 关闭超分
         self.assertEqual(tracker._sr.resolve("auto", target, target), "none")
         self.assertEqual(tracker._sr.resolve("auto", target + 200, target), "none")
-        # 从关闭状态重新进入需要越过滞回下沿，避免在 target 附近抖动。
+        # 从关闭状态重新进入需要越过滞回下沿，避免在 192 附近抖动。
         self.assertEqual(
-            tracker._sr.resolve("auto", int(target * 0.89), target),
+            tracker._sr.resolve("auto", int(192 * 0.89), target),
             "espcn",
         )
 
@@ -144,7 +154,7 @@ class TestZoomSR(unittest.TestCase):
         target = tracker._crop_target_size
 
         self.assertEqual(
-            tracker._sr.resolve("auto", target - 1, target),
+            tracker._sr.resolve("auto", 191, target),
             "realesrgan_gpu",
         )
 
@@ -161,21 +171,32 @@ class TestZoomSR(unittest.TestCase):
         tracker = self._make_tracker()
         target = tracker._crop_target_size
 
+        # 全新状态（reset_tier 后）：192 边界 → 下方开启、上方关闭
         self.assertEqual(
-            tracker._sr.resolve("auto", target - 1, target), "espcn"
+            tracker._sr.resolve("auto", 191, target), "espcn"
+        )
+        tracker._sr.reset_tier()
+        self.assertEqual(
+            tracker._sr.resolve("auto", 192, target), "none"
+        )
+        # 已开启状态下，越过滞回上沿（192*1.1≈211）才关闭
+        tracker._sr.reset_tier()
+        self.assertEqual(
+            tracker._sr.resolve("auto", int(192 * 0.89), target), "espcn"
         )
         self.assertEqual(
-            tracker._sr.resolve("auto", target + 1, target), "espcn"
+            tracker._sr.resolve("auto", 200, target), "espcn"
         )
         self.assertEqual(
-            tracker._sr.resolve("auto", int(target * 1.11), target),
+            tracker._sr.resolve("auto", int(192 * 1.11), target),
             "none",
         )
+        # 已关闭状态下，低于滞回下沿（192*0.9≈173）才重新开启
         self.assertEqual(
-            tracker._sr.resolve("auto", target - 1, target), "none"
+            tracker._sr.resolve("auto", 191, target), "none"
         )
         self.assertEqual(
-            tracker._sr.resolve("auto", int(target * 0.89), target),
+            tracker._sr.resolve("auto", int(192 * 0.89), target),
             "espcn",
         )
 
@@ -193,6 +214,99 @@ class TestZoomSR(unittest.TestCase):
         self.assertIsNone(tracker._sr.espcn(dummy, 384))
         self.assertIsNone(tracker._sr.realesrgan(dummy, 384, prefer_gpu=True))
         self.assertIsNone(tracker._sr.realesrgan(dummy, 384, prefer_gpu=False))
+
+    def _make_frame(self, size=480):
+        """全零帧（crop-zoom 对纯色不敏感，Dummy 子类直接返回空）。
+        返回 (frame, None)；绘制留给调用方，便于直接断言喂给子类的图。"""
+        import numpy as np
+        return np.zeros((size, size, 3), dtype=np.uint8)
+
+    @patch('os.path.exists')
+    def test_direct_feed_skips_resize_for_large_crops(self, mock_exists):
+        """crop ≥ 192（auto 判 none）时直通：子类收到的就是原 crop 本身。
+
+        依据：MediaPipe/YOLO 内部会再重采样（192/640），先行插值放大是双重
+        劳动。直通时 fed_size == crop_size（scale=1），坐标映射公式不变。
+        """
+        import numpy as np
+        mock_exists.return_value = False
+        cm = ConfigManager(config_file=self.config_path)
+        tracker = DummyHandTracker(config=cm)
+
+        frame = np.zeros((480, 480, 3), dtype=np.uint8)
+        frame[60:300, 60:300] = 200  # crop 中心 (180,180)
+        fed = []
+
+        def run_sub_detect(zoomed):
+            fed.append(zoomed)
+            return ([], [], [])
+
+        tracker._perform_crop_zoom(frame, (180, 180), 240, run_sub_detect)
+
+        self.assertEqual(len(fed), 1)
+        # 直通：无 resize，形状是 crop_size 而非 target 384
+        self.assertEqual(fed[0].shape, (240, 240, 3))
+        # fed 是 crop 本身（x0 = 180-120 = 60），证明未做任何重采样
+        np.testing.assert_array_equal(fed[0], frame[60:300, 60:300])
+
+    @patch('os.path.exists')
+    def test_direct_feed_reports_tier_and_scale(self, mock_exists):
+        """直通档位记为 none(direct)；viewport fed_size=crop_size、scale=1，
+        归一化坐标映射回 crop 中心。"""
+        import numpy as np
+        mock_exists.return_value = False
+        cm = ConfigManager(config_file=self.config_path)
+        tracker = DummyHandTracker(config=cm)
+
+        frame = np.zeros((480, 480, 3), dtype=np.uint8)
+        frame[0:240, 0:240] = 127
+        tiers = []
+        orig_log_tier = tracker._sr.log_tier
+
+        def spy_tier(tier, crop_size, target):
+            tiers.append(tier)
+            orig_log_tier(tier, crop_size, target)
+
+        tracker._sr.log_tier = spy_tier
+
+        def run_sub_detect(zoomed):
+            return ([], [], {"fed_shape": zoomed.shape})
+
+        detection_result, viewport, to_orig = tracker._perform_crop_zoom(
+            frame, (120, 120), 240, run_sub_detect
+        )
+        self.assertIn("none(direct)", tiers)
+        # viewport: (x0, y0, crop_size, fed_size, scale)；直通时 fed=crop、scale=1
+        self.assertEqual(viewport[3], 240)
+        self.assertAlmostEqual(viewport[4], 1.0)
+        # fed 形状 = crop_size（240）而非 target 384，证明直通未重采样
+        self.assertEqual(detection_result[2]["fed_shape"], (240, 240, 3))
+        # 坐标映射：归一化中心 (0.5, 0.5) → crop 中心 (120, 120)
+        cx, cy = to_orig(0.5, 0.5)
+        self.assertAlmostEqual(cx, 120.0)
+        self.assertAlmostEqual(cy, 120.0)
+
+    @patch('os.path.exists')
+    def test_small_crop_still_interpolates(self, mock_exists):
+        """crop < 192 → auto 判 espcn；模型缺失回退普通插值（fed_size=target）。"""
+        import numpy as np
+        mock_exists.return_value = False
+        cm = ConfigManager(config_file=self.config_path)
+        tracker = DummyHandTracker(config=cm)
+
+        frame = np.zeros((480, 480, 3), dtype=np.uint8)
+        frame[0:64, 0:64] = 127
+        fed = []
+
+        def run_sub_detect(zoomed):
+            fed.append(zoomed)
+            return ([], [], [])
+
+        tracker._perform_crop_zoom(frame, (32, 32), 64, run_sub_detect)
+
+        self.assertEqual(len(fed), 1)
+        # 小 crop：插值放大到 target 384
+        self.assertEqual(fed[0].shape[0], tracker._crop_target_size)
 
 
 if __name__ == "__main__":
