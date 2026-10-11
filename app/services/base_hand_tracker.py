@@ -35,6 +35,11 @@ from .sr_engine import SREngine
 
 _zoom_logger = logging.getLogger("gesture")
 
+# crop ≥ 此值时跳过一切放大直接喂原始 crop（"直通"）。依据：MediaPipe 掌检测器
+# 内部固定重采样到 192×192、YOLO letterbox 到 640×640，任何先行的插值/SR 放大
+# 都会被内部重采样抵消（384 中间尺寸对两者都不是终态）。192 = 掌检测器输入边长。
+_SR_DIRECT_FEED_MIN = 192
+
 
 # ---------------------------------------------------------------------------
 # BaseHandTracker — 抽象基类
@@ -537,6 +542,10 @@ class BaseHandTracker(ABC):
             list of str: 每只手对应的 smoother key
         """
         n = len(hands_landmarks)
+        # Continuity is a one-frame certificate from this assignment, never
+        # evidence carried over from a prior detection or prediction.
+        for gesture in hands_gestures:
+            gesture.pop("previous_track_key", None)
         if n == 0:
             return []
 
@@ -589,6 +598,27 @@ class BaseHandTracker(ABC):
             # 去重：如果两只手分到同一个 key，第二只用另一个
             if len(keys) == 2 and keys[0] == keys[1] and keys[0] in ("Left", "Right"):
                 keys[1] = "Right" if keys[0] == "Left" else "Left"
+            # 单手变双手会重新分配 key。若旧手已明确匹配到其中一只
+            # 新鲜手，旧 key 只是它的别名，不应再生成幽灵主手并挡住
+            # 新鲜结果。保留现有 key 和 smoother，避免影响后续匹配。
+            # 相邻/交叉或全部远离旧位置时仍保留预测，防止副手抢占。
+            if (len(prev_wrists) == 1 and n == 2
+                    and prev_keys[0] in self._active_handedness
+                    and prev_keys[0] not in keys):
+                distances = [math.hypot(w[0] - prev_wrists[0][0],
+                                        w[1] - prev_wrists[0][1]) for w in wrists]
+                nearest = 0 if distances[0] <= distances[1] else 1
+                other = 1 - nearest
+                span = max(1.0, self._hand_span(hands_landmarks[nearest]))
+                # 只在新鲜首位仍是原主手时退休别名。否则直接移除旧主手
+                # 会让另一只高分手（如键盘旁的手）提前接管并触发动作。
+                if (nearest == 0
+                        and distances[nearest] <= max(0.75 * span, 30.0)
+                        and distances[other] > max(2.0 * span,
+                                                  distances[nearest] + 1.5 * span)):
+                    self._active_handedness.discard(prev_keys[0])
+                    if prev_keys[0] == self._primary_track_key:
+                        hands_gestures[nearest]["previous_track_key"] = prev_keys[0]
             self._prev_wrist_keys = list(zip(wrists, keys, strict=True))
             return keys
 
@@ -1086,8 +1116,14 @@ class BaseHandTracker(ABC):
                 crop, target, prefer_gpu=(actual_engine == "realesrgan_gpu")
             )
 
-        # 兜底：超分关闭或执行失败 → 普通插值（放大用 LINEAR，缩小用 AREA）
-        if zoomed is None:
+        if zoomed is None and actual_engine == "none" and crop_size >= _SR_DIRECT_FEED_MIN:
+            # 直通：crop 已够大（≥ 掌检测器内部输入 192px），任何放大都会被
+            # MediaPipe/YOLO 内部重采样抵消——纯插值是双重劳动，直接喂原始 crop。
+            # scale=1 时 to_orig 公式不变，下游坐标映射无需分支。
+            zoomed = crop
+            effective_tier = "none(direct)"
+        elif zoomed is None:
+            # 兜底：超分关闭或执行失败 → 普通插值（放大用 LINEAR，缩小用 AREA）
             interp = cv2.INTER_LINEAR if crop_size < target else cv2.INTER_AREA
             zoomed = cv2.resize(crop, (target, target), interpolation=interp)
             # 实际生效档位：显式 none 用插值；否则说明所选引擎执行失败、回退插值
@@ -1102,10 +1138,12 @@ class BaseHandTracker(ABC):
         # 子类在 zoomed 上跑推理
         detection_result = run_sub_detect(zoomed)
 
-        # 坐标映射回原帧
-        scale = crop_size / target
+        # 坐标映射回原帧（fed_size = 实际喂给子类的方形图边长，
+        # 直通时为 crop_size 本身，SR/插值时为 target）
+        fed_size = zoomed.shape[0]
+        scale = crop_size / fed_size
 
         def to_orig(norm_x, norm_y):
-            return (x0 + norm_x * target * scale, y0 + norm_y * target * scale)
+            return (x0 + norm_x * fed_size * scale, y0 + norm_y * fed_size * scale)
 
-        return detection_result, (x0, y0, crop_size, target, scale), to_orig
+        return detection_result, (x0, y0, crop_size, fed_size, scale), to_orig
