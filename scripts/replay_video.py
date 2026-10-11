@@ -281,6 +281,9 @@ def main():
     ap.add_argument("--compare", action="store_true",
                     help="基线(config.json) vs 应用上述覆盖项，并排对比")
     ap.add_argument("--label", default="run", help="单跑模式的标签")
+    ap.add_argument("--set", dest="set_kv", action="append", default=[],
+                    metavar="KEY=VALUE",
+                    help="任意 config 覆盖项（可多次），如 --set long_range_enabled=true")
     args = ap.parse_args()
 
     if not os.path.isdir(args.rec_dir):
@@ -290,6 +293,21 @@ def main():
         k: getattr(args, k) for k in
         ("zoom_sr_engine", "zoom_far_threshold", "zoom_near_threshold", "detection_engine")
     }
+    for kv in args.set_kv:
+        if "=" not in kv:
+            ap.error(f"--set 需要 KEY=VALUE 形式: {kv}")
+        k, v = kv.split("=", 1)
+        if v.lower() in ("true", "false"):
+            v = v.lower() == "true"
+        else:
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+        overrides[k] = v
     overrides = {k: v for k, v in overrides.items() if v is not None}
 
     logging.basicConfig(level=logging.WARNING)

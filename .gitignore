@@ -72,6 +72,15 @@ models/silero_vad.onnx
 .claude/
 restore_sessions.ps1
 
+# 日志轮转文件（gesture.log 本体已忽略）
+gesture.log.*
+
+# 手部可行性/小手跟踪实验的候选模型权重（不入库；见 experiments/*/README）
+experiments/hand_feasibility/models/
+experiments/sr_effectiveness/tf_probe/
+# SR 有效性 P0 的临时探针截图（本地产物）
+experiments/sr_effectiveness/probe_*.jpg
+
 # 变焦超分模型与评估产物（模型按需下载到项目根目录，见 evaluate_sr.py）
 ESPCN_x2.pb
 FSRCNN_x2.pb

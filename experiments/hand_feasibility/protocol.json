@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "created": "2026-10-07",
+  "name": "hand_feasibility_protocol",
+  "status": "P1 评审稿 — 阈值为方案预先提出的工程目标，正式测试揭盲前可修改；修改须记录 version/reason/scope",
+  "frozen_principles": [
+    "状态判断使用录像原始时间（ReplayClock），性能测量使用实际运行时钟（perf_counter），两者不得混用",
+    "关键点真值必须独立于待评估模型，模型输出不得充当正确答案",
+    "预测帧/补帧不算真实检出，指标分列",
+    "缺失数据记 null/未测，不记 0；没有事件的率指标返回 null 并报告暴露时长上界",
+    "坐标：所有二维指标在同一画面坐标系内报告像素值，跨尺寸比较用归一化值（GT 手框对角线），不用候选自身估计掌宽作分母",
+    "一个真值事件至多匹配一个输出事件；重复触发另算误报",
+    "每路线单独结论：研究引用 / 本地集成 / 随产品分发，三者不得合并"
+  ],
+  "adapter_contract": {
+    "file": "experiments/hand_feasibility/adapters/base_adapter.py",
+    "interface": "reset() / infer(frame, source_timestamp) / close()",
+    "unified_output": "per-frame dict，schema 见 unified_output_schema"
+  },
+  "unified_output_schema": {
+    "required_keys": [
+      "schema_version", "run_id", "clip_id", "frame_index",
+      "source_timestamp", "inference_start_ms", "inference_end_ms",
+      "route_id", "actual_backend", "coordinate_space", "source_size", "model_input_size",
+      "hands"
+    ],
+    "hands_entry_keys": [
+      "track_id", "handedness", "handedness_score",
+      "bbox_xyxy", "keypoints_2d_21x2", "keypoint_scores_21_or_null",
+      "keypoints_3d_or_null", "keypoints_3d_units_or_null",
+      "detected_fresh", "predicted",
+      "gesture_label", "gesture_score", "label_source"
+    ],
+    "null_rules": "无逐点分数填 null；无真实三维填 null；兼容旧接口的占位 z 不得当三维测量"
+  },
+  "timing": {
+    "state_machine_clock": "ReplayClock(source_timestamp) — 持有/投票/冷却/释放判定",
+    "perf_clock": "time.perf_counter() — preprocess/detector/pose/postprocess 耗时",
+    "timestamp_semantics": "meta.jsonl 的 t 为录制进程 time.time()（写入侧）；本次录像帧间隔约 37ms ≈ 27FPS，须与视频封装 FPS 核对",
+    "future_frame_wait": "时序模型使用最晚源帧 t+k 时，等待 k/实际采样率 计入有效延迟，单独记录 lookahead_frames"
+  },
+  "scoring": {
+    "click_matching": {
+      "rule": "检测起点 ∈ [真值起点-100ms, 真值起点+500ms] 记命中；一真值至多配一检测，取窗口内距真值起点最近者",
+      "replaces": "truth_ab.py 的 重叠 OR gap<=0.5s 宽松口径（旧口径结果标 legacy）",
+      "report_negative_delays": true
+    },
+    "missing_metrics": "无真值事件时 recall/precision/误点击率 返回 null，附暴露分钟数与 3/T 上界",
+    "false_alarm_upper_bound": "零误报时每分钟误报 95% 上界 ≈ 3/暴露分钟数"
+  },
+  "metrics_layers": {
+    "L1_raw_model": ["真实检出率", "无手误检", "指尖误差 P4/P8/P12 像素与归一化", "PCK@0.05", "PCK@0.10", "输出覆盖与条件误差", "静止抖动(残差)"],
+    "L2_postprocessed": ["后处理前后变化", "各因素单独消融（一次只改一个）", "增加的延迟"],
+    "L3_interaction": ["点击召回/精确率(左右键分列)", "误点击每分钟", "起点/释放延迟 P50/P95", "拖拽开始/持续/释放", "误断笔/错误连笔每百笔", "演示指令命中率/误触发", "降级行为（丢手/预测帧时是否新触发、按住是否可靠释放）"],
+    "performance": ["preprocess_ms", "detector_ms", "pose_ms", "postprocess_ms", "跨进程传输", "实际输出频率", "丢帧率", "帧龄 P95", "CPU/RAM/显存", "20 分钟资源趋势", "冷启动单列", "预热>=100 次后正式计时", "交错>=3 轮"]
+  },
+  "acceptance_thresholds": {
+    "status": "PROPOSED_NOT_FROZEN",
+    "P2_to_P3": "困难集指尖归一化 P95 误差相对下降>=10% 或 PCK@0.10 +3pp 或 全链时间下降>=20%（质量近似不变）",
+    "P4_limited_adoption": "主要失败指标相对下降>=25% 或 成功率+5pp；常用场景成功率下降<=2pp；点击召回>=95%/精确>=98%/起点P95<=250ms；拖拽成功率>=95%/释放P95<=200ms；板书误断笔<=2/100笔、错误连笔<=1/100笔、落笔P95<=350ms；有效输出>=20FPS@采集25FPS、帧龄P95<=150ms、相对B0不增>30ms；演示命令成功率>=95%、持有后额外P95<=350ms；20分钟无崩溃/积压/内存增长",
+    "default_adoption_extra": "配对95%区间支持收益；负样本误点击每分钟<=0.1；严重失败（误清屏/预测帧新按下/无法释放）逐例修复并新片段复测；测试前冻结参数、未再调优；含2个未见参与者、2个独立会话、1次跨日重复；Windows 目标环境安装/后端/断网/资源释放/回退/共存验证"
+  },
+  "route_ids": {
+    "R1a": "RTMPose-m Hand5 原版",
+    "R1b": "RTMPose-m Distill (tasmulaev)",
+    "R2a": "WiLoR 原版",
+    "R2b": "WiLoR 官方 fast 模式",
+    "R3": "YOLO26 手部专用关键点权重 (poptoz)",
+    "R4": "SAM 3D Body",
+    "R5": "Hand-4DGS"
+  },
+  "evidence_files": {
+    "p0_environment": "artifacts/hand_feasibility/p0_baseline/environment.json",
+    "p0_effective_config": "artifacts/hand_feasibility/p0_baseline/effective_config.json",
+    "route_evidence": "artifacts/hand_feasibility/route_evidence.csv",
+    "code_audit": "artifacts/hand_feasibility/p0_baseline/code_audit.md"
+  },
+  "data_sources": {
+    "recordings_root": "D:\\AC-trae\\raw_capture",
+    "sessions_202607": ["20260705_095523", "20260705_174137", "20260722_145659", "20260722_155625", "20260722_161024", "20260722_161325", "20260722_164055"],
+    "with_truth_events": ["20260722_145659", "20260722_155625", "20260722_161024", "20260722_161325", "20260722_164055"],
+    "known_limits": "全部单人单会话，满足先导集不满足正式集（3人）"
+  }
+}

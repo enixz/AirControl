@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "created": "2026-10-08",
+  "status": "development_observation_only",
+  "pipeline": "tracker_only",
+  "baseline": "current_tracker preserves tracker settings, but does not execute orchestrator automatic switching",
+  "freshness": "Use explicit aligned gesture.predicted; missing metadata is unknown. Raw detections observed before postprocessing are fresh, not necessarily correct.",
+  "clock": "Source timestamps drive MediaPipe, motion and OneEuro. Strictly increasing source frames; repeated model calls within a frame use monotonic millisecond increments. Real perf_counter measures cost.",
+  "metrics": {
+    "fresh_primary_output_rate": "Fraction of ALL source frames whose first returned hand explicitly has predicted=false. Not visible-hand recall.",
+    "no_fresh_primary_intervals": "Elapsed source time without fresh primary output. Includes absence/occlusion; end-of-clip gaps are censored. Not labelled tracking failures.",
+    "accuracy_and_interaction": "null until independent visibility/identity/operation labels and full application replay exist",
+    "timing": "Cold-start development timing including observation overhead. Not warmed benchmark or real-time application FPS."
+  },
+  "data_split": "Historical recordings are development only. New session held out for acceptance.",
+  "acceptance_targets": {
+    "status": "proposed_not_frozen",
+    "visible_hand_lost_time_relative_reduction": 0.30,
+    "stable_reacquisition_p95_ms": 500,
+    "common_scene_success_max_drop_pp": 2,
+    "application_frame_age_p95_ms": 150,
+    "fresh_update_hz_at_capture_25fps": 20
+  },
+  "pending": ["Human annotations", "Full application replay with inert controllers", "Real-time queue/frame-age instrumentation", "Warmed interleaved performance benchmark"]
+}
