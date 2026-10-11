@@ -170,6 +170,17 @@ class AirControlOrchestrator(QObject):
         self._warmed_yolo_signature = None
         self._yolo_prewarm_inflight = False
         self._tracker_prewarm_lock = threading.Lock()
+        # 影子 ZOOM 确认晋升（shadow_zoom_handoff_enabled）：CAPTURE 态旁路运行
+        # mediapipe+long_range 影子，影子与捕获器对同一只手连续确认后直接晋升
+        # FAR_TRACK（影子免重建成为主 tracker）。替代"连续 30 帧稳定单手"的
+        # 等待判据；依据 2026-10-11 影子实验（见 zoom_shadow_confirm.py docstring）。
+        self._shadow_zoom_confirm = None
+        self._shadow_zoom_tracker = None
+        # 影子观测帧计数（单调递增，供确认状态机记录确认帧）
+        self._shadow_zoom_frame_seq = 0
+        # 同帧捕获器输出缓存（_on_frame_ready 写，_on_shadow_hand_ready 读；
+        # 两个 queued 信号由 worker 同帧发出，主线程按序消费）
+        self._last_capture_result = None
         _configured_engine = self.config.get("detection_engine", "mediapipe")
         self._last_config_engine = (
             _configured_engine if isinstance(_configured_engine, str) else "mediapipe"
@@ -397,6 +408,7 @@ class AirControlOrchestrator(QObject):
             self._on_performance_updated
         )
         self.inference_worker.tracker_swapped.connect(self._on_tracker_swapped)
+        self.inference_worker.shadow_hand_ready.connect(self._on_shadow_hand_ready)
         self.inference_worker.start()
         self._schedule_yolo_prewarm()
 
@@ -589,19 +601,191 @@ class AirControlOrchestrator(QObject):
             return "远距捕获中：person_pose_hand 框人拿手腕找手"
         return "远距捕获中：hagrid_yolo 全帧找手"
 
+    # ------------------------------------------------------------------
+    # 影子 ZOOM 确认晋升（shadow_zoom_handoff_enabled）
+    # ------------------------------------------------------------------
+
+    def _shadow_zoom_enabled(self):
+        return (
+            bool(self.config.get("shadow_zoom_handoff_enabled", False))
+            and self._engine_switcher.enabled
+            and not os.environ.get("AIRCONTROL_ENGINE")
+            and self._engine_switcher.state == STATE_CAPTURE
+            and not self._engine_switch_pending
+        )
+
+    def _shadow_zoom_signature(self):
+        """影子 tracker 与 FAR_TRACK 的 mediapipe+long_range 重建签名一致。"""
+        signature = list(self._tracker_signature())
+        signature[0] = "mediapipe"
+        return tuple(signature)
+
+    def _maybe_start_shadow_zoom(self):
+        """CAPTURE 态下（重建落地后）启动影子 ZOOM 旁路。幂等。"""
+        if self._closing or not self._shadow_zoom_enabled():
+            return
+        if self._shadow_zoom_tracker is not None:
+            return
+        from services.zoom_shadow_confirm import ZoomShadowConfirm
+        if self._shadow_zoom_confirm is None:
+            self._shadow_zoom_confirm = ZoomShadowConfirm(
+                reseed_miss_frames=int(
+                    self.config.get("shadow_zoom_reseed_miss_frames", 2)),
+                near_bbox_ratio=self.config.get(
+                    "engine_auto_switch_near_bbox_ratio", 0.04),
+                confirm_window_frames=int(
+                    self.config.get("shadow_zoom_confirm_window_frames", 5)),
+            )
+
+        def build():
+            if self._closing or not self._shadow_zoom_enabled():
+                return
+            from services.zoom_shadow_confirm import CONFIRM_WINDOW_FRAMES
+            shadow = None
+            try:
+                signature = self._shadow_zoom_signature()
+                merged = dict(getattr(self.config, "config", {}) or {})
+                merged["long_range_enabled"] = True
+                shadow = self._create_tracker(
+                    signature, config_overrides={"long_range_enabled": True},
+                )
+            except Exception:
+                logger.exception("影子 ZOOM tracker 构建失败（本轮放弃）")
+                if shadow is not None:
+                    self._close_tracker_safely(shadow, "影子构建失败回滚")
+                return
+            worker = getattr(self, "inference_worker", None)
+            if (self._closing or not self._shadow_zoom_enabled()
+                    or worker is None or not worker.isRunning()):
+                self._close_tracker_safely(shadow, "影子未投递即失效")
+                return
+            self._shadow_zoom_tracker = shadow
+            worker.set_shadow_tracker(shadow)
+            logger.info("影子 ZOOM tracker 已启动（CAPTURE 旁路确认）")
+
+        self._start_background_thread(build, "ZoomShadowBuild")
+
+    def _teardown_shadow_zoom(self, promote=False):
+        """卸载影子旁路；promote=True 时保留 tracker 实例供晋升交接。
+
+        立即从 worker 摘除引用（新帧不再跑影子），旧引用由本方法或晋升
+        路径负责关闭。重置确认状态机，避免跨捕获段残留证据。
+        """
+        worker = getattr(self, "inference_worker", None)
+        shadow = self._shadow_zoom_tracker
+        self._shadow_zoom_tracker = None
+        self._shadow_zoom_frame_seq = 0
+        if self._shadow_zoom_confirm is not None:
+            self._shadow_zoom_confirm.reset()
+        if worker is not None:
+            worker.set_shadow_tracker(None)
+        if shadow is not None and not promote:
+            self._close_tracker_safely(shadow, "关闭影子 ZOOM tracker 失败")
+
+    def _promote_shadow_zoom(self):
+        """影子确认完成：直接晋升 FAR_TRACK，影子成为主 tracker（免重建）。
+
+        与既有 CAPTURE→FAR_TRACK 重建路径的区别：影子已在 CAPTURE 期间逐帧
+        跟踪并确认同一只手，其视口/平滑器状态即接续状态，无需 migrate/播种。
+        """
+        shadow = self._shadow_zoom_tracker
+        if shadow is None or self._closing:
+            self._teardown_shadow_zoom()
+            return
+        switcher = self._engine_switcher
+        target = switcher._mark_switch(
+            STATE_FAR_TRACK, switcher._clock(),
+            "影子 ZOOM 与捕获器连续确认同一只手，直接晋升（免重建交接）",
+        )
+        self._engine_override = "mediapipe"
+        self._fsm_far_track_active = True
+        # 摘除 worker 影子引用（晋升后它是主 tracker，不能再旁路自跑）
+        worker = getattr(self, "inference_worker", None)
+        self._shadow_zoom_tracker = None
+        if worker is not None:
+            worker.set_shadow_tracker(None)
+        self._pending_far_track_seed = False
+        # 与重建路径同型：抬升 request_id 使任何在途重建在落地检查时自弃，
+        # 清 engine_switch_pending 让 FSM 立即恢复计帧。
+        self._tracker_request_id += 1
+        context = {
+            "signature": self._shadow_zoom_signature(),
+            "request_id": self._tracker_request_id,
+            "shadow_promotion": True,
+        }
+        self._engine_switch_pending = False
+        accepted = worker.update_tracker(shadow, context=context,
+                                         seed_crop_zoom=False)
+        if accepted is False:
+            self._close_tracker_safely(shadow, "晋升投递失败，关闭影子")
+            self._teardown_shadow_zoom()
+            return
+        self._tracker_config_signature = context["signature"]
+        self.status_text = self._FSM_STATE_STATUS[STATE_FAR_TRACK]
+        self.status_color = (0, 255, 255)
+        self.status_timer = time.time()
+        self.status_updated.emit(self.status_text, self.status_color)
+        logger.info("影子 ZOOM 已确认并晋升 FAR_TRACK（无重建交接）")
+        # 既有路径：MP 交接后预热下一轮 CAPTURE 的 YOLO 实例
+        self._schedule_yolo_prewarm(delay_sec=0.5)
+        if self._shadow_zoom_confirm is not None:
+            self._shadow_zoom_confirm.reset()
+
+    def _on_shadow_hand_ready(self, frame, shadow_hands, shadow_gestures, worker=None):
+        """消费影子 ZOOM 同帧结果：喂确认状态机，按需重播种/晋升。"""
+        if self._closing or worker is not getattr(self, "inference_worker", None):
+            return
+        if self._shadow_zoom_tracker is None or self._shadow_zoom_confirm is None:
+            return
+        confirm = self._shadow_zoom_confirm
+        shadow = self._shadow_zoom_tracker
+        # 主结果与影子结果是同帧发出的两个 queued 信号；主线程按队列顺序
+        # 先处理主结果再处理影子结果，因此此处读取的主 tracker 输出即为
+        # 同帧捕获器输出。记录最近一帧主结果（_on_frame_ready 时缓存）。
+        capture = getattr(self, "_last_capture_result", None)
+        if capture is None:
+            return
+        capture_hands, capture_gestures, capture_bbox_ratio = capture
+        shadow_miss = int(getattr(shadow, "_zoom_miss_streak", 0))
+        self._shadow_zoom_frame_seq += 1
+        should_promote, should_reseed, reseed_hint = confirm.observe(
+            capture_hands, capture_gestures, capture_bbox_ratio,
+            shadow_hands, shadow_gestures,
+            shadow_miss, self._shadow_zoom_frame_seq,
+        )
+        if should_reseed and reseed_hint is not None:
+            center, size = reseed_hint
+            # 一步落位重播种：与 seed_crop_zoom_from_hint 同型，但用当帧捕获
+            # hint（bbox 中心+尺寸）而非旧 hint（影子失检时旧 hint 正是失效
+            # 的那个）。置空 _current_crop_* 后下一帧 _compute_crop_viewport
+            # 直接用新 hint 初始化视口，不走 EMA。
+            shadow._crop_zoom_mode = True
+            shadow._last_hint_center = center
+            shadow._last_hint_size = max(float(size), 1.0)
+            shadow._current_crop_center = None
+            shadow._current_crop_size = None
+        if should_promote:
+            self._promote_shadow_zoom()
+
     def _apply_fsm_state(self, target):
         """执行 FSM 目标态：CAPTURE/FAR_TRACK 走引擎重建，NEAR 撤覆盖回配置档。"""
         if target == STATE_CAPTURE:
             self._engine_override = self._capture_engine()
             self._fsm_far_track_active = False
+            # 影子确认只在 CAPTURE 态旁路运行；重建落地（_on_tracker_swapped）
+            # 后启动，避免与旧 tracker 的收尾竞争。
             self._request_fsm_rebuild(seed=False)
         elif target == STATE_FAR_TRACK:
+            # FAR_TRACK 由影子晋升或重建任一路径进入：影子若还在旁路，
+            # 说明走的是重建路径（影子确认未达成/未启用），先卸载。
+            self._teardown_shadow_zoom()
             self._engine_override = "mediapipe"
             self._fsm_far_track_active = True
             # CAPTURE 或已检出小手的 NEAR 都可进入；重建落地时把当前
             # 主手 hint 播种给新 MP tracker 的 crop-zoom。
             self._request_fsm_rebuild(seed=True)
         else:  # STATE_NEAR：撤掉 FSM 覆盖，回到用户配置档
+            self._teardown_shadow_zoom()
             self._engine_override = None
             was_far = self._fsm_far_track_active
             self._fsm_far_track_active = False
@@ -985,6 +1169,14 @@ class AirControlOrchestrator(QObject):
             self._schedule_yolo_prewarm()
         else:
             self._discard_warmed_yolo_tracker()
+            # 自动切换关闭：影子旁路一并卸载（含 shadow_zoom_handoff 被关闭）
+            self._teardown_shadow_zoom()
+        # 配置热切换（开关/参数）也走一遍启停：开启且处于 CAPTURE 则启动，
+        # 关闭则卸载。重置确认参数需要重建状态机（简单起见整段重置）。
+        if not bool(self.config.get("shadow_zoom_handoff_enabled", False)):
+            self._teardown_shadow_zoom()
+        else:
+            self._shadow_zoom_confirm = None  # 参数可能已变，下次启动重建
         # 用户关闭了自动切换但当前跑在 FSM 覆盖的引擎上：回到 config 配置的引擎。
         if not self._engine_switcher.enabled and self._engine_override is not None:
             logger.info("引擎自动切换已关闭，回到配置引擎 %s", config_engine)
@@ -1121,6 +1313,9 @@ class AirControlOrchestrator(QObject):
             and self._engine_switcher.enabled
         ):
             self._schedule_yolo_prewarm(delay_sec=0.5)
+        # CAPTURE 重建落地：新 YOLO 主 tracker 开始出帧，此时启动影子旁路
+        # （配置开启且 FSM 仍处于 CAPTURE）。非 CAPTURE 态下幂等不启动。
+        self._maybe_start_shadow_zoom()
         logger.info("tracker 已由推理线程原子切换完成")
 
     # ------------------------------------------------------------------
@@ -1185,6 +1380,17 @@ class AirControlOrchestrator(QObject):
 
     def _on_frame_ready(self, frame, hands_landmarks, hands_gestures, worker=None):
         try:
+            # 影子确认状态机的同帧捕获器输入：主结果先于影子结果被主线程
+            # 消费（worker 同帧顺序发出两个 queued 信号），此处缓存供
+            # _on_shadow_hand_ready 读取。
+            frame_h, frame_w = frame.shape[:2]
+            bbox_ratio = 0.0
+            if hands_gestures:
+                bbox_ratio = float(
+                    hands_gestures[0].get("bbox_area", 0.0)
+                ) / max(frame_w * frame_h, 1)
+            self._last_capture_result = (
+                hands_landmarks, hands_gestures, bbox_ratio)
             self._process_frame_results(frame, hands_landmarks, hands_gestures)
         except Exception as e:
             logger.error("_on_frame_ready error: %s", e, exc_info=True)
@@ -1845,6 +2051,8 @@ class AirControlOrchestrator(QObject):
         self._closing_event.set()
         self._tracker_request_id += 1
         shutdown_incomplete = False
+        # 影子 ZOOM 旁路：先摘引用再关 worker（停止后无人再持有影子引用）。
+        self._teardown_shadow_zoom()
         if self.mode_manager.current_mode:
             try:
                 mode_stopped = self.mode_manager.current_mode.on_exit() is not False

@@ -241,6 +241,15 @@ _CONFIG_SCHEMA = {
     # 远距 CAPTURE 态使用的捕获引擎：hagrid_yolo（默认）或 person_pose_hand（框人→姿态拿手腕）。
     "engine_auto_switch_capture_engine": (
         str, lambda v: v in ("hagrid_yolo", "person_pose_hand"), "hagrid_yolo"),
+    # 影子 ZOOM 确认晋升（CAPTURE 态旁路运行 mediapipe+ZOOM 影子，确认同一只手
+    # 后直接晋升 FAR_TRACK，替代"连续 30 帧稳定单手"的等待判据）。
+    # 依据 2026-10-11 影子实验（17 段回放）：真远距小手段覆盖 188/199、
+    # 双新鲜几何一致 103/103 无一跟错手。默认关闭；开启需 engine_auto_switch。
+    "shadow_zoom_handoff_enabled": (bool, _is_bool, False),
+    # 影子失检 miss 连击多少帧时，用当帧捕获位置重播种影子视口（救窗口塌缩）
+    "shadow_zoom_reseed_miss_frames": (int, _is_int_in(1, 30), 2),
+    # 确认窗口长度：双新鲜同帧几何一致开窗后，影子需连续自持的帧数（含开窗帧）
+    "shadow_zoom_confirm_window_frames": (int, _is_int_in(3, 30), 5),
     # 远距离 ZOOM 鲁棒性：连续丢帧多少帧才断 ZOOM；人脸检测短边分辨率（越大越能找回远处的手）。
     "zoom_miss_frames": (int, _is_int_in(3, 60), 10),
     "face_detect_short": (int, _is_int_in(240, 1280), 400),

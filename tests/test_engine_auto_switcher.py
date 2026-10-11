@@ -593,6 +593,283 @@ class TestTrackerHandoffHelpers(unittest.TestCase):
         bare._sr.reset_tier.assert_not_called()
 
 
+class TestShadowZoomHandoff(unittest.TestCase):
+    """影子 ZOOM 确认晋升（shadow_zoom_handoff_enabled）的 orchestrator 集成。
+
+    覆盖第 4 步生产化路径：CAPTURE 重建落地启动影子、影子确认后免重建晋升、
+    FAR_TRACK/NEAR 撤影子、config 关闭即撤、晋升抬升 request_id 使在途重建
+    自弃。仓库约定：不走真实 QApplication（mock/源码级）。
+    """
+
+    def _make(self, enabled=True):
+        orch = _make_orchestrator()
+        _wire_switcher(orch)
+        orch.config = MagicMock()
+        _shadow_keys = {
+            "shadow_zoom_handoff_enabled": enabled,
+            "shadow_zoom_reseed_miss_frames": 2,
+            "shadow_zoom_confirm_window_frames": 5,
+            "engine_auto_switch_near_bbox_ratio": 0.04,
+        }
+        orch.config.get = lambda key, default=None: _shadow_keys.get(key, default)
+        orch._engine_switcher.state = STATE_CAPTURE
+        orch._engine_switch_pending = False
+        return orch
+
+    def test_enabled_gate_requires_capture_state_and_flag(self):
+        """开关 + CAPTURE 态 + 无 pending + 无环境变量屏蔽，四者缺一不可。"""
+        orch = self._make()
+        self.assertTrue(orch._shadow_zoom_enabled())
+        orch.config.get = lambda key, default=None: default  # 开关关
+        self.assertFalse(orch._shadow_zoom_enabled())
+        orch2 = self._make()
+        orch2._engine_switcher.state = STATE_NEAR
+        self.assertFalse(orch2._shadow_zoom_enabled())
+        orch3 = self._make()
+        orch3._engine_switch_pending = True
+        self.assertFalse(orch3._shadow_zoom_enabled())
+
+    def test_signature_forces_mediapipe_engine(self):
+        """影子签名与 FAR_TRACK 的 mediapipe+long_range 签名一致（第 0 位强制 MP）。"""
+        orch = self._make()
+        self.assertEqual(orch._shadow_zoom_signature()[0], "mediapipe")
+
+    def test_start_is_idempotent(self):
+        orch = self._make()
+        orch._shadow_zoom_tracker = MagicMock()
+        orch._maybe_start_shadow_zoom()
+        # 已有影子时不重复启动（不触发后台构建）
+        self.assertEqual(orch._shadow_zoom_tracker.__class__.__name__, "MagicMock")
+
+    def test_maybe_start_builds_and_installs_shadow(self):
+        """_maybe_start_shadow_zoom 的后台构建落地：装到 worker、记引用。"""
+        orch = self._make()
+        shadow = MagicMock()
+        built = []
+
+        def fake_create(signature, config_overrides=None):
+            built.append((signature, config_overrides))
+            return shadow
+
+        orch._create_tracker = fake_create
+        orch.inference_worker = MagicMock()
+        orch.inference_worker.isRunning.return_value = True
+        with patch("orchestrator.AirControlOrchestrator._start_background_thread") as sb:
+            orch._maybe_start_shadow_zoom()
+            # 后台构建在闭包里；直接调用捕获的 target
+            target = sb.call_args[0][0]
+            target()
+        self.assertEqual(built[0][1], {"long_range_enabled": True})
+        self.assertIs(orch._shadow_zoom_tracker, shadow)
+        orch.inference_worker.set_shadow_tracker.assert_called_once_with(shadow)
+
+    def test_teardown_uninstalls_and_closes(self):
+        orch = self._make()
+        shadow = MagicMock()
+        orch._shadow_zoom_tracker = shadow
+        orch.inference_worker = MagicMock()
+        orch._shadow_zoom_confirm = MagicMock()
+        orch._teardown_shadow_zoom()
+        self.assertIsNone(orch._shadow_zoom_tracker)
+        orch.inference_worker.set_shadow_tracker.assert_called_once_with(None)
+        shadow.close.assert_called_once()
+        orch._shadow_zoom_confirm.reset.assert_called_once()
+
+    def test_teardown_promote_keeps_tracker(self):
+        """晋升交接：tracker 留给主路径，不被关闭。"""
+        orch = self._make()
+        shadow = MagicMock()
+        orch._shadow_zoom_tracker = shadow
+        orch.inference_worker = MagicMock()
+        orch._teardown_shadow_zoom(promote=True)
+        shadow.close.assert_not_called()
+
+    def test_promotion_marks_far_track_and_bumps_request_id(self):
+        """晋升：FSM 落 FAR_TRACK、影子成为主 tracker、request_id 抬升
+        （在途重建的 ready 回调因 id 不匹配自弃）、seed 关闭。"""
+        orch = self._make()
+        shadow = MagicMock()
+        orch._shadow_zoom_tracker = shadow
+        orch.inference_worker = MagicMock()
+        orch.inference_worker.update_tracker.return_value = True
+        before_id = orch._tracker_request_id
+
+        orch._promote_shadow_zoom()
+
+        self.assertEqual(orch._engine_switcher.state, STATE_FAR_TRACK)
+        self.assertEqual(orch._engine_override, "mediapipe")
+        self.assertTrue(orch._fsm_far_track_active)
+        self.assertEqual(orch._tracker_request_id, before_id + 1)
+        self.assertFalse(orch._engine_switch_pending)
+        self.assertFalse(orch._pending_far_track_seed)
+        self.assertIsNone(orch._shadow_zoom_tracker)
+        context = orch.inference_worker.update_tracker.call_args[1]["context"]
+        self.assertTrue(context["shadow_promotion"])
+        self.assertEqual(context["request_id"], before_id + 1)
+        self.assertEqual(
+            orch.inference_worker.update_tracker.call_args[1]["seed_crop_zoom"],
+            False,
+        )
+        orch.inference_worker.set_shadow_tracker.assert_called_with(None)
+
+    def test_promotion_failure_closes_shadow(self):
+        """worker 拒收（如正在关闭）→ 影子关闭，状态保持可重试。"""
+        orch = self._make()
+        shadow = MagicMock()
+        orch._shadow_zoom_tracker = shadow
+        orch.inference_worker = MagicMock()
+        orch.inference_worker.update_tracker.return_value = False
+
+        orch._promote_shadow_zoom()
+
+        shadow.close.assert_called()
+        self.assertIsNone(orch._shadow_zoom_tracker)
+
+    def test_in_flight_rebuild_discarded_after_promotion(self):
+        """晋升后，此前发起的在途重建落地时因 request_id 过期被丢弃。"""
+        orch = self._make()
+        stale_id = orch._tracker_request_id
+        # 在途重建（config 触发）发起
+        orch._request_tracker_rebuild = MagicMock()
+        shadow = MagicMock()
+        orch._shadow_zoom_tracker = shadow
+        orch.inference_worker = MagicMock()
+        orch.inference_worker.update_tracker.return_value = True
+        orch._promote_shadow_zoom()
+        # 在途重建的 ready 回调带旧 id → 应被丢弃（现有守卫逻辑）
+        orch._on_tracker_ready(MagicMock(), _SIG_MP, stale_id, "")
+        orch.inference_worker.update_tracker.assert_called_once()  # 只有晋升那次
+
+    def test_far_track_or_near_teardown_shadow(self):
+        """FSM 离开 CAPTURE（FAR_TRACK/NEAR）撤影子。"""
+        orch = self._make()
+        shadow = MagicMock()
+        orch._shadow_zoom_tracker = shadow
+        orch.inference_worker = MagicMock()
+        orch._apply_fsm_state(STATE_FAR_TRACK)
+        self.assertIsNone(orch._shadow_zoom_tracker)
+
+    def test_apply_fsm_state_capture_defers_to_landing(self):
+        """CAPTURE 状态切换本身不启动影子（等重建落地 _on_tracker_swapped）。"""
+        orch = self._make()
+        started = []
+        orch._maybe_start_shadow_zoom = lambda: started.append(1)
+        orch._apply_fsm_state(STATE_CAPTURE)
+        self.assertEqual(started, [])
+
+    def test_tracker_swapped_starts_shadow_in_capture(self):
+        """重建落地（_on_tracker_swapped）时 CAPTURE 态启动影子。"""
+        orch = self._make()
+        started = []
+        orch._maybe_start_shadow_zoom = lambda: started.append(1)
+        orch.inference_worker = MagicMock()
+        context = {"signature": _SIG_YOLO, "request_id": orch._tracker_request_id}
+        orch._on_tracker_swapped(orch.inference_worker, MagicMock(), context, {})
+        self.assertEqual(started, [1])
+
+    def test_config_disable_tears_down(self):
+        """apply_config 时开关关 → 撤影子。"""
+        orch = self._make(enabled=False)
+        shadow = MagicMock()
+        orch._shadow_zoom_tracker = shadow
+        orch.inference_worker = MagicMock()
+        # apply_config 其余依赖（recognizer/ppt/mouse/overlay/voice/模式管理）
+        orch.recognizer = MagicMock()
+        orch.ppt = MagicMock()
+        orch.mouse = MagicMock()
+        orch.overlay = MagicMock()
+        orch.voice_command = MagicMock()
+        orch._current_voice_kws_signature = MagicMock(return_value=None)
+        orch._voice_kws_signature = None
+        orch.mode_manager = MagicMock()
+        orch.mode_manager.current_mode_name = "mouse"
+        orch.mode_manager.current_mode = MagicMock()
+        with patch.object(orch, "_configure_engine_switcher"), \
+             patch.object(orch, "_discard_warmed_yolo_tracker"), \
+             patch.object(orch, "set_mode"):
+            orch.apply_config()
+        self.assertIsNone(orch._shadow_zoom_tracker)
+        shadow.close.assert_called_once()
+
+    def test_config_switcher_disabled_tears_down(self):
+        """FSM 自动切换被关闭（engine_auto_switch=False）→ 撤影子。"""
+        orch = self._make()  # 开关开着
+        shadow = MagicMock()
+        orch._shadow_zoom_tracker = shadow
+        orch.inference_worker = MagicMock()
+        orch.recognizer = MagicMock()
+        orch.ppt = MagicMock()
+        orch.mouse = MagicMock()
+        orch.overlay = MagicMock()
+        orch.voice_command = MagicMock()
+        orch._current_voice_kws_signature = MagicMock(return_value=None)
+        orch._voice_kws_signature = None
+        orch.mode_manager = MagicMock()
+        orch.mode_manager.current_mode_name = "mouse"
+        orch.mode_manager.current_mode = MagicMock()
+        with patch.object(orch, "_configure_engine_switcher",
+                          side_effect=lambda: orch._engine_switcher.configure(
+                              enabled=False)), \
+             patch.object(orch, "_discard_warmed_yolo_tracker"), \
+             patch.object(orch, "set_mode"):
+            orch.apply_config()
+        self.assertIsNone(orch._shadow_zoom_tracker)
+        shadow.close.assert_called_once()
+
+    def test_shadow_hand_ready_promotes_after_confirmation(self):
+        """端到端：影子结果喂确认机，confirmations 达标后触发晋升。"""
+        orch = self._make()
+        shadow = MagicMock()
+        shadow._zoom_miss_streak = 0
+        orch._shadow_zoom_tracker = shadow
+        orch.inference_worker = MagicMock()
+        orch._promote_shadow_zoom = MagicMock()
+        from services.zoom_shadow_confirm import ZoomShadowConfirm
+        confirm = ZoomShadowConfirm(confirm_window_frames=5)
+        orch._shadow_zoom_confirm = confirm
+        # 手与捕获手几何一致（wrist 相同 → 距离 0）
+        hand = [[0, 100.0, 100.0]]
+        for i in range(1, 21):
+            hand.append([i, 140.0, 140.0])
+        capture_hand = [list(p) for p in hand]
+        gesture = {"predicted": False}
+        orch._last_capture_result = ([capture_hand], [gesture], 0.001)
+        # 第 1 帧开窗 + 4 帧自持 → 第 5 次 observe 时 confirmations=1 且
+        # bbox_ratio 远距 → 立即晋升
+        for _ in range(4):
+            orch._on_shadow_hand_ready(
+                None, [hand], [gesture], orch.inference_worker)
+        orch._promote_shadow_zoom.assert_not_called()
+        orch._on_shadow_hand_ready(
+            None, [hand], [gesture], orch.inference_worker)
+        orch._promote_shadow_zoom.assert_called_once()
+
+    def test_shadow_hand_ready_ignores_stale_worker(self):
+        """worker 不匹配（旧实例信号）→ 忽略。"""
+        orch = self._make()
+        orch._shadow_zoom_tracker = MagicMock()
+        orch._shadow_zoom_confirm = MagicMock()
+        orch._promote_shadow_zoom = MagicMock()
+        orch._last_capture_result = ([], [], 0.0)
+        orch._on_shadow_hand_ready(None, [], [], worker=MagicMock())
+        orch._promote_shadow_zoom.assert_not_called()
+
+    def test_closing_blocks_shadow_promotion(self):
+        """_closing 后影子结果不再触发晋升（close 路径已先撤影子）。"""
+        orch = self._make()
+        shadow = MagicMock()
+        shadow._zoom_miss_streak = 0
+        orch._shadow_zoom_tracker = shadow
+        orch._shadow_zoom_confirm = MagicMock()
+        orch._shadow_zoom_confirm.observe.return_value = (True, False, None)
+        orch._promote_shadow_zoom = MagicMock()
+        orch.inference_worker = MagicMock()
+        orch._last_capture_result = ([], [], 0.001)
+        orch._closing = True
+        orch._on_shadow_hand_ready(None, [], [], orch.inference_worker)
+        orch._promote_shadow_zoom.assert_not_called()
+
+
 class TestCaptureEngineSelection(unittest.TestCase):
     """CAPTURE 态捕获引擎可选：engine_auto_switch_capture_engine 热切换。
 

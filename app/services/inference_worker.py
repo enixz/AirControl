@@ -20,6 +20,8 @@ class InferenceWorker(QThread):
     error_occurred = pyqtSignal(str)
     fps_updated = pyqtSignal(float)
     performance_updated = pyqtSignal(object)
+    # 影子 ZOOM 结果：主结果之外的同帧影子检测（shadow_zoom_handoff 用）
+    shadow_hand_ready = pyqtSignal(object, list, list, object)
     # worker, active tracker, caller context, migration/seed result
     tracker_swapped = pyqtSignal(object, object, object, object)
 
@@ -34,6 +36,9 @@ class InferenceWorker(QThread):
         self._pending_tracker_lock = threading.Lock()
         self._retired_pending_trackers = []
         self._accept_tracker_updates = True
+        # 影子 ZOOM tracker（CAPTURE 态旁路，shadow_zoom_handoff_enabled 时启用）。
+        # 由 orchestrator 创建/关闭；worker 只持有引用并逐帧运行。None 表示未启用。
+        self.shadow_tracker = None
         self.frame_recorder = frame_recorder  # 可选：原始帧无损录制（默认 None）
         self.running = False
         self.lock = threading.Lock()
@@ -163,7 +168,12 @@ class InferenceWorker(QThread):
         # 干净帧；待 find_hands 完成后再写入（带检测元数据），保证 meta 与 frame 对齐。
         with self._recorder_lock:
             recorder = self.frame_recorder
-        record_frame = frame.copy() if recorder is not None else None
+        # 预推理干净帧：录制与影子 ZOOM 共用。find_hands(draw=True) 会原地
+        # 绘制叠层污染 frame，故先 copy；录制在推理完成后写入，影子在主推理
+        # 后运行，均不受绘制污染。
+        clean_frame = frame.copy() if (recorder is not None
+                                       or self.shadow_tracker is not None) else None
+        record_frame = clean_frame if recorder is not None else None
 
         inference_started = time.perf_counter()
         # Hold the lock through native inference so an old detector cannot be
@@ -222,6 +232,19 @@ class InferenceWorker(QThread):
             frame, hands_landmarks, hands_gestures = self.tracker.find_hands(
                 frame, draw=True
             )
+            shadow_hands = shadow_gestures = None
+            shadow = self.shadow_tracker
+            if shadow is not None:
+                # 影子在干净帧上运行：主 tracker 的 draw=True 已把叠层原地
+                # 绘进 frame，直接喂会污染影子的裁剪输入。输出经
+                # shadow_hand_ready 信号交给主线程的确认状态机。
+                try:
+                    _, shadow_hands, shadow_gestures = shadow.find_hands(
+                        clean_frame, draw=False,
+                    )
+                except Exception:
+                    logger.exception("影子 ZOOM 推理失败（本帧跳过）")
+                    shadow_hands = shadow_gestures = None
         inference_ms = (time.perf_counter() - inference_started) * 1000.0
 
         # 原始帧 + 检测元数据一起写入（meta 让 replay/analyze 能重建原始运行时识别点轨迹）
@@ -240,6 +263,12 @@ class InferenceWorker(QThread):
         # 避免旧帧持续堆积并放大端到端延迟。
         if self._claim_result_slot():
             self.frame_ready.emit(frame, hands_landmarks, hands_gestures, self)
+        # 影子结果走独立信号，不占用主结果背压槽：确认状态机只消费不驱动
+        # 桌面操作，主线程丢弃一两帧影子结果不影响正确性。
+        if shadow is not None:
+            self.shadow_hand_ready.emit(
+                frame, list(shadow_hands or []), list(shadow_gestures or []), self,
+            )
 
         total_ms = (time.perf_counter() - start_time) * 1000.0
         self._record_performance(capture_ms, queue_ms, inference_ms, total_ms)
@@ -360,6 +389,18 @@ class InferenceWorker(QThread):
         """
         with self._recorder_lock:
             self.frame_recorder = recorder
+
+    def set_shadow_tracker(self, shadow):
+        """线程安全安装/卸载影子 ZOOM tracker（None 卸载）。
+
+        旧影子引用由调用方（orchestrator）负责关闭——它可能正被当前帧的
+        推理使用，worker 不能在帧中途释放它。赋值本身在推理锁 self.lock
+        外进行是安全的：Python 属性赋值原子，帧循环每帧重新读取。
+        """
+        self.shadow_tracker = shadow
+        logger.info(
+            "影子 ZOOM tracker %s", "已安装" if shadow is not None else "已卸载",
+        )
 
     def _collect_record_meta(self, hands_landmarks, hands_gestures):
         """收集用于回放分析的元数据：主手 wrist、手数、crop 视口等。
