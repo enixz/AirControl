@@ -181,7 +181,13 @@ class MouseMode(ModeBase):
         ml_label = hands_gestures[0].get("ml_label") if hands_gestures else None
         if hands_landmarks:
             key = hands_gestures[0].get("track_key") if hands_gestures else None
-            if key != getattr(self, "_feature_track_key", None):
+            previous_key = getattr(self, "_feature_track_key", None)
+            # Only the tracker's unambiguous fresh-primary alias retirement
+            # may preserve button evidence across a numbering change.
+            same_hand_rekey = (not predicted and previous_key is not None
+                               and hands_gestures
+                               and hands_gestures[0].get("previous_track_key") == previous_key)
+            if key != previous_key and not same_hand_rekey:
                 # 换手：捏合历史不跨手继承（第 2/3 步）
                 self.recognizer.reset_hand_features()
                 self._pinch_press_since.clear()
