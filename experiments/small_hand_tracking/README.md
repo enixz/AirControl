@@ -99,7 +99,7 @@ $clips = @(Get-ChildItem D:/AC-trae/raw_capture -Directory | Where-Object { Test
 .venv\Scripts\python.exe -m experiments.small_hand_tracking.handoff_report artifacts/small_hand_tracking/rekey_corpus_mouse_20261011 artifacts/small_hand_tracking/capture_handoff_focus_20261011 artifacts/small_hand_tracking/capture_handoff_review_20261011
 ```
 
-`shadow_zoom` 是已接入生产的影子 ZOOM 确认晋升（`shadow_zoom_handoff_enabled`）在回放里的开关：与 `current` 唯一差异是该配置项为 true。回放走完整生产路径——CAPTURE 重建落地后后台构建影子、worker 同帧旁跑、确认状态机含冷启动播种/失检重播种/ZOOM OFF 边沿、确认后影子免迁移晋升为主 tracker。对照探针（shadow_zoom_probe，运行在归档轨迹旁）与它的区别：探针验证协议且全程有捕获位置供应；本变体验证生产接线与晋升行为，晋升后无捕获供应（退化为既有 FAR_TRACK 行为）。生产默认仍关闭，待实机验收。
+`shadow_zoom` 是已接入生产的影子 ZOOM 确认晋升（`shadow_zoom_handoff_enabled`）在回放里的开关：与 `current` 唯一差异是该配置项为 true。回放走完整生产路径——CAPTURE 重建落地后后台构建影子、worker 同帧旁跑、确认状态机含冷启动播种/失检重播种/ZOOM OFF 边沿、确认后影子免迁移晋升为主 tracker。对照探针（shadow_zoom_probe，运行在归档轨迹旁）与它的区别：探针验证协议且全程有捕获位置供应；本变体验证生产接线与晋升行为，晋升后无捕获供应（退化为既有 FAR_TRACK 行为）。`shadow_report` 对比两侧结果（唯一差异断言、FSM 分布、晋升事件、恢复/新增缺失区间、晋升后跳变粗检）。生产默认仍关闭，待实机验收。2026-10-11 全量 17 段 A/B 结论见 docs/small_hand_tracking_progress.md 第 4 步节。
 
 `probe_capture_crop` 是独立的当帧裁剪诊断：读取已保存的捕获态新鲜主手位置，按生产 padding 和最小尺寸直接裁剪，调用现有 MediaPipe 与 SR；每个试识别帧都重新获得捕获位置，不代表独立跟踪。输出只检查 MP 手腕是否在捕获手跨度的 0.75 倍以内，不能当作身份真值或准确率。它不运行操作控制器，也不修改生产交接逻辑。
 
