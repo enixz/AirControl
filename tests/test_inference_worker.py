@@ -283,6 +283,68 @@ class TestInferenceWorker(unittest.TestCase):
         worker.mark_result_consumed()
         self.assertTrue(worker._claim_result_slot())
 
+    def test_shadow_installed_mid_frame_does_not_crash_worker(self):
+        """影子 TOCTOU：帧首无影子（clean_frame=None）后、find_hands 前装上
+        影子（set_shadow_tracker 在推理锁外）。worker 必须用帧首快照——本帧
+        跳过影子，而不是拿 None 帧喂影子崩溃。"""
+        frame = np.zeros((2, 2, 3), dtype=np.uint8)
+        shadow_calls = []
+
+        class Shadow(FakeTracker):
+            def find_hands(self, f, draw=True):
+                shadow_calls.append(f)
+                return f, [], []
+
+        worker = InferenceWorker(camera=None, tracker=FakeTracker())
+        received = []
+        worker.shadow_hand_ready.connect(
+            lambda source_frame, hands, gestures, source: received.append(hands)
+        )
+        # 模拟竞态：在帧首快照之后、推理中安装影子
+        original_find = worker.tracker.find_hands
+
+        def find_then_install(frame_arg, draw=True):
+            worker.set_shadow_tracker(Shadow())  # 恰落在两步之间
+            return original_find(frame_arg, draw=draw)
+
+        worker.tracker.find_hands = find_then_install
+        with patch.object(worker, "_update_fps"):
+            worker._process_frame(frame, 0.0, time.perf_counter())
+        # 快照语义：本帧影子不应被喂（无 None 帧调用），下一帧正常
+        self.assertEqual(shadow_calls, [])
+        self.assertEqual(received, [])
+        # 下一帧：影子已装，正常跑
+        worker.tracker.find_hands = original_find
+        worker.tracker.find_hands = original_find
+        with patch.object(worker, "_update_fps"):
+            worker._process_frame(frame.copy(), 0.0, time.perf_counter())
+        self.assertEqual(len(shadow_calls), 1)
+        self.assertIsNotNone(shadow_calls[0])
+
+    def test_skip_migration_keeps_pending_state(self):
+        """skip_migration 提交后，换装段不执行 migrate_state_from（影子晋升
+        保留自身接续状态），seed 也跳过。"""
+        events = []
+
+        class Migrating(FakeTracker):
+            def migrate_state_from(self, old):
+                events.append("migrate")
+
+            def seed_crop_zoom_from_hint(self):
+                events.append("seed")
+                return True
+
+        old = FakeTracker()
+        promoted = Migrating()
+        worker = InferenceWorker(camera=None, tracker=old)
+        worker.update_tracker(promoted, context={}, seed_crop_zoom=False,
+                             skip_migration=True)
+        worker._process_frame(np.zeros((2, 2, 3), dtype=np.uint8), 0.0,
+                               time.perf_counter())
+        self.assertEqual(events, [])
+        self.assertIs(worker.tracker, promoted)
+        self.assertTrue(old.closed)
+
 
 if __name__ == "__main__":
     unittest.main()

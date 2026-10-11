@@ -660,6 +660,9 @@ class AirControlOrchestrator(QObject):
                 self._close_tracker_safely(shadow, "影子未投递即失效")
                 return
             self._shadow_zoom_tracker = shadow
+            # 影子身份标记：worker 知道它在旁路跑；回放器据此把影子输出与
+            # 主 tracker 的行记录分开（rows 只记主输出）。晋升时清除。
+            shadow._shadow_zoom = True
             worker.set_shadow_tracker(shadow)
             logger.info("影子 ZOOM tracker 已启动（CAPTURE 旁路确认）")
 
@@ -702,6 +705,8 @@ class AirControlOrchestrator(QObject):
         # 摘除 worker 影子引用（晋升后它是主 tracker，不能再旁路自跑）
         worker = getattr(self, "inference_worker", None)
         self._shadow_zoom_tracker = None
+        # 清影子身份标记：从现在起它的输出就是主输出
+        shadow._shadow_zoom = False
         if worker is not None:
             worker.set_shadow_tracker(None)
         self._pending_far_track_seed = False

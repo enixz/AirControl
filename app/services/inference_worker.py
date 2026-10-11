@@ -171,9 +171,12 @@ class InferenceWorker(QThread):
             recorder = self.frame_recorder
         # 预推理干净帧：录制与影子 ZOOM 共用。find_hands(draw=True) 会原地
         # 绘制叠层污染 frame，故先 copy；录制在推理完成后写入，影子在主推理
-        # 后运行，均不受绘制污染。
+        # 后运行，均不受绘制污染。影子引用在此取一次性快照：copy 决策与
+        # 后续 find_hands 必须用同一引用，否则安装影子恰落在两步之间时
+        # （set_shadow_tracker 在推理锁外）会拿 None 帧喂影子。
+        shadow_snapshot = self.shadow_tracker
         clean_frame = frame.copy() if (recorder is not None
-                                       or self.shadow_tracker is not None) else None
+                                       or shadow_snapshot is not None) else None
         record_frame = clean_frame if recorder is not None else None
 
         inference_started = time.perf_counter()
@@ -236,8 +239,10 @@ class InferenceWorker(QThread):
             frame, hands_landmarks, hands_gestures = self.tracker.find_hands(
                 frame, draw=True
             )
+            # 用帧首快照：与 clean_frame 的 copy 决策同源（安装影子若恰落在
+            # 两步之间，快照为 None——本帧跳过影子，下一帧正常跑）。
+            shadow = shadow_snapshot
             shadow_hands = shadow_gestures = None
-            shadow = self.shadow_tracker
             if shadow is not None:
                 # 影子在干净帧上运行：主 tracker 的 draw=True 已把叠层原地
                 # 绘进 frame，直接喂会污染影子的裁剪输入。输出经

@@ -141,6 +141,8 @@ def render(run, destination):
             lines.append(f"  - 晋升后手腕跳变帧 {c['post_promotion_wrist_jump_frames']}（粗指标，需人工复核）")
     lines += ["", "逐帧差异见同目录 comparison.json。", ""]
     (destination / "report.md").write_text("\n".join(lines), encoding="utf-8")
+    write_json(destination / "comparison.json", dict(totals=totals, cases=cases, pending=pending,
+                                                    limits="A/B over replay semantics only; see per-case limits."))
     return totals
 
 

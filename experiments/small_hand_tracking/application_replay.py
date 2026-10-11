@@ -136,12 +136,18 @@ class ApplicationReplay:
         original_detect = tracker._run_detection
 
         def raw(*args, **kwargs):
+            if getattr(tracker, "_shadow_zoom", False):
+                # 影子旁路调用不写行：rows 记录主 tracker 的输出，影子覆盖
+                # 会冒充主手结果污染覆盖统计与引擎归因。
+                return original_detect(*args, **kwargs)
             result = original_detect(*args, **kwargs)
             self.row["raw_hands"] = encode_hands(result[0], result[1], raw=True)
             self.row["used_crop_zoom"] = bool(result[2])
             return result
 
         def find(frame, draw=True):
+            if getattr(tracker, "_shadow_zoom", False):
+                return original_find(frame, draw=draw)
             self.row["actual_engine"] = tracker.engine_name
             self.row["before"] = tracker_state(tracker)
             started = time.perf_counter()
@@ -163,7 +169,8 @@ class ApplicationReplay:
         original_tier = tracker._sr.log_tier
 
         def tier(name, crop_size, target):
-            self.row["upscalers"].append({"effective_tier": name, "crop_size": crop_size, "target": target})
+            if not getattr(tracker, "_shadow_zoom", False):
+                self.row["upscalers"].append({"effective_tier": name, "crop_size": crop_size, "target": target})
             return original_tier(name, crop_size, target)
 
         self.patches.enter_context(patch.object(tracker._sr, "log_tier", tier))

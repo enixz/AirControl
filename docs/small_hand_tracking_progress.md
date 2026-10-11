@@ -84,7 +84,13 @@
 
 测试：[test_zoom_shadow_confirm.py](D:/airControl/tests/test_zoom_shadow_confirm.py)（16 项：开窗/自持/挂起/跳变/冷启动播种/失检重播种/ZOOM OFF 边沿/晋升门槛/参数钳制），test_engine_auto_switcher.py 新增 TestShadowZoomHandoff（17 项：启用门控、签名、启动幂等、构建安装、卸载、晋升 request_id、在途重建自弃、FSM 离开撤影子、config 关闭、close 阻断、确认后晋升端到端）。全套 734 项通过。
 
-**应用回放验证（AC-trae raw_capture 录像，pose_yaw180_far 冒烟）**：`shadow_zoom` 变体（run_application 接上生产确认路径：shadow_hand_ready 信号、同帧捕获缓存、回放时钟绑定影子 MP 时间戳）在帧 43 晋升 FAR_TRACK——`current` 变体同段 99 帧全停在 CAPTURE（远距小手凑不满 30 帧稳定判据的反例，被影子路径救回）。晋升后手腕轨迹连续（679→624 缓动，无跳变）；与探针影子轨迹对照仅 2 帧 >30px 偏移且为同手小幅偏移（帧 72-73 手向右上移动，app 跟随更贴近）；操作事件完全一致（left_down/left_up/right_click 各 1，无操作退步）。
+**应用回放验证（AC-trae raw_capture 录像，pose_yaw180_far 冒烟）**：`shadow_zoom` 变体（run_application 接上生产确认路径：shadow_hand_ready 信号、同帧捕获缓存、回放时钟绑定影子 MP 时间戳）在帧 43 晋升 FAR_TRACK——`current` 变体同段 99 帧全停在 CAPTURE（远距小手凑不满 30 帧稳定判据的反例，被影子路径救回）。晋升后手腕轨迹连续（679→624 缓动，无跳变）；与探针影子轨迹对照仅 2 帧 >30px 偏移且为同手小幅偏移（帧 72-73 手向右上移动，app 跟随更贴近）；操作事件计数完全一致（left_down/left_up/right_click 各 1；left_down 时序差 1-2 帧，43 帧晋升 vs 56 帧后才有连续输出所致）。净效应：新鲜主手 52→56（+4），恢复 14 帧、新增缺失 10 帧（全部在晋升后）。
+
+冒烟过程中发现并修复的三个回放/生产 bug（修复后重跑，旧冒烟数据作废）：
+
+1. **行污染（回放器）**：`instrument()` 对每个 `_create_tracker` 产物装探针，影子的旁路 `find_hands` 也被装上且把 rows 的 hands/before/after/actual_engine 覆写成影子输出——CAPTURE 段的覆盖统计与引擎归因全部失真（影子 MP 检出冒充主 YOLO 输出）。修复：影子挂 `_shadow_zoom` 标记（orchestrator 安装时置位、晋升时清除），探针见到标记只透传不写行。
+2. **影子 TOCTOU（生产 worker）**：`clean_frame` 的 copy 决策读 `self.shadow_tracker`，主推理后再次读它——安装影子恰落两步之间时（`set_shadow_tracker` 在推理锁外），会拿 `clean_frame=None` 喂影子崩溃（长录像实测 9 次）。修复：帧首一次性快照，两步同源；本帧跳过影子，下一帧正常。
+3. **长录像冒出的问题已在修复 1 后消失**：影子行污染曾使 CAPTURE 段引擎归因为 mediapipe；修复后 current 捕获段正确记录 hagrid_yolo。
 
 回放暴露的**新设计边界（晋升后探针供应消失）**：探针在影子 miss≥2 时总有捕获位置可重播种（帧 59 crop 116→99 一步救回，60-67 帧保持新鲜）；生产晋升后影子成为主 tracker，CAPTURE 侧已撤——57-64 帧生产靠 ZOOM 视口自然收缩（crop 114→118）没有全丢，65-68 到 10 帧 miss 阈值 ZOOM OFF 回全帧，69 帧全帧回退恢复。生产比探针多丢 9 帧，全部在晋升后；这是"晋升后退化到既有 FAR_TRACK 行为"的已知边界，由 30 帧丢手回 CAPTURE 兜底。若后续要填平，方向是 FAR_TRACK 内的视口自愈（与探针供应无关的路径），不在本轮。
 
