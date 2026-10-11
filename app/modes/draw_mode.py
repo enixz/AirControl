@@ -342,6 +342,12 @@ class DrawMode(ModeBase):
                 status_color=(0, 0, 255),
             )
 
+        # 预测沿用旧姿态，不能作为继续张掌或执行清屏的新证据。
+        # 在所有书写/悬停提前返回之前清空累计，恢复检测后重新确认。
+        primary_predicted = bool(hands_gestures and hands_gestures[0].get("predicted", False))
+        if primary_predicted:
+            self.open_palm_frames = 0
+
         landmarks = hands_landmarks[0]
         features = self.recognizer.get_hand_features(landmarks)
 
@@ -523,11 +529,12 @@ class DrawMode(ModeBase):
         # 张掌 -> 清屏（长按）
         # open_palm_frames 阈值 15（20fps 下 0.75s）：30 帧（1.5s）太长用户以为没反应。
         OPEN_PALM_CLEAR_FRAMES = 15
-        if features["is_open_palm"]:
+        if features["is_open_palm"] and not primary_predicted:
             self.open_palm_frames += 1
             self.overlay.tick_idle()
             if self.open_palm_frames >= OPEN_PALM_CLEAR_FRAMES and self._throttle_special_action():
                 self.overlay.clear_canvas()
+                logger.info("[DRAW] clear_canvas cause=fresh_open_palm frames=%d", self.open_palm_frames)
                 self.fist_hold_frames = 0
                 self.open_palm_frames = 0
                 try:

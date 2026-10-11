@@ -303,5 +303,58 @@ class DrawStateMachineTest(unittest.TestCase):
         overlay.force_lift_pen.assert_called()
 
 
+class ClearFreshnessTest(unittest.TestCase):
+    def setUp(self):
+        self.dm, self.overlay = make_draw_mode()
+        self.palm = make_open_palm()
+        self.clock = mock.patch.object(draw_mode_mod.time, "time", return_value=1000.0)
+        self.clock.start()
+        self.addCleanup(self.clock.stop)
+        sound = mock.patch.object(draw_mode_mod.winsound, "PlaySound")
+        sound.start()
+        self.addCleanup(sound.stop)
+
+    def palm_step(self, predicted=False, secondary=False):
+        hands = [self.palm]
+        gestures = [{"label": "OPEN_PALM", "predicted": predicted}]
+        if secondary:
+            hands.append(self.palm)
+            gestures.append({"label": "OPEN_PALM", "predicted": False})
+        return self.dm.handle(hands, gestures, 640, 480)
+
+    def test_fifteen_fresh_palms_still_clear(self):
+        for _ in range(14):
+            self.palm_step()
+        self.overlay.clear_canvas.assert_not_called()
+        self.assertEqual(self.palm_step().gesture, "CLEAR_CANVAS")
+        self.overlay.clear_canvas.assert_called_once()
+
+    def test_prediction_cannot_finish_or_preserve_clear_count(self):
+        for _ in range(14):
+            self.palm_step()
+        for _ in range(5):
+            self.palm_step(predicted=True)
+        self.overlay.clear_canvas.assert_not_called()
+        self.assertEqual(self.dm.open_palm_frames, 0)
+        for _ in range(14):
+            self.palm_step()
+        self.overlay.clear_canvas.assert_not_called()
+        self.palm_step()
+        self.overlay.clear_canvas.assert_called_once()
+
+    def test_fresh_secondary_cannot_authorize_predicted_primary_clear(self):
+        for _ in range(20):
+            self.palm_step(predicted=True, secondary=True)
+        self.overlay.clear_canvas.assert_not_called()
+        self.assertEqual(self.dm.open_palm_frames, 0)
+
+    def test_prediction_after_writing_resets_existing_clear_evidence(self):
+        self.dm.open_palm_frames = 14
+        self.dm._was_writing = True
+        self.palm_step(predicted=True)
+        self.assertEqual(self.dm.open_palm_frames, 0)
+        self.overlay.clear_canvas.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
