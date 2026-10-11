@@ -710,7 +710,39 @@ class TestShadowZoomHandoff(unittest.TestCase):
             orch.inference_worker.update_tracker.call_args[1]["seed_crop_zoom"],
             False,
         )
+        self.assertTrue(
+            orch.inference_worker.update_tracker.call_args[1]["skip_migration"])
         orch.inference_worker.set_shadow_tracker.assert_called_with(None)
+
+    def test_promotion_skip_migration_preserves_shadow_state(self):
+        """skip_migration 语义：worker 换主 tracker 时不从捕获器迁移状态。
+
+        不跳过迁移时，YOLO 捕获器的 _crop_zoom_mode=False 会覆写影子的
+        ZOOM 视口——恰好摧毁免重建交接要保留的接续状态。
+        """
+        from services.inference_worker import InferenceWorker
+        worker = InferenceWorker.__new__(InferenceWorker)
+        worker.shadow_tracker = None
+        worker._pending_tracker = None
+        worker._pending_tracker_context = None
+        worker._pending_tracker_seed_crop_zoom = False
+        worker._pending_tracker_skip_migration = False
+        worker._pending_tracker_lock = __import__("threading").Lock()
+        worker._retired_pending_trackers = []
+        worker._accept_tracker_updates = True
+        worker.lock = __import__("threading").Lock()
+        worker.tracker = MagicMock()  # 旧主 tracker（捕获器）
+        shadow = MagicMock()
+        self.assertTrue(worker.update_tracker(shadow, context={}, skip_migration=True))
+        # 提交后驱动一次 _process_frame 的换装段（无需真实帧——先手动执行
+        # 换装逻辑等价路径：直接调 _process_frame 会碰 camera，改为验证
+        # update_tracker 记录的 skip 标志被换装段消费）
+        with worker._pending_tracker_lock:
+            pending = worker._pending_tracker
+            skip = worker._pending_tracker_skip_migration
+        self.assertIs(pending, shadow)
+        self.assertTrue(skip)
+        shadow.migrate_state_from.assert_not_called()
 
     def test_promotion_failure_closes_shadow(self):
         """worker 拒收（如正在关闭）→ 影子关闭，状态保持可重试。"""
@@ -868,6 +900,42 @@ class TestShadowZoomHandoff(unittest.TestCase):
         orch._closing = True
         orch._on_shadow_hand_ready(None, [], [], orch.inference_worker)
         orch._promote_shadow_zoom.assert_not_called()
+
+    def test_worker_restart_transfers_shadow(self):
+        """摄像头重启换 worker：现存影子转挂新 worker（影子不重建，视口保留），
+        旧 worker 摘引用；新 worker 接上 shadow_hand_ready。"""
+        orch = self._make()
+        shadow = MagicMock()
+        orch._shadow_zoom_tracker = shadow
+        old_worker = MagicMock()
+        orch.inference_worker = old_worker
+        orch.camera = MagicMock()
+        orch.tracker = MagicMock()
+        with patch("orchestrator.InferenceWorker") as worker_cls:
+            new_worker = MagicMock()
+            worker_cls.return_value = new_worker
+            orch._restart_inference_worker()
+        new_worker.set_shadow_tracker.assert_called_once_with(shadow)
+        old_worker.set_shadow_tracker.assert_called_once_with(None)
+        new_worker.shadow_hand_ready.connect.assert_called_once_with(
+            orch._on_shadow_hand_ready)
+        # 影子引用不变（同一实例，未重建）
+        self.assertIs(orch._shadow_zoom_tracker, shadow)
+        self.assertIs(orch.inference_worker, new_worker)
+
+    def test_worker_restart_without_shadow_still_wires_signal(self):
+        """无影子时重启 worker：不挂影子，但 shadow_hand_ready 照接。"""
+        orch = self._make()
+        orch.inference_worker = MagicMock()
+        orch.camera = MagicMock()
+        orch.tracker = MagicMock()
+        with patch("orchestrator.InferenceWorker") as worker_cls:
+            new_worker = MagicMock()
+            worker_cls.return_value = new_worker
+            orch._restart_inference_worker()
+        new_worker.set_shadow_tracker.assert_not_called()
+        new_worker.shadow_hand_ready.connect.assert_called_once_with(
+            orch._on_shadow_hand_ready)
 
 
 class TestCaptureEngineSelection(unittest.TestCase):

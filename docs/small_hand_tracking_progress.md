@@ -75,19 +75,23 @@
 
 新增生产组件（2026-10-11）：
 
-- [zoom_shadow_confirm.py](D:/airControl/app/services/zoom_shadow_confirm.py)：纯算法确认状态机，协议与探针完全一致（开窗=同帧双新鲜+影子手腕距捕获手 bbox 中心 ≤0.75×捕获手跨度；自持=连续 window-1 帧影子新鲜且自身手腕连续 ≤0.75×影子跨度；非新鲜帧挂起等待，新鲜帧跳变关窗；晋升门槛=confirmations≥1 且 0<bbox_ratio<near_bbox_ratio，近距大目标不晋升）。重播种判定也在此：miss≥reseed_miss_frames 且当帧捕获新鲜时给出 (bbox 中心, hint 尺寸)，消费方一步落位影子视口（不走 EMA）。
-- InferenceWorker：`shadow_hand_ready` 独立信号（不占主结果反压槽位）；CAPTURE 态若有影子，主检测后在同一帧上跑影子 `find_hands`，异常单帧跳过不中断。
-- Orchestrator：CAPTURE 重建落地（`_on_tracker_swapped`）后启动影子（后台线程构建，签名=mediapipe+long_range）；`_on_frame_ready` 缓存同帧捕获器输出，`_on_shadow_hand_ready` 喂确认机。晋升（`_promote_shadow_zoom`）时影子**免重建成为主 tracker**（其视口/平滑器状态即接续状态），FSM 落 FAR_TRACK，request_id 抬升使任何在途重建自弃，保留 YOLO 预热。FSM 离开 CAPTURE（FAR_TRACK/NEAR）、config 关闭、close() 均撤影子。
+- [zoom_shadow_confirm.py](D:/airControl/app/services/zoom_shadow_confirm.py)：纯算法确认状态机，协议与探针一致（开窗=同帧双新鲜+影子手腕距捕获手 bbox 中心 ≤0.75×捕获手跨度；自持=连续 window-1 帧影子新鲜且自身手腕连续 ≤0.75×影子跨度；非新鲜帧挂起等待，新鲜帧跳变关窗；晋升门槛=confirmations≥1 且 0<bbox_ratio<near_bbox_ratio，近距大目标不晋升）。视口播种判定也在此，三条路径：冷启动（影子未开 ZOOM 时首个新鲜捕获位置一步落位——真远距小手全帧检不出、ZOOM miss 永不累计，不播种会死锁无输出）、失检（miss≥reseed_miss_frames 救窗口塌缩）、ZOOM OFF 下降沿（探针 zoom_reset 另一半条件；边沿非电平防抖）。播种 hint 与 `_compute_hint_from_landmarks` 同型（bbox 中心 + max(宽,高)）。
+- InferenceWorker：`shadow_hand_ready` 独立信号（不占主结果反压槽位）；CAPTURE 态若有影子，主检测后在同一帧上跑影子 `find_hands`，异常单帧跳过不中断。`update_tracker` 新增 `skip_migration` 参数：影子晋升免迁移——从捕获器迁移会把 `_crop_zoom_mode=False` 等状态覆写影子的接续视口，恰好摧毁免重建交接的价值。
+- Orchestrator：CAPTURE 重建落地（`_on_tracker_swapped`）后启动影子（后台线程构建，签名=mediapipe+long_range）；`_on_frame_ready` 缓存同帧捕获器输出，`_on_shadow_hand_ready` 喂确认机。晋升（`_promote_shadow_zoom`）时影子**免重建成为主 tracker**（其视口/平滑器状态即接续状态），FSM 落 FAR_TRACK，request_id 抬升使任何在途重建自弃，保留 YOLO 预热。FSM 离开 CAPTURE（FAR_TRACK/NEAR）、config 关闭、close() 均撤影子；摄像头重启（`_restart_inference_worker`）把现存影子转挂新 worker。
 - 配置（默认全关，实机验收通过前不默认启用）：`shadow_zoom_handoff_enabled`（false）、`shadow_zoom_reseed_miss_frames`（2）、`shadow_zoom_confirm_window_frames`（5）。
 
 生产代码与探针的两处语义对齐修正（接入时发现）：确认几何一致与重播种的参考点从"捕获手腕"改为探针实际使用的"捕获手 bbox 中心"（`_compute_hint_from_landmarks` 同型），重播种尺寸用 max(宽,高) 而非对角跨度——与视口播种语义一致。
 
-测试：[test_zoom_shadow_confirm.py](D:/airControl/tests/test_zoom_shadow_confirm.py)（12 项：开窗/自持/挂起/跳变/重播种/晋升门槛/参数钳制），test_engine_auto_switcher.py 新增 TestShadowZoomHandoff（17 项：启用门控、签名、启动幂等、构建安装、卸载、晋升 request_id、在途重建自弃、FSM 离开撤影子、config 关闭、close 阻断、确认后晋升端到端）。全套 731 项通过。
+测试：[test_zoom_shadow_confirm.py](D:/airControl/tests/test_zoom_shadow_confirm.py)（16 项：开窗/自持/挂起/跳变/冷启动播种/失检重播种/ZOOM OFF 边沿/晋升门槛/参数钳制），test_engine_auto_switcher.py 新增 TestShadowZoomHandoff（17 项：启用门控、签名、启动幂等、构建安装、卸载、晋升 request_id、在途重建自弃、FSM 离开撤影子、config 关闭、close 阻断、确认后晋升端到端）。全套 734 项通过。
+
+**应用回放验证（AC-trae raw_capture 录像，pose_yaw180_far 冒烟）**：`shadow_zoom` 变体（run_application 接上生产确认路径：shadow_hand_ready 信号、同帧捕获缓存、回放时钟绑定影子 MP 时间戳）在帧 43 晋升 FAR_TRACK——`current` 变体同段 99 帧全停在 CAPTURE（远距小手凑不满 30 帧稳定判据的反例，被影子路径救回）。晋升后手腕轨迹连续（679→624 缓动，无跳变）；与探针影子轨迹对照仅 2 帧 >30px 偏移且为同手小幅偏移（帧 72-73 手向右上移动，app 跟随更贴近）；操作事件完全一致（left_down/left_up/right_click 各 1，无操作退步）。
+
+回放暴露的**新设计边界（晋升后探针供应消失）**：探针在影子 miss≥2 时总有捕获位置可重播种（帧 59 crop 116→99 一步救回，60-67 帧保持新鲜）；生产晋升后影子成为主 tracker，CAPTURE 侧已撤——57-64 帧生产靠 ZOOM 视口自然收缩（crop 114→118）没有全丢，65-68 到 10 帧 miss 阈值 ZOOM OFF 回全帧，69 帧全帧回退恢复。生产比探针多丢 9 帧，全部在晋升后；这是"晋升后退化到既有 FAR_TRACK 行为"的已知边界，由 30 帧丢手回 CAPTURE 兜底。若后续要填平，方向是 FAR_TRACK 内的视口自愈（与探针供应无关的路径），不在本轮。
 
 边界与残留：
 
 - 影子与捕获器串行跑在同一推理线程，帧龄为两者之和（离线 P50 76.6+73 ≈ 150ms 量级，需实机以帧龄口径验收，这正是实机验收条件）。
-- 全部验证仍在回放口径；实机验收（操作不退步、帧龄 P95≤150ms）是通过采用前的必要条件，默认关闭。
+- 实机验收（操作不退步、帧龄 P95≤150ms）是默认启用前的必要条件；回放验证（应用语义层）冒烟已过，全量 17 段对照进行中。
 - 确认协议只证几何一致与自持，不证身份真值；晋升后若跟错手，FAR_TRACK 既有 30 帧稳定判据的退出路径（丢手回 CAPTURE）仍然有效。
 
 ## 10 月 11 日：同手编号连续性与交接实验

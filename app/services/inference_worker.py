@@ -33,6 +33,7 @@ class InferenceWorker(QThread):
         self._pending_tracker = None
         self._pending_tracker_context = None
         self._pending_tracker_seed_crop_zoom = False
+        self._pending_tracker_skip_migration = False
         self._pending_tracker_lock = threading.Lock()
         self._retired_pending_trackers = []
         self._accept_tracker_updates = True
@@ -182,9 +183,11 @@ class InferenceWorker(QThread):
             pending_tracker = self._pending_tracker
             pending_context = self._pending_tracker_context
             seed_crop_zoom = self._pending_tracker_seed_crop_zoom
+            skip_migration = self._pending_tracker_skip_migration
             self._pending_tracker = None
             self._pending_tracker_context = None
             self._pending_tracker_seed_crop_zoom = False
+            self._pending_tracker_skip_migration = False
             retired_pending = self._retired_pending_trackers
             self._retired_pending_trackers = []
         with self.lock:
@@ -193,14 +196,15 @@ class InferenceWorker(QThread):
                 self._close_tracker(retired, "关闭被替换的 pending tracker 失败")
             if pending_tracker is not None:
                 old_tracker = self.tracker
-                migrate = getattr(pending_tracker, "migrate_state_from", None)
-                if callable(migrate) and old_tracker is not None:
-                    try:
-                        migrate(old_tracker)
-                    except Exception:
-                        logger.exception(
-                            "tracker 状态迁移失败（非致命，继续使用新 tracker）"
-                        )
+                if not skip_migration:
+                    migrate = getattr(pending_tracker, "migrate_state_from", None)
+                    if callable(migrate) and old_tracker is not None:
+                        try:
+                            migrate(old_tracker)
+                        except Exception:
+                            logger.exception(
+                                "tracker 状态迁移失败（非致命，继续使用新 tracker）"
+                            )
                 seeded = False
                 if seed_crop_zoom:
                     seed = getattr(
@@ -319,8 +323,14 @@ class InferenceWorker(QThread):
             self._frame_count = 0
             self._fps_start_time = current_time
 
-    def update_tracker(self, new_tracker, context=None, seed_crop_zoom=False):
-        """Queue an atomic worker-owned migration and tracker swap."""
+    def update_tracker(self, new_tracker, context=None, seed_crop_zoom=False,
+                       skip_migration=False):
+        """Queue an atomic worker-owned migration and tracker swap.
+
+        skip_migration=True 用于影子 ZOOM 晋升：新 tracker（影子）自己的
+        视口/平滑器状态就是要保留的接续状态，从旧 tracker（捕获器）迁移
+        反而会覆写摧毁它。
+        """
         close_immediately = None
         with self._pending_tracker_lock:
             if not self._accept_tracker_updates:
@@ -347,6 +357,7 @@ class InferenceWorker(QThread):
                 self._pending_tracker = new_tracker
                 self._pending_tracker_context = context
                 self._pending_tracker_seed_crop_zoom = bool(seed_crop_zoom)
+                self._pending_tracker_skip_migration = bool(skip_migration)
         if close_immediately is not None:
             self._close_tracker(
                 close_immediately,

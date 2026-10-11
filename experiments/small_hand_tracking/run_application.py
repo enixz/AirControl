@@ -80,7 +80,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--clips", nargs="+", required=True)
-    parser.add_argument("--variants", nargs="+", choices=("current", "before_fixes", "no_sr", "always_zoom", "responsive_crop", "responsive_auto", "identity_continuity", "capture_handoff"), default=["current", "no_sr"])
+    parser.add_argument("--variants", nargs="+", choices=("current", "before_fixes", "no_sr", "always_zoom", "responsive_crop", "responsive_auto", "identity_continuity", "capture_handoff", "shadow_zoom"), default=["current", "no_sr"])
     parser.add_argument("--baseline-snapshot", help="Verified run directory with the pre-fix application methods")
     parser.add_argument("--mode", choices=("mouse", "draw", "presentation"), required=True)
     parser.add_argument("--recordings-root", default="D:/AC-trae/raw_capture")
@@ -147,6 +147,8 @@ def main():
                     effective["experiment_identity_continuity"] = True
                 elif variant == "capture_handoff":
                     effective["experiment_capture_handoff"] = True
+                elif variant == "shadow_zoom":
+                    effective.update(shadow_zoom_handoff_enabled=True)
                 print(f"START {clip}/{variant} mode={args.mode}", flush=True)
                 context = nullcontext()
                 if variant == "before_fixes":

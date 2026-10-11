@@ -656,7 +656,7 @@ class AirControlOrchestrator(QObject):
                 return
             worker = getattr(self, "inference_worker", None)
             if (self._closing or not self._shadow_zoom_enabled()
-                    or worker is None or not worker.isRunning()):
+                    or worker is None):
                 self._close_tracker_safely(shadow, "影子未投递即失效")
                 return
             self._shadow_zoom_tracker = shadow
@@ -715,7 +715,8 @@ class AirControlOrchestrator(QObject):
         }
         self._engine_switch_pending = False
         accepted = worker.update_tracker(shadow, context=context,
-                                         seed_crop_zoom=False)
+                                         seed_crop_zoom=False,
+                                         skip_migration=True)
         if accepted is False:
             self._close_tracker_safely(shadow, "晋升投递失败，关闭影子")
             self._teardown_shadow_zoom()
@@ -746,11 +747,12 @@ class AirControlOrchestrator(QObject):
         if capture is None:
             return
         capture_hands, capture_gestures, capture_bbox_ratio = capture
+        shadow_zoom_on = bool(getattr(shadow, "_crop_zoom_mode", False))
         shadow_miss = int(getattr(shadow, "_zoom_miss_streak", 0))
         self._shadow_zoom_frame_seq += 1
         should_promote, should_reseed, reseed_hint = confirm.observe(
             capture_hands, capture_gestures, capture_bbox_ratio,
-            shadow_hands, shadow_gestures,
+            shadow_hands, shadow_gestures, shadow_zoom_on,
             shadow_miss, self._shadow_zoom_frame_seq,
         )
         if should_reseed and reseed_hint is not None:
@@ -1111,7 +1113,17 @@ class AirControlOrchestrator(QObject):
         new_worker.fps_updated.connect(self._on_fps_updated)
         new_worker.performance_updated.connect(self._on_performance_updated)
         new_worker.tracker_swapped.connect(self._on_tracker_swapped)
+        new_worker.shadow_hand_ready.connect(self._on_shadow_hand_ready)
         new_worker.start()
+        # 旧 worker 的影子引用随其实例一起退役：FSM 仍在 CAPTURE 时把现存
+        # 影子转挂到新 worker（影子 tracker 本身不重建，视口状态保留）；
+        # 非 CAPTURE 态本就不该有影子，摘引用即可。
+        old_worker = self.inference_worker
+        shadow = self._shadow_zoom_tracker
+        if shadow is not None:
+            new_worker.set_shadow_tracker(shadow)
+            if old_worker is not None:
+                old_worker.set_shadow_tracker(None)
         self.inference_worker = new_worker
 
     def apply_config(self):

@@ -96,6 +96,10 @@ class ApplicationReplay:
             owner.inference_worker._frame_interval = 0
             owner.inference_worker.tracker_swapped.connect(owner._on_tracker_swapped)
             owner.inference_worker.frame_ready.connect(self.process_result)
+            # 影子 ZOOM 确认晋升：生产接线（init_services 里 connect 的那个）在
+            # init_services 被本函数替换后不会运行，这里接上同款生产 handler，
+            # 使确认状态机在回放里真实走通（含冷启动播种与晋升交接）。
+            owner.inference_worker.shadow_hand_ready.connect(owner._on_shadow_hand_ready)
 
         def build_inline(owner, target, name, args=()):
             # Preserve production build/ready/update/swap methods, serialize only
@@ -171,6 +175,14 @@ class ApplicationReplay:
         # Calling the method that _on_frame_ready delegates to lets exceptions
         # fail the run rather than being swallowed by the UI callback.
         try:
+            # 影子确认状态机的同帧捕获输入：回放直连 _process_frame_results
+            # 绕过了 _on_frame_ready，这里补上同款缓存（bbox_ratio 同算）。
+            frame_h, frame_w = frame.shape[:2]
+            bbox_ratio = 0.0
+            if gestures:
+                bbox_ratio = float(gestures[0].get("bbox_area", 0.0)) \
+                    / max(frame_w * frame_h, 1)
+            self.app._last_capture_result = (hands, gestures, bbox_ratio)
             self.row["mode_switch_guard_active"] = self.clock.time() - self.app.mode_manager.last_mode_switch_time < 1.
             self.app._process_frame_results(frame, hands, gestures)
         except BaseException as exc:

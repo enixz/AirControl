@@ -39,7 +39,7 @@ def predicted_gesture():
 class TestZoomShadowConfirm(unittest.TestCase):
     def _observe(self, confirm, cap_hand=None, cap_gesture=None,
                   shadow_hand=None, shadow_gesture=None,
-                  bbox_ratio=0.001, miss=0, frame=0):
+                  bbox_ratio=0.001, miss=0, frame=0, zoom_on=True):
         """默认 None 表示"有新鲜手"，便于少参数调用。"""
         cap_hand = cap_hand or make_hand()
         cap_gesture = cap_gesture or fresh_gesture()
@@ -47,7 +47,7 @@ class TestZoomShadowConfirm(unittest.TestCase):
         shadow_gesture = shadow_gesture or fresh_gesture()
         return confirm.observe(
             [cap_hand], [cap_gesture], bbox_ratio,
-            [shadow_hand], [shadow_gesture], miss, frame,
+            [shadow_hand], [shadow_gesture], zoom_on, miss, frame,
         )
 
     # ------------------------------------------------------------------
@@ -80,10 +80,10 @@ class TestZoomShadowConfirm(unittest.TestCase):
         """空输出不算新鲜。"""
         confirm = ZoomShadowConfirm(confirm_window_frames=5)
         confirm.observe([], [], 0.001, [make_hand(wrist=(120.0, 100.0))],
-                        [fresh_gesture()], 0, 0)
+                        [fresh_gesture()], True, 0, 0)
         self.assertEqual(confirm.confirm_remaining, 0)
         confirm.observe([make_hand()], [fresh_gesture()], 0.001, [], [],
-                        0, 1)
+                        True, 0, 1)
         self.assertEqual(confirm.confirm_remaining, 0)
 
     # ------------------------------------------------------------------
@@ -132,8 +132,39 @@ class TestZoomShadowConfirm(unittest.TestCase):
         self.assertEqual(confirm.confirm_remaining, 4)
 
     # ------------------------------------------------------------------
-    # 重播种
+    # 视口播种（冷启动 / 失检重播种 / ZOOM OFF 边沿）
     # ------------------------------------------------------------------
+
+    def test_cold_start_seeds_once(self):
+        """冷启动：影子未开 ZOOM 时首个新鲜捕获位置播种，且只播一次。"""
+        confirm = ZoomShadowConfirm()
+        _, reseed, hint = self._observe(confirm, zoom_on=False)
+        self.assertTrue(reseed)
+        self.assertIsNotNone(hint)
+        self.assertTrue(confirm.seeded)
+        # 已播种且仍无 ZOOM：不再重复播（等影子自己把 ZOOM 开起来）
+        _, reseed, hint = self._observe(confirm, zoom_on=False, miss=0)
+        self.assertFalse(reseed)
+
+    def test_cold_start_seeding_survives_until_shadow_zooms(self):
+        """已播种但影子还没开 ZOOM 期间 miss 不触发额外播种（防抖）。"""
+        confirm = ZoomShadowConfirm(reseed_miss_frames=2)
+        self._observe(confirm, zoom_on=False)  # 冷启动播种
+        _, reseed, _ = self._observe(confirm, zoom_on=False, miss=1)
+        self.assertFalse(reseed)
+        # miss 达阈值仍播种（救塌缩优先于防抖）
+        _, reseed, _ = self._observe(confirm, zoom_on=False, miss=2)
+        self.assertTrue(reseed)
+
+    def test_zoom_off_edge_reseeds(self):
+        """ZOOM ON→OFF 下降沿触发重播种（探针 zoom_reset 另一半条件）。"""
+        confirm = ZoomShadowConfirm()
+        self._observe(confirm, zoom_on=True)   # last_zoom_on=True
+        _, reseed, _ = self._observe(confirm, zoom_on=False)
+        self.assertTrue(reseed)
+        # OFF 电平持续不再触发（边沿非电平）
+        _, reseed, _ = self._observe(confirm, zoom_on=False)
+        self.assertFalse(reseed)
 
     def test_reseed_fires_at_miss_threshold(self):
         """miss ≥ reseed_miss_frames 且捕获新鲜 → 建议重播种。"""
@@ -207,6 +238,9 @@ class TestZoomShadowConfirm(unittest.TestCase):
         self.assertEqual(confirm.confirmations, 0)
         self.assertIsNone(confirm.last_confirmed_wrist)
         self.assertIsNone(confirm.confirmed_frame)
+        # 会话簿记一并重置：新影子段可重新冷启动播种
+        self.assertFalse(confirm.seeded)
+        self.assertFalse(confirm.last_zoom_on)
 
     # ------------------------------------------------------------------
     # 参数约束
