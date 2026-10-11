@@ -4,6 +4,19 @@
 
 已完成 17 段现有录像、板书与鼠标两种初始模式的 68 组对照，随后新增 34 组同手改编号修复复测。当前修复恢复了 20 个不同录像帧，无新增无新鲜主手输出，预测清屏从 4 次降为 0 次；同手改编号不再重置鼠标按下历史。189 项相关测试通过。提前交给 ZOOM 的候选出现新增缺失，未采用；影子 ZOOM 确认晋升已按三步实验证据接入生产（默认关闭，详见 10 月 11 日第 4 步节），并完成 17 段 AC-trae 录像全量 A/B 应用回放验证（总覆盖持平、近距不受影响、无一跟错手、反例段被救回）；实机验收仍未完成。
 
+## 10 月 11 日：实机验收前置——帧龄观测补齐
+
+实机验收判据（帧龄 P95≤150ms）此前无可测口径：app 只有 capture/queue/inference/total 分段计时，缺「采集→主线程消费」的端到端帧龄；影子耗时混在 inference 里无法单独核算。本次补齐（不改任何识别/跟踪逻辑，纯观测）：
+
+- `frame_ready` 信号增加第 5 参数 `captured_at`（采集线程 perf_counter 时钟，read_frame 完成时刻随帧透传）；`_on_frame_ready` 消费时算端到端帧龄写入 worker 的 `frame_age_ms` 样本（`record_frame_age` / `frame_age_percentile`）。
+- worker `performance_updated` metrics 新增 `shadow_p50/p95_ms`（只统计影子真实运行的帧，无影子帧不记 0 防稀释分位数）、`frame_age_p50/p95_ms`、`dropped_results`（主结果背压槽满被丢的累计帧数）。
+- `[PERF]` 日志行扩展为 `... | shadow=p50/p95 | 帧龄=p50/p95 | 丢弃=n`；晋升日志补「影子已跑 N 帧」（确认达成耗时的证据链）。
+- 回放器 `process_result` 增加 `captured_at=None` 兼容参数（回放用录像时间，不走帧龄）。
+
+验证：新增 2 项 worker 测试（captured_at 透传/帧龄入队、背压丢弃计数/影子耗时样本语义）；全套 736 项通过。回放工具链冒烟（pose_yaw180_far 60 帧，current/shadow_zoom 双变体）：帧 43 晋升与 A/B 基线一致，信号签名变更未破坏回放路径。
+
+验收操作与判读规程见 [shadow_zoom_acceptance.md](shadow_zoom_acceptance.md)。
+
 本轮全部修复与实验工具已按主题提交入库（40c7690 / ac0fbb1 / 52c7d89 / 9c7ff72 / e6152fd），SR 直通路径补齐 3 项回归，全套 702 项测试通过。
 
 ## 10 月 11 日：影子 ZOOM 试跟踪确认（第 1 步）

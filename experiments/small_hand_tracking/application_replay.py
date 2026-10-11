@@ -178,7 +178,8 @@ class ApplicationReplay:
     def on_processed(self, frame, hands, gestures, gesture):
         self.row["mode_gesture"] = gesture
 
-    def process_result(self, frame, hands, gestures, worker):
+    def process_result(self, frame, hands, gestures, worker, captured_at=None):
+        # captured_at：离线回放无采集时刻，忽略（回放用录像时间，不走帧龄）。
         # Calling the method that _on_frame_ready delegates to lets exceptions
         # fail the run rather than being swallowed by the UI callback.
         try:

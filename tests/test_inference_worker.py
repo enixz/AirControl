@@ -321,6 +321,45 @@ class TestInferenceWorker(unittest.TestCase):
         self.assertEqual(len(shadow_calls), 1)
         self.assertIsNotNone(shadow_calls[0])
 
+    def test_frame_ready_carries_captured_at_for_frame_age(self):
+        """frame_ready 随帧透传 captured_at（perf_counter 时钟），主线程用
+        它算端到端帧龄（验收口径，见 docs/shadow_zoom_acceptance.md）。"""
+        frame = np.zeros((2, 2, 3), dtype=np.uint8)
+        worker = InferenceWorker(camera=None, tracker=FakeTracker())
+        received = []
+
+        def on_frame(source_frame, hands, gestures, source, captured_at):
+            received.append((source, captured_at))
+
+        worker.frame_ready.connect(on_frame)
+        captured_at = time.perf_counter()
+        with patch.object(worker, "_update_fps"):
+            worker._process_frame(frame, 0.0, captured_at)
+        self.assertEqual(len(received), 1)
+        self.assertIs(received[0][0], worker)
+        self.assertEqual(received[0][1], captured_at)
+
+        # record_frame_age / frame_age_percentile：样本入队、无样本返回 None
+        self.assertIsNone(worker.frame_age_percentile(0.95))
+        worker.record_frame_age(120.0)
+        worker.record_frame_age(140.0)
+        self.assertEqual(worker.frame_age_percentile(0.5), 120.0)
+
+    def test_backpressure_drop_counts_and_perf_metrics_include_shadow(self):
+        """背压槽占满时 _dropped_results 计数；performance metrics 含影子
+        耗时与丢帧计数（影子未跑时样本为空 deque，分位数为 0）。"""
+        worker = InferenceWorker(camera=None, tracker=FakeTracker())
+        self.assertTrue(worker._claim_result_slot())  # 占满唯一槽位
+        worker._record_performance(1.0, 1.0, 1.0, 1.0)
+        self.assertEqual(worker._dropped_results, 0)
+        # 第二帧被丢
+        frame = np.zeros((2, 2, 3), dtype=np.uint8)
+        with patch.object(worker, "_update_fps"):
+            worker._process_frame(frame, 0.0, time.perf_counter())
+        self.assertEqual(worker._dropped_results, 1)
+        # 影子耗时样本：跑了影子后 shadow_ms 非空
+        self.assertFalse(worker._shadow_ms)
+
     def test_skip_migration_keeps_pending_state(self):
         """skip_migration 提交后，换装段不执行 migrate_state_from（影子晋升
         保留自身接续状态），seed 也跳过。"""

@@ -731,7 +731,12 @@ class AirControlOrchestrator(QObject):
         self.status_color = (0, 255, 255)
         self.status_timer = time.time()
         self.status_updated.emit(self.status_text, self.status_color)
-        logger.info("影子 ZOOM 已确认并晋升 FAR_TRACK（无重建交接）")
+        # 验收观测：确认达成耗时（影子启动→晋升，CAPTURE 驻留的证据链）
+        confirm_seq = self._shadow_zoom_frame_seq
+        logger.info(
+            "影子 ZOOM 已确认并晋升 FAR_TRACK（无重建交接，影子已跑 %d 帧）",
+            confirm_seq,
+        )
         # 既有路径：MP 交接后预热下一轮 CAPTURE 的 YOLO 实例
         self._schedule_yolo_prewarm(delay_sec=0.5)
         if self._shadow_zoom_confirm is not None:
@@ -1395,8 +1400,14 @@ class AirControlOrchestrator(QObject):
     # Inference Callbacks & Processing
     # ------------------------------------------------------------------
 
-    def _on_frame_ready(self, frame, hands_landmarks, hands_gestures, worker=None):
+    def _on_frame_ready(self, frame, hands_landmarks, hands_gestures, worker=None,
+                        captured_at=None):
         try:
+            # 端到端帧龄：采集完成（worker 线程 perf_counter）→ 主线程消费。
+            # 与 worker 分段计时同源（同一单调时钟），满足实机验收口径
+            # （docs/shadow_zoom_acceptance.md：帧龄 P95≤150ms）。
+            if captured_at is not None and worker is not None:
+                worker.record_frame_age((time.perf_counter() - captured_at) * 1000.0)
             # 影子确认状态机的同帧捕获器输入：主结果先于影子结果被主线程
             # 消费（worker 同帧顺序发出两个 queued 信号），此处缓存供
             # _on_shadow_hand_ready 读取。
@@ -1444,7 +1455,8 @@ class AirControlOrchestrator(QObject):
     def _on_performance_updated(self, metrics):
         logging.getLogger("gesture").info(
             "[PERF] capture p50/p95=%.1f/%.1fms | queue=%.1f/%.1fms | "
-            "inference=%.1f/%.1fms | total=%.1f/%.1fms",
+            "inference=%.1f/%.1fms | total=%.1f/%.1fms | "
+            "shadow=%.1f/%.1fms | 帧龄=%.1f/%.1fms | 丢弃=%d",
             metrics.get("capture_p50_ms", 0.0),
             metrics.get("capture_p95_ms", 0.0),
             metrics.get("queue_p50_ms", 0.0),
@@ -1453,6 +1465,11 @@ class AirControlOrchestrator(QObject):
             metrics.get("inference_p95_ms", 0.0),
             metrics.get("total_p50_ms", 0.0),
             metrics.get("total_p95_ms", 0.0),
+            metrics.get("shadow_p50_ms", 0.0),
+            metrics.get("shadow_p95_ms", 0.0),
+            metrics.get("frame_age_p50_ms", 0.0),
+            metrics.get("frame_age_p95_ms", 0.0),
+            metrics.get("dropped_results", 0),
         )
 
     def _stabilize_gestures(self, hands_landmarks, hands_gestures):

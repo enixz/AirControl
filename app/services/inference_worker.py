@@ -15,8 +15,10 @@ class InferenceWorker(QThread):
     通过信号将结果发送到主线程处理模式逻辑和UI更新。
     """
 
-    # 信号：帧数据、手部关键点、手势识别结果、worker本身引用
-    frame_ready = pyqtSignal(object, list, list, object)
+    # 信号：帧数据、手部关键点、手势识别结果、worker本身引用、帧龄起点。
+    # captured_at（perf_counter 单调时钟，read_frame 完成时刻）随帧透传，
+    # 主线程消费时算端到端帧龄（实机验收口径，见 docs/shadow_zoom_acceptance.md）。
+    frame_ready = pyqtSignal(object, list, list, object, float)
     error_occurred = pyqtSignal(str)
     fps_updated = pyqtSignal(float)
     performance_updated = pyqtSignal(object)
@@ -62,6 +64,12 @@ class InferenceWorker(QThread):
         self._queue_ms = deque(maxlen=180)
         self._inference_ms = deque(maxlen=180)
         self._total_ms = deque(maxlen=180)
+        # 影子 ZOOM 旁路推理耗时（含在 inference 内，单列以核算影子成本）
+        self._shadow_ms = deque(maxlen=180)
+        # 端到端帧龄（采集完成→主线程消费），由 record_frame_age 记录
+        self._frame_age_ms = deque(maxlen=180)
+        # 主结果被背压槽丢弃的帧数（帧龄口径的丢帧证据）
+        self._dropped_results = 0
         self._last_performance_emit = time.monotonic()
 
     def run(self):
@@ -247,6 +255,7 @@ class InferenceWorker(QThread):
                 # 影子在干净帧上运行：主 tracker 的 draw=True 已把叠层原地
                 # 绘进 frame，直接喂会污染影子的裁剪输入。输出经
                 # shadow_hand_ready 信号交给主线程的确认状态机。
+                shadow_started = time.perf_counter()
                 try:
                     _, shadow_hands, shadow_gestures = shadow.find_hands(
                         clean_frame, draw=False,
@@ -254,6 +263,9 @@ class InferenceWorker(QThread):
                 except Exception:
                     logger.exception("影子 ZOOM 推理失败（本帧跳过）")
                     shadow_hands = shadow_gestures = None
+                # 只记影子真实运行的帧：无影子帧记 0 会稀释 P50/P95
+                self._shadow_ms.append(
+                    (time.perf_counter() - shadow_started) * 1000.0)
         inference_ms = (time.perf_counter() - inference_started) * 1000.0
 
         # 原始帧 + 检测元数据一起写入（meta 让 replay/analyze 能重建原始运行时识别点轨迹）
@@ -271,7 +283,10 @@ class InferenceWorker(QThread):
         # Qt 的 queued signal 没有天然背压。主线程忙时只保留一个待处理结果，
         # 避免旧帧持续堆积并放大端到端延迟。
         if self._claim_result_slot():
-            self.frame_ready.emit(frame, hands_landmarks, hands_gestures, self)
+            self.frame_ready.emit(
+                frame, hands_landmarks, hands_gestures, self, captured_at)
+        else:
+            self._dropped_results += 1
         # 影子结果走独立信号，不占用主结果背压槽：确认状态机只消费不驱动
         # 桌面操作，主线程丢弃一两帧影子结果不影响正确性。
         if shadow is not None:
@@ -311,10 +326,31 @@ class InferenceWorker(QThread):
             ("queue", self._queue_ms),
             ("inference", self._inference_ms),
             ("total", self._total_ms),
+            ("shadow", self._shadow_ms),
         ):
             metrics[f"{name}_p50_ms"] = self._percentile(values, 0.50)
             metrics[f"{name}_p95_ms"] = self._percentile(values, 0.95)
+        metrics["dropped_results"] = self._dropped_results
+        # 帧龄样本由主线程 record_frame_age 写入；无样本（刚启动/纯回放）时
+        # 省略，_on_performance_updated 以 0 兜底。
+        if self._frame_age_ms:
+            metrics["frame_age_p50_ms"] = self._percentile(
+                self._frame_age_ms, 0.50)
+            metrics["frame_age_p95_ms"] = self._percentile(
+                self._frame_age_ms, 0.95)
         self.performance_updated.emit(metrics)
+
+    def record_frame_age(self, age_ms):
+        """记录一帧主结果的端到端帧龄（采集完成→主线程消费，perf_counter 单调时钟）。
+
+        由 _on_frame_ready（主线程）在消费时调用；与 worker 的分段计时同源，
+        可直接与帧龄 P95≤150ms 验收线对照。回放器用录像时间，不走本方法。
+        """
+        self._frame_age_ms.append(float(age_ms))
+
+    def frame_age_percentile(self, fraction):
+        """读取帧龄分位数（验收读数；无样本时返回 None）。"""
+        return self._percentile(self._frame_age_ms, fraction) if self._frame_age_ms else None
 
     def _update_fps(self):
         """更新FPS计算"""
