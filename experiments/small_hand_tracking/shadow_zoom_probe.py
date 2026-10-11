@@ -34,7 +34,7 @@ CONFIRM_WINDOW_FRAMES = 5
 CONFIRM_MATCH_SPAN_RATIO = 0.75
 
 
-def shadow_zoom_probe(baseline, clip, destination):
+def shadow_zoom_probe(baseline, clip, destination, reseed_miss_frames):
     import cv2
     from services.hand_tracker import HandTracker
 
@@ -121,10 +121,12 @@ def shadow_zoom_probe(baseline, clip, destination):
                     "shadow_after": after_state,
                     "shadow_wall_ms": shadow_wall_ms,
                 }
-                # Shadow ZOOM miss (viewport reset or re-search) → capture
+                # Shadow ZOOM miss (viewport reset or miss streak) → capture
                 # re-seeds the viewport next frame, mirroring production intent.
+                # reseed_miss_frames: streak threshold at which a same-frame
+                # capture position may rewrite the stalled viewport (step 2).
                 zoom_reset = (before_state.get("zoom_on") and not after_state.get("zoom_on")) \
-                    or (after_state.get("zoom_miss_streak", 0) >= CONFIRM_WINDOW_FRAMES)
+                    or (after_state.get("zoom_miss_streak", 0) >= reseed_miss_frames)
                 if zoom_reset:
                     shadow_miss_frames += 1
                     if cap_fresh:
@@ -137,6 +139,7 @@ def shadow_zoom_probe(baseline, clip, destination):
                         tracker._current_crop_center = None
                         tracker._current_crop_size = None
                         reseed_events += 1
+                        entry["capture_reseeded"] = True
                 # Confirmation bookkeeping. A window opens only on a frame
                 # where BOTH engines produced fresh output and the shadow
                 # wrist geometrically agrees with the capture hand. It then
@@ -202,6 +205,7 @@ def shadow_zoom_probe(baseline, clip, destination):
                                "note": "includes model init/first-call warmup; not a live FPS baseline"},
             "shadow_zoom_miss_frames": shadow_miss_frames,
             "capture_reseed_events": reseed_events,
+            "reseed_miss_frames": reseed_miss_frames,
             "limits": "Geometric wrist agreement is not identity truth; shadow runs beside an archived "
                       "capture trace with same-frame re-seeds only; no FSM/mode/desktop effects measured.",
         }
@@ -218,10 +222,16 @@ if __name__ == "__main__":
     parser.add_argument("baseline", type=Path)
     parser.add_argument("destination", type=Path)
     parser.add_argument("--clips", nargs="+", required=True)
+    parser.add_argument("--reseed-miss-frames", type=int, default=5,
+                        help="shadow ZOOM miss streak at which a same-frame capture "
+                             "position may rewrite the stalled viewport (step-2 knob)")
     args = parser.parse_args()
     for clip in args.clips:
         if Path(clip).name != clip or clip in (".", ".."):
             parser.error("clips must be directory names")
+    if args.reseed_miss_frames < 1:
+        parser.error("reseed-miss-frames must be >= 1")
     logging.basicConfig(level=logging.WARNING)
     for clip in args.clips:
-        print(json.dumps(shadow_zoom_probe(args.baseline, clip, args.destination / clip), ensure_ascii=True), flush=True)
+        print(json.dumps(shadow_zoom_probe(args.baseline, clip, args.destination / clip,
+                                           args.reseed_miss_frames), ensure_ascii=True), flush=True)
