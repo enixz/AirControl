@@ -16,6 +16,8 @@ import cv2
 import numpy as np
 from runtime_paths import resource_path
 
+from .gpu_guard import gpu_lock
+
 # SR 只在 crop 小于此值时介入。依据（三方数据一致）：
 # - MediaPipe 掌检测器内部输入 192×192、关键点模型 224×224、YOLO letterbox 640，
 #   crop ≥ 192 时任何先行放大都被内部重采样抵消；
@@ -71,16 +73,18 @@ class SREngine:
         """
         if not self._sr_initialized:
             return
-        for attr in ("_realesrgan_cpu_session", "_realesrgan_gpu_session"):
-            sess = getattr(self, attr, None)
-            if sess is not None:
-                try:
-                    del sess
-                except Exception:
-                    pass
-                setattr(self, attr, None)
-        self._espcn_engine = None
-        self._sr_initialized = False
+        # GPU 串行门：session 析构释放 DML 资源，与推理线程并发同样危险
+        with gpu_lock():
+            for attr in ("_realesrgan_cpu_session", "_realesrgan_gpu_session"):
+                sess = getattr(self, attr, None)
+                if sess is not None:
+                    try:
+                        del sess
+                    except Exception:
+                        pass
+                    setattr(self, attr, None)
+            self._espcn_engine = None
+            self._sr_initialized = False
 
     def reset_tier(self):
         """清空 auto 档位与日志去重状态。
@@ -130,10 +134,14 @@ class SREngine:
                 self._detect_gpu_availability()
             if self._realesrgan_gpu_available and self._realesrgan_gpu_provider:
                 try:
-                    sess = ort.InferenceSession(
-                        self._realesrgan_path,
-                        providers=[self._realesrgan_gpu_provider, "CPUExecutionProvider"],
-                    )
+                    # GPU 串行门：session 创建与任何线程的 DML 推理并发会
+                    # 原生崩溃（2026-10-12 实机 crash，见 gpu_guard）
+                    with gpu_lock():
+                        sess = ort.InferenceSession(
+                            self._realesrgan_path,
+                            providers=[self._realesrgan_gpu_provider,
+                                       "CPUExecutionProvider"],
+                        )
                     self._realesrgan_gpu_session = sess
                     self._realesrgan_input_name = sess.get_inputs()[0].name
                     self._logger.info(
@@ -305,7 +313,10 @@ class SREngine:
             batch = np.stack(tiles, axis=0).astype(np.float32) / 255.0  # (N,64,64,3)
             batch = np.transpose(batch, (0, 3, 1, 2))                   # (N,3,64,64)
 
-            out = session.run(None, {input_name: batch})[0]            # (N,3,h,w)
+            # GPU 串行门：DML session.run 与其他线程的 session 创建并发时
+            # 原生崩溃（2026-10-12 实机 crash：YOLO 预热撞上 SR 推理）
+            with gpu_lock():
+                out = session.run(None, {input_name: batch})[0]         # (N,3,h,w)
             out = np.clip(out * 255.0, 0, 255).astype(np.uint8)
             out = np.transpose(out, (0, 2, 3, 1))                      # (N,h,w,3)
 

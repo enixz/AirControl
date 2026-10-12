@@ -37,6 +37,7 @@ import os
 import cv2
 import numpy as np
 
+from .gpu_guard import gpu_lock
 from .hagrid_yolo_hand_tracker import HagridYoloHandTracker
 
 _logger = logging.getLogger("gesture")
@@ -289,7 +290,9 @@ class PersonPoseHandTracker(HagridYoloHandTracker):
         if "CUDAExecutionProvider" in available:
             providers.append("CUDAExecutionProvider")
         providers.append("CPUExecutionProvider")
-        session = ort.InferenceSession(pose_path, providers=providers)
+        # GPU 串行门：session 创建并发 DML 推理会原生崩溃（见 gpu_guard）
+        with gpu_lock():
+            session = ort.InferenceSession(pose_path, providers=providers)
         _logger.info("[pose] ONNX session providers: %s", session.get_providers())
         return session
 
@@ -304,7 +307,9 @@ class PersonPoseHandTracker(HagridYoloHandTracker):
         input_img, ratio, (pad_w, pad_h) = self._letterbox(frame_bgr, _POSE_INPUT_SIZE)
         input_img = cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         input_img = np.transpose(input_img, (2, 0, 1))[np.newaxis, ...]
-        outputs = self._pose_session.run(None, {self._pose_input_name: input_img})
+        with gpu_lock():
+            outputs = self._pose_session.run(
+                None, {self._pose_input_name: input_img})
         return self._parse_pose_output(outputs, ratio, pad_w, pad_h, w, h)
 
     def _parse_pose_output(self, outputs, ratio, pad_w, pad_h, orig_w, orig_h):

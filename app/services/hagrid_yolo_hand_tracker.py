@@ -37,6 +37,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 from .base_hand_tracker import BaseHandTracker
+from .gpu_guard import gpu_lock
 
 _logger = logging.getLogger("gesture")
 
@@ -243,7 +244,11 @@ class HagridYoloHandTracker(BaseHandTracker):
             providers.append("CUDAExecutionProvider")
         providers.append("CPUExecutionProvider")
 
-        session = ort.InferenceSession(self._yolo_model_path, providers=providers)
+        # GPU 串行门：session 创建若与推理线程的 DML session.run 并发，
+        # DirectML 运行时原生崩溃（见 gpu_guard 模块说明）。
+        with gpu_lock():
+            session = ort.InferenceSession(
+                self._yolo_model_path, providers=providers)
         actual = session.get_providers()
         _logger.info("[YOLO] ONNX session providers: %s", actual)
         return session
@@ -268,8 +273,10 @@ class HagridYoloHandTracker(BaseHandTracker):
         input_img = np.transpose(input_img, (2, 0, 1))
         input_img = np.expand_dims(input_img, axis=0)
 
-        # 推理
-        outputs = self._yolo_session.run(None, {self._yolo_input_name: input_img})
+        # 推理（GPU 串行门：DML session 跨线程并发即原生崩溃，见 gpu_guard）
+        with gpu_lock():
+            outputs = self._yolo_session.run(
+                None, {self._yolo_input_name: input_img})
 
         # 后处理：解析输出
         bboxes = self._parse_yolo_output(outputs, ratio, pad_w, pad_h, w, h)
