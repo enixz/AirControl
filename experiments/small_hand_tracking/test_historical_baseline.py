@@ -1,10 +1,9 @@
 import json
-from pathlib import Path
 
 import pytest
 
-from .historical_baseline import before_fixes
 from .application_replay import application_time
+from .historical_baseline import before_fixes
 from .replay import ROOT, ReplayClock
 from .run_replay import read_metadata
 
@@ -27,8 +26,8 @@ def test_historical_method_clock_and_exception_restore():
     if not snapshot.exists():
         pytest.skip("Local source snapshot not available")
     from modes.draw_mode import DrawMode
-    from services.base_hand_tracker import BaseHandTracker
     from modes.mouse_mode import MouseMode
+    from services.base_hand_tracker import BaseHandTracker
     original_draw, original_assign = DrawMode.handle, BaseHandTracker._assign_smoother_keys
     original_mouse = MouseMode.handle
     clock = ReplayClock()

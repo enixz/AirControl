@@ -1,6 +1,6 @@
 """Verify real application wiring with deterministic detection, no native models."""
-from copy import deepcopy
 import time
+from copy import deepcopy
 
 import numpy as np
 import pytest
@@ -11,9 +11,9 @@ from .replay import ReplayClock
 
 @pytest.fixture
 def application_fixture(monkeypatch, tmp_path):
-    from PyQt6.QtCore import QCoreApplication
     import orchestrator
     from config_manager import ConfigManager
+    from PyQt6.QtCore import QCoreApplication
     from services.base_hand_tracker import BaseHandTracker
 
     qt = QCoreApplication.instance() or QCoreApplication([])
@@ -110,8 +110,10 @@ def test_private_config_mode_switch_never_saves_input(application_fixture):
 
 def test_responsive_crop_changes_center_but_preserves_size(application_fixture):
     from contextlib import ExitStack
-    from .responsive_crop import install_responsive_crop
+
     import orchestrator
+
+    from .responsive_crop import install_responsive_crop
     config, _ = application_fixture
     tracker = orchestrator.create_hand_tracker(config=config, dominant_hand="Auto")
     tracker._crop_zoom_mode = True
@@ -130,8 +132,10 @@ def test_responsive_crop_changes_center_but_preserves_size(application_fixture):
 @pytest.mark.parametrize("separation,retired", [(400., True), (15., False)])
 def test_identity_retires_alias_only_with_clear_separation(application_fixture, separation, retired):
     from contextlib import ExitStack
-    from .identity_continuity import install_identity_continuity
+
     import orchestrator
+
+    from .identity_continuity import install_identity_continuity
     config, _ = application_fixture
     tracker = orchestrator.create_hand_tracker(config=config, dominant_hand="Auto")
     tracker._prev_wrist_keys = [((100., 100.), "Primary")]
@@ -148,8 +152,10 @@ def test_identity_retires_alias_only_with_clear_separation(application_fixture, 
 
 def test_identity_does_not_promote_secondary_after_primary_loss(application_fixture):
     from contextlib import ExitStack
-    from .identity_continuity import install_identity_continuity
+
     import orchestrator
+
+    from .identity_continuity import install_identity_continuity
     config, _ = application_fixture
     tracker = orchestrator.create_hand_tracker(config=config, dominant_hand="Auto")
     tracker._prev_wrist_keys = [((100., 100.), "Primary"), ((500., 100.), "Right")]

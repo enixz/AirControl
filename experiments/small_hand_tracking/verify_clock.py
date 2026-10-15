@@ -38,9 +38,12 @@ def main():
     rec = Path("D:/AC-trae/raw_capture") / args.clip
     for name, delay in (("no_delay", 0), ("delayed", 15)):
         run_clip(rec, destination / name, config, args.frames, delay)
-    load = lambda name: [semantics(json.loads(x)) for x in (destination / name / "predictions.jsonl").read_text(encoding="utf-8").splitlines()]
+
+    def load(name):
+        return [semantics(json.loads(x)) for x in (destination / name / "predictions.jsonl").read_text(encoding="utf-8").splitlines()]
+
     first, second = load("no_delay"), load("delayed")
-    differing = [i for i, (a, b) in enumerate(zip(first, second)) if a != b]
+    differing = [i for i, (a, b) in enumerate(zip(first, second, strict=False)) if a != b]
     result = {"frames": len(first), "exact_semantic_match": first == second, "differing_frames": differing,
               "delay_per_frame_ms": 15, "config_unchanged": before == sha(config_path),
               "compared": "Raw/processed landmarks, freshness, identity, source/model times, crop state, SR tier and transitions; performance durations excluded"}

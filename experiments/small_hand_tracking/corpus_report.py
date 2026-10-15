@@ -1,8 +1,8 @@
 """Aggregate completed before/current pairs without calling coverage accuracy."""
 import argparse
-from collections import Counter
 import json
 import math
+from collections import Counter
 from pathlib import Path
 
 from .run_replay import write_json
@@ -36,32 +36,41 @@ def compare(clip, mode, before_dir, after_dir):
     before, after = records(before_dir / "predictions.jsonl"), records(after_dir / "predictions.jsonl")
     assert len(before) == len(after)
     assert [r["source_timestamp"] for r in before] == [r["source_timestamp"] for r in after]
-    recovered = [i for i, (a, b) in enumerate(zip(before, after)) if not fresh(a) and fresh(b)]
-    lost = [i for i, (a, b) in enumerate(zip(before, after)) if fresh(a) and not fresh(b)]
-    counts = lambda rows: dict(Counter(f'{e["sink"]}.{e["method"]}' for r in rows for e in r["operation_events"]))
-    strokes = lambda r: [e for e in r["operation_events"] if e["method"] in ("draw_to", "force_lift_pen")]
-    mouse = lambda r: [e for e in r["operation_events"] if e["sink"] == "mouse"]
-    nonfresh_clears = lambda rows: [r["frame_index"] for r in rows if not fresh(r) and any(e["method"] == "clear_canvas" for e in r["operation_events"])]
+    recovered = [i for i, (a, b) in enumerate(zip(before, after, strict=True)) if not fresh(a) and fresh(b)]
+    lost = [i for i, (a, b) in enumerate(zip(before, after, strict=True)) if fresh(a) and not fresh(b)]
+
+    def counts(rows):
+        return dict(Counter(f'{e["sink"]}.{e["method"]}' for r in rows for e in r["operation_events"]))
+
+    def strokes(r):
+        return [e for e in r["operation_events"] if e["method"] in ("draw_to", "force_lift_pen")]
+
+    def mouse(r):
+        return [e for e in r["operation_events"] if e["sink"] == "mouse"]
+
+    def nonfresh_clears(rows):
+        return [r["frame_index"] for r in rows if not fresh(r) and any(e["method"] == "clear_canvas" for e in r["operation_events"])]
+
     structure_changed, coordinate_delta = [], 0.0
-    for i, (a, b) in enumerate(zip(before, after)):
+    for i, (a, b) in enumerate(zip(before, after, strict=True)):
         sa, sb = strokes(a), strokes(b)
         if [e["method"] for e in sa] != [e["method"] for e in sb]:
             structure_changed.append(i)
             continue
-        for ea, eb in zip(sa, sb):
+        for ea, eb in zip(sa, sb, strict=True):
             if ea["method"] == "draw_to":
                 coordinate_delta = max(coordinate_delta, math.dist(ea["args"][:2], eb["args"][:2]))
     return dict(clip=clip, initial_mode=mode, frames=len(after),
                 before_fresh=sum(map(fresh, before)), after_fresh=sum(map(fresh, after)),
                 recovered_frames=recovered, new_missing_frames=lost,
                 recovered_intervals=ranges(recovered), new_missing_intervals=ranges(lost),
-                raw_changed_frames=sum(a["raw_hands"] != b["raw_hands"] for a, b in zip(before, after)),
-                hands_changed_frames=sum(a["hands"] != b["hands"] for a, b in zip(before, after)),
-                stroke_changed_frames=[i for i, (a, b) in enumerate(zip(before, after)) if strokes(a) != strokes(b)],
+                raw_changed_frames=sum(a["raw_hands"] != b["raw_hands"] for a, b in zip(before, after, strict=True)),
+                hands_changed_frames=sum(a["hands"] != b["hands"] for a, b in zip(before, after, strict=True)),
+                stroke_changed_frames=[i for i, (a, b) in enumerate(zip(before, after, strict=True)) if strokes(a) != strokes(b)],
                 stroke_structure_changed_frames=structure_changed,
                 max_draw_coordinate_delta_px=coordinate_delta,
-                mouse_changed_frames=[i for i, (a, b) in enumerate(zip(before, after)) if mouse(a) != mouse(b)],
-                mode_changed_frames=sum(a["mode_gesture"] != b["mode_gesture"] for a, b in zip(before, after)),
+                mouse_changed_frames=[i for i, (a, b) in enumerate(zip(before, after, strict=True)) if mouse(a) != mouse(b)],
+                mode_changed_frames=sum(a["mode_gesture"] != b["mode_gesture"] for a, b in zip(before, after, strict=True)),
                 actual_modes_before=dict(Counter(r["mode"] for r in before)),
                 actual_modes_after=dict(Counter(r["mode"] for r in after)),
                 nonfresh_clear_frames_before=nonfresh_clears(before), nonfresh_clear_frames_after=nonfresh_clears(after),

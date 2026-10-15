@@ -2,8 +2,7 @@
 from unittest.mock import patch
 
 import pytest
-
-from test_pinch_freeze import _make_landmarks, _make_mouse_mode, _features_for
+from test_pinch_freeze import _features_for, _make_landmarks, _make_mouse_mode
 
 
 @pytest.fixture

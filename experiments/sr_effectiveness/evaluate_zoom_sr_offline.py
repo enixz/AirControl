@@ -14,16 +14,12 @@ import os
 import sys
 import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(REPO, "app"))
-sys.path.insert(0, REPO)
-
 import cv2
 import numpy as np
 
-from services.sr_engine import SREngine
-from services.hand_tracker import HandTracker
-from app.config_manager import ConfigManager
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(REPO, "app"))
+sys.path.insert(0, REPO)
 
 VIDEOS = [
     r"D:/AIRvideo/演示模式.mp4",
@@ -42,6 +38,10 @@ TIERS = ("none", "espcn", "realesrgan")
 
 def build_viewports(video, conf):
     """全帧检测 → 收集 (帧号, 中心, crop尺寸)。"""
+    from services.hand_tracker import HandTracker
+
+    from app.config_manager import ConfigManager
+
     tracker = HandTracker(
         static_image_mode=True,
         min_detection_confidence=conf,
@@ -99,6 +99,11 @@ def upscale(tier, crop, sr):
 
 
 def eval_tier(tier, viewports, video, conf):
+    from services.hand_tracker import HandTracker
+    from services.sr_engine import SREngine
+
+    from app.config_manager import ConfigManager
+
     tracker = HandTracker(
         static_image_mode=True,
         min_detection_confidence=conf,

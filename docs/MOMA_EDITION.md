@@ -63,7 +63,11 @@ ZOOM 根据手部大小进入或退出裁剪，SR Auto 按小手区域与硬件�
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.venv\Scripts\python.exe -m pip check
+.venv\Scripts\python.exe -m compileall -q .
+.venv\Scripts\python.exe -m ruff check .
 .venv\Scripts\python.exe -m pytest tests -q
+.venv\Scripts\python.exe -m pytest experiments/small_hand_tracking experiments/hand_feasibility/tests -q
 .venv\Scripts\python.exe build.py --release
 .\dist\AirControl\AirControl.exe --self-test
 ```
@@ -80,6 +84,9 @@ ASCII 模型缓存。缓存通常位于系统临时目录下的 `AirControlNativ
 ESPCN、Real-ESRGAN CPU 推理及 SenseVoice 模型加载通过。此结果不代替真实摄像头、
 持续拖拽或所有教室环境的验收；固定录像中的拖拽连续性仍需优化。
 
-独立 Git 工作副本复测为 740 项通过、4 项跳过、195 项子测试通过；部分模型按上述说明另行获取。
-本次修改文件的 Ruff 检查通过；全仓 Ruff 仍报告 98 项既有问题，分布于 30 个未在本次修改的文件，
-主要为实验脚本和既有控制代码的导入、未使用变量等检查项。该分支尚不应表述为全部 CI 门禁通过。
+2026-10-15 独立 Git 工作副本修复全部 98 项 Ruff 问题，全仓检查为 0 项，未放宽检查规则。
+主测试复测为 740 项通过、4 项跳过、195 项子测试通过；跳过项需要额外的姿态或 VAD 模型。
+实验测试另有 55 项通过、1 项因本地历史源码快照缺失而跳过。
+依赖一致性检查、源码编译、Python 3.10 语法检查，以及三种手部适配器的包导入、
+独立文件加载和运行器入口检查通过。本次结果为本地验证，不代表 GitHub Actions 的全部
+构建矩阵已通过，也未重新构建比赛运行包。

@@ -31,11 +31,11 @@ def verify(run_dir):
             return bool(row["hands"] and row["hands"][0]["detected_fresh"] is True)
 
         case = {"frames": len(before), "baseline": str(before_dir),
-                "recovered_primary_frames": [i for i, (a, b) in enumerate(zip(before, after)) if not fresh(a) and fresh(b)],
-                "new_missing_primary_frames": [i for i, (a, b) in enumerate(zip(before, after)) if fresh(a) and not fresh(b)],
-                "different_frame_counts": {k: sum(a[k] != b[k] for a, b in zip(before, after))
+                "recovered_primary_frames": [i for i, (a, b) in enumerate(zip(before, after, strict=True)) if not fresh(a) and fresh(b)],
+                "new_missing_primary_frames": [i for i, (a, b) in enumerate(zip(before, after, strict=True)) if fresh(a) and not fresh(b)],
+                "different_frame_counts": {k: sum(a[k] != b[k] for a, b in zip(before, after, strict=True))
                                            for k in ("raw_hands", "hands", "mode_gesture", "operation_events")},
-                "left_holding_changed_frames": sum(a["mode_state"]["left_holding"] != b["mode_state"]["left_holding"] for a, b in zip(before, after)),
+                "left_holding_changed_frames": sum(a["mode_state"]["left_holding"] != b["mode_state"]["left_holding"] for a, b in zip(before, after, strict=True)),
                 "effective_config_identical": True, "models_identical": True,
                 "changed_application_sources": changed_app}
         result["recordings"][clip] = case

@@ -39,11 +39,11 @@ def verify(before_dir, after_dir, clip):
         "pipeline": "application_semantic_replay", "frames": len(after),
         "baseline": str(before_dir.resolve()), "current": str(after_dir.resolve()),
         "changed_application_sources": changed, "models_and_config_identical": True,
-        "different_frame_counts": {k: sum(a[k] != b[k] for a, b in zip(before, after))
+        "different_frame_counts": {k: sum(a[k] != b[k] for a, b in zip(before, after, strict=True))
                                    for k in ("raw_hands", "hands", "mode_state", "mode_gesture")},
-        "stroke_and_mouse_event_changed_frames": sum(comparable_events(a) != comparable_events(b) for a, b in zip(before, after)),
+        "stroke_and_mouse_event_changed_frames": sum(comparable_events(a) != comparable_events(b) for a, b in zip(before, after, strict=True)),
         "shape_toggle_changed_frames": sum(a["operation_counts"]["overlay"].get("toggle_shape_correction", 0) != b["operation_counts"]["overlay"].get("toggle_shape_correction", 0)
-                                          for a, b in zip(before, after)),
+                                          for a, b in zip(before, after, strict=True)),
         "clear_frames_before": clear_frames(before), "clear_frames_after": clear_frames(after),
         "nonfresh_clear_frames_before": predicted_clear_frames(before),
         "nonfresh_clear_frames_after": predicted_clear_frames(after),

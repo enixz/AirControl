@@ -640,7 +640,6 @@ class AirControlOrchestrator(QObject):
         def build():
             if self._closing or not self._shadow_zoom_enabled():
                 return
-            from services.zoom_shadow_confirm import CONFIRM_WINDOW_FRAMES
             shadow = None
             try:
                 signature = self._shadow_zoom_signature()
@@ -696,7 +695,7 @@ class AirControlOrchestrator(QObject):
             self._teardown_shadow_zoom()
             return
         switcher = self._engine_switcher
-        target = switcher._mark_switch(
+        switcher._mark_switch(
             STATE_FAR_TRACK, switcher._clock(),
             "影子 ZOOM 与捕获器连续确认同一只手，直接晋升（免重建交接）",
         )

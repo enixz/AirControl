@@ -12,10 +12,15 @@ import sys
 import cv2
 import numpy as np
 
+if __package__:
+    from .base_adapter import BaseHandModelAdapter
+else:
+    # Support direct execution and file-based loaders as well as package imports.
+    if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from base_adapter import BaseHandModelAdapter
+
 _adapters_dir = os.path.dirname(os.path.abspath(__file__))
-if _adapters_dir not in sys.path:
-    sys.path.insert(0, _adapters_dir)
-from base_adapter import BaseHandModelAdapter
 
 
 class Yolo26HandAdapter(BaseHandModelAdapter):
@@ -67,14 +72,10 @@ class Yolo26HandAdapter(BaseHandModelAdapter):
         pred = outputs[0][0]  # (300, 69)
         out_hands = []
         for row in pred:
-            x0, y0, x1, y1, conf, cls = row[:6]
+            conf = row[4]
             if conf < self.CONF_THRESHOLD:
                 continue
-            # 框逆变换
-            bx0 = (x0 - pad_x) / scale
-            by0 = (y0 - pad_y) / scale
-            bx1 = (x1 - pad_x) / scale
-            by1 = (y1 - pad_y) / scale
+            # The output bbox is derived from the transformed keypoints below.
 
             kps = []
             kpt_scores = []

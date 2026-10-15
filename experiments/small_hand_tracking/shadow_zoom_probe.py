@@ -16,13 +16,12 @@ engine keep identifying the same hand while tracking, not whether ZOOM is
 better than capture.
 """
 import argparse
-from contextlib import ExitStack
-from copy import deepcopy
 import json
 import logging
 import math
-from pathlib import Path
 import time
+from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import patch
 
 from .application_replay import application_time
@@ -51,7 +50,7 @@ def shadow_zoom_probe(baseline, clip, destination, reseed_miss_frames):
         production_source_sha256={str(p.relative_to(ROOT)): sha(p) for p in (ROOT / "app").rglob("*.py")},
         effective_config=config,
         shadow="mediapipe HandTracker with long_range_enabled=True (FAR_TRACK runtime override equivalent); "
-               "confirmation window %d frames; capture re-seeds viewport on shadow ZOOM miss" % CONFIRM_WINDOW_FRAMES,
+               f"confirmation window {CONFIRM_WINDOW_FRAMES:d} frames; capture re-seeds viewport on shadow ZOOM miss",
         limits="Shadow tracker runs beside an archived capture-state trace; shadow output never drives FSM, "
                "modes, or desktop sinks. Geometric wrist agreement within 0.75x capture span is not identity "
                "truth. This probe does not measure live latency or click accuracy."))

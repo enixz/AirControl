@@ -16,8 +16,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
-from tools.strict_scorer import compute_metrics_strict
-
 
 def demo_scoring_divergence():
     """合成示例：真值 10.0s 开始持续 0.2s；检测碎片化 + 起点漂移。
@@ -25,6 +23,8 @@ def demo_scoring_divergence():
     legacy 口径（重叠即命中）会把漂移 4s 的检测也算命中；
     strict 口径只认起点窗口内的。
     """
+    from tools.strict_scorer import compute_metrics_strict
+
     truth = [(10.0, 10.2, "left")]
     det = [
         (6.0, 6.05, "left"),    # 起点漂移 -4s：不重叠 → 双不命中

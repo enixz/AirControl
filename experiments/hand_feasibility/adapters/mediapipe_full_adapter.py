@@ -11,15 +11,17 @@ B0 注意：find_hands 返回的是 7 层后处理结果（排序/平滑/幽灵/
 （hand_tracker.py:189-194），本适配器直接传 source_timestamp（录像时间
 epoch 秒 → 毫秒），保证 VIDEO 模式单调递增与录像现场一致。
 """
-import time
 
 import os
 import sys
 
-_adapters_dir = os.path.dirname(os.path.abspath(__file__))
-if _adapters_dir not in sys.path:
-    sys.path.insert(0, _adapters_dir)
-from base_adapter import BaseHandModelAdapter
+if __package__:
+    from .base_adapter import BaseHandModelAdapter
+else:
+    # Support direct execution and file-based loaders as well as package imports.
+    if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from base_adapter import BaseHandModelAdapter
 
 
 class MediaPipeFullAdapter(BaseHandModelAdapter):
@@ -36,8 +38,6 @@ class MediaPipeFullAdapter(BaseHandModelAdapter):
         self._frame_index = 0
 
     def _load_model(self):
-        import sys
-        import os
         app_root = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(
                 os.path.dirname(os.path.abspath(__file__))))), "app")

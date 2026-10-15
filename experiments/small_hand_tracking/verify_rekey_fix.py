@@ -9,7 +9,6 @@ from .historical_baseline import extract
 from .replay import ROOT
 from .run_replay import sha, write_json
 
-
 ALLOWED = {"app/services/base_hand_tracker.py": ("BaseHandTracker", "_assign_smoother_keys"),
            "app/modes/mouse_mode.py": ("MouseMode", "handle")}
 
@@ -51,7 +50,7 @@ def verify(before_draw, before_mouse, after_draw, after_mouse, destination):
             case = compare(clip, mode, bd, ad)
             before_rows = records(bd / "predictions.jsonl")
             rows = records(ad / "predictions.jsonl")
-            case["controller_changed_frames"] = [i for i, (x, y) in enumerate(zip(before_rows, rows))
+            case["controller_changed_frames"] = [i for i, (x, y) in enumerate(zip(before_rows, rows, strict=True))
                                                    if x["operation_events"] != y["operation_events"]]
             case["certified_rekeys"] = [dict(frame_index=r["frame_index"], **e)
                                        for r in rows for e in r["events"] if e["kind"] == "same_hand_rekey"]

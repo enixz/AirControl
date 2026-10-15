@@ -10,7 +10,6 @@
 
 纯函数模块，供实验评分与单元测试使用；不修改 services/truth_ab.py。
 """
-import math
 import statistics
 
 PRESS_WINDOW_BEFORE_SEC = 0.1

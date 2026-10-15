@@ -8,9 +8,9 @@ operation differences. Coverage denominators are all frames (including
 hand-out-of-frame segments); this is not detection recall or click accuracy.
 """
 import argparse
-from collections import Counter
 import json
 import math
+from collections import Counter
 from pathlib import Path
 
 from .run_replay import write_json
@@ -47,8 +47,8 @@ def compare(clip, mode, base_dir, shadow_dir):
     assert len(base) == len(shadow)
     assert [r["source_timestamp"] for r in base] == [r["source_timestamp"] for r in shadow]
 
-    recovered = [i for i, (a, b) in enumerate(zip(base, shadow)) if not fresh(a) and fresh(b)]
-    lost = [i for i, (a, b) in enumerate(zip(base, shadow)) if fresh(a) and not fresh(b)]
+    recovered = [i for i, (a, b) in enumerate(zip(base, shadow, strict=True)) if not fresh(a) and fresh(b)]
+    lost = [i for i, (a, b) in enumerate(zip(base, shadow, strict=True)) if fresh(a) and not fresh(b)]
 
     def promotions(rows):
         events = []
@@ -58,10 +58,14 @@ def compare(clip, mode, base_dir, shadow_dir):
                     events.append(dict(frame_index=r["frame_index"], reason=e.get("reason", "")))
         return events
 
-    counts = lambda rows: dict(Counter(f'{e["sink"]}.{e["method"]}' for r in rows for e in r["operation_events"]))
-    mouse_events = lambda r: [e for e in r["operation_events"] if e["sink"] == "mouse"]
+    def counts(rows):
+        return dict(Counter(f'{e["sink"]}.{e["method"]}' for r in rows for e in r["operation_events"]))
+
+    def mouse_events(r):
+        return [e for e in r["operation_events"] if e["sink"] == "mouse"]
+
     base_ops, shadow_ops = counts(base), counts(shadow)
-    mouse_changed = [i for i, (a, b) in enumerate(zip(base, shadow)) if mouse_events(a) != mouse_events(b)]
+    mouse_changed = [i for i, (a, b) in enumerate(zip(base, shadow, strict=True)) if mouse_events(a) != mouse_events(b)]
 
     # Post-promotion continuity: frames after the first promotion in the
     # shadow variant, checking wrist jumps (> 0.5 * frame diagonal) between

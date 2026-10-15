@@ -1,16 +1,16 @@
 """Run deterministic application semantics; desktop/camera/queue timing excluded."""
 import argparse
-from collections import Counter
-from copy import deepcopy
-from contextlib import nullcontext
 import json
 import logging
-from pathlib import Path
 import os
+from collections import Counter
+from contextlib import nullcontext
+from copy import deepcopy
+from pathlib import Path
 
+from .application_replay import ApplicationReplay
 from .replay import ROOT, summarize
 from .run_replay import load_config, read_metadata, sha, snapshot, write_json
-from .application_replay import ApplicationReplay
 
 
 def application_summary(rows):
@@ -46,7 +46,7 @@ def run_clip(rec_dir, destination, config, max_frames):
     write_json(destination / "dataset_manifest.json", {"video": str(video), "video_sha256": sha(video),
                                                       "meta_sha256": sha(rec_dir / "meta.jsonl"), "ground_truth_used": False,
                                                       "metadata_frames": len(meta),
-                                                      "capture_index_gaps": sum(b.get("i", i + 1) - a.get("i", i) - 1 for i, (a, b) in enumerate(zip(meta, meta[1:]))),
+                                                      "capture_index_gaps": sum(b.get("i", i + 1) - a.get("i", i) - 1 for i, (a, b) in enumerate(zip(meta, meta[1:], strict=False))),
                                                       "alignment": "video decode order to metadata row order; original timestamps retained; no missing frames synthesized"})
     replay = None
     rows = []
@@ -102,7 +102,8 @@ def main():
     import cv2
     from PyQt6.QtCore import QCoreApplication
     cv2.setNumThreads(1)
-    qt_app = QCoreApplication.instance() or QCoreApplication([])
+    # Keep a strong reference for the entire replay; Qt owns native resources.
+    _qt_app = QCoreApplication.instance() or QCoreApplication([])
     logging.basicConfig(level=logging.WARNING)
     destination = ROOT / "artifacts/small_hand_tracking" / args.run_id
     destination.mkdir(parents=True, exist_ok=False)
@@ -112,6 +113,7 @@ def main():
     snapshot(destination, source, config, args)
     if "before_fixes" in args.variants:
         import shutil
+
         from .historical_baseline import METHODS
         origin = Path(args.baseline_snapshot).resolve()
         for relative, *_ in METHODS:

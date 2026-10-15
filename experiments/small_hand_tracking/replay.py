@@ -6,11 +6,11 @@ the standard library time module and performance measurements stay real.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
-from copy import deepcopy
 import math
 import sys
 import time
+from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -81,7 +81,7 @@ def encode_hands(hands, gestures, *, raw=False):
         elif type(predicted) is not bool:
             predicted = None
         points = [[float(p[1]), float(p[2])] for p in lm]
-        xs, ys = zip(*points)
+        xs, ys = zip(*points, strict=True)
         result.append({
             "track_id": g.get("track_key"),
             "is_primary_output": index == 0 and not raw,

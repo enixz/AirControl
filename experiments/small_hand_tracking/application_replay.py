@@ -4,10 +4,10 @@ Offline semantic replay: model construction is synchronous between frames,
 prewarming, camera capture, Qt queue delays and mouse watchdog are excluded.
 Desktop sinks are inert. This does not measure live frame age or click accuracy.
 """
-from contextlib import ExitStack, contextmanager
-from copy import deepcopy
 import sys
 import time
+from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 from .replay import ReplayClock, encode_hands, tracker_state
@@ -42,12 +42,12 @@ def inert_sink():
 class ApplicationReplay:
     def __init__(self, config, initial_timestamp):
         from config_manager import ConfigManager
-        from orchestrator import AirControlOrchestrator
-        from services.gesture_recognizer import GestureRecognizer
-        from services.temporal_voter import TemporalGestureVoter
-        from services.geometric_classifier import WeightedVoteClassifier
-        from services.inference_worker import InferenceWorker
         from modes.mouse_mode import MouseMode
+        from orchestrator import AirControlOrchestrator
+        from services.geometric_classifier import WeightedVoteClassifier
+        from services.gesture_recognizer import GestureRecognizer
+        from services.inference_worker import InferenceWorker
+        from services.temporal_voter import TemporalGestureVoter
 
         self.clock = ReplayClock()
         self.clock.set(initial_timestamp)

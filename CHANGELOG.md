@@ -5,6 +5,12 @@
 Maintained separately on `codex/moma`. The existing `v1.4.0` release tag
 continues to identify the original non-MoMA release.
 
+- Resolve all 98 repository-wide Ruff findings without relaxing lint rules:
+  clean imports and unused values, replace assigned lambdas, and make zip
+  alignment explicit while retaining intentional common-prefix comparisons.
+  Preserve the Qt application lifetime and both adapter import entry points.
+- Validate this cleanup with 740 main tests, 195 subtests and 55 experiment
+  tests passing; 5 tests skip for unavailable models or a historical snapshot.
 - Carry forward MoMA smart commands, classroom text generation, local
   transcription, cloud health checks and token metering.
 - Enable ZOOM (`long_range_enabled=true`) and SR Auto in published and

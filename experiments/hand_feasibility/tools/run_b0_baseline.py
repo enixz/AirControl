@@ -88,7 +88,6 @@ def main():
     n = 0
     t_start = time.perf_counter()
     with open(out_path, "w", encoding="utf-8") as out:
-        import importlib
         cap = cv2.VideoCapture(next(
             (os.path.join(args.rec_dir, n_) for n_ in ("frames.mkv", "frames.mp4", "frames.avi")
              if os.path.exists(os.path.join(args.rec_dir, n_))), None))

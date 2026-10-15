@@ -1,7 +1,7 @@
 """Review the capture handoff candidate against unchanged production models."""
 import argparse
-from collections import Counter
 import json
+from collections import Counter
 from pathlib import Path
 
 from .corpus_report import fresh, ranges, read, records
@@ -42,18 +42,25 @@ def render(baseline, candidate, destination):
         ra, rb = records(old / "predictions.jsonl"), records(new / "predictions.jsonl")
         assert len(ra) == len(rb)
         assert [r["source_timestamp"] for r in ra] == [r["source_timestamp"] for r in rb]
-        lost = [i for i, (x, y) in enumerate(zip(ra, rb)) if fresh(x) and not fresh(y)]
-        gained = [i for i, (x, y) in enumerate(zip(ra, rb)) if not fresh(x) and fresh(y)]
-        counts = lambda rows: dict(Counter(f"{e['sink']}.{e['method']}" for r in rows for e in r["operation_events"]))
-        zoom = lambda rows: [r["frame_index"] for r in rows if r.get("used_crop_zoom")]
-        mouse = lambda r: [e for e in r["operation_events"] if e["sink"] == "mouse"]
+        lost = [i for i, (x, y) in enumerate(zip(ra, rb, strict=True)) if fresh(x) and not fresh(y)]
+        gained = [i for i, (x, y) in enumerate(zip(ra, rb, strict=True)) if not fresh(x) and fresh(y)]
+
+        def counts(rows):
+            return dict(Counter(f"{e['sink']}.{e['method']}" for r in rows for e in r["operation_events"]))
+
+        def zoom(rows):
+            return [r["frame_index"] for r in rows if r.get("used_crop_zoom")]
+
+        def mouse(r):
+            return [e for e in r["operation_events"] if e["sink"] == "mouse"]
+
         cases.append(dict(clip=clip, frames=len(rb), before_fresh=sum(map(fresh, ra)), after_fresh=sum(map(fresh, rb)),
                           recovered=gained, new_missing=lost, new_missing_ranges=ranges(lost),
                           zoom_frames_before=len(zoom(ra)), zoom_frames_after=len(zoom(rb)),
                           first_zoom_before=next(iter(zoom(ra)), None), first_zoom_after=next(iter(zoom(rb)), None),
                           capture_before=episodes(ra), capture_after=episodes(rb),
                           operations_before=counts(ra), operations_after=counts(rb),
-                          mouse_changed_frames=[i for i, (x, y) in enumerate(zip(ra, rb)) if mouse(x) != mouse(y)]))
+                          mouse_changed_frames=[i for i, (x, y) in enumerate(zip(ra, rb, strict=True)) if mouse(x) != mouse(y)]))
     result = dict(candidate="capture_handoff", adopted=False,
                   reason="Earlier handoff enables ZOOM but introduces missing-primary intervals and changes actions.",
                   recordings=len(cases), frames=sum(c["frames"] for c in cases),

@@ -1,6 +1,5 @@
 """Create application observation reports and review strips from original video."""
 import argparse
-from collections import Counter
 import json
 from pathlib import Path
 

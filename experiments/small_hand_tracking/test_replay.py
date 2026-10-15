@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 
 from experiments.small_hand_tracking.replay import (
-    ReplayClock, TrackerReplay, algorithm_time, encode_hands, summarize,
+    ReplayClock,
+    TrackerReplay,
+    algorithm_time,
+    encode_hands,
+    summarize,
 )
 from experiments.small_hand_tracking.run_replay import read_metadata, variant_config
 
@@ -117,8 +121,8 @@ def test_ablation_overrides_do_not_modify_base_config():
 
 @pytest.fixture
 def fake_tracker_factory(monkeypatch):
-    from services.base_hand_tracker import BaseHandTracker
     from services import hand_tracker_factory
+    from services.base_hand_tracker import BaseHandTracker
 
     class FakeTracker(BaseHandTracker):
         engine_name = "fake"
@@ -201,6 +205,7 @@ def test_search_grace_still_obeys_miss_frame_limit(fake_tracker_factory):
 
 def test_native_retry_only_on_miss_rate_limited_and_restores_width():
     from types import SimpleNamespace
+
     from experiments.small_hand_tracking.native_rescue import install_native_rescue
     calls = []
     tracker = SimpleNamespace(_inference_max_width=720)
@@ -226,6 +231,7 @@ def test_native_retry_only_on_miss_rate_limited_and_restores_width():
 
 def test_native_retry_exception_cannot_change_following_frame_resolution():
     from types import SimpleNamespace
+
     from experiments.small_hand_tracking.native_rescue import install_native_rescue
     tracker = SimpleNamespace(_inference_max_width=720)
     def original(frame):
@@ -246,6 +252,7 @@ def test_native_retry_exception_cannot_change_following_frame_resolution():
 @pytest.mark.parametrize("width_limit,frame_width,found", [(720, 1920, True), (720, 640, False), (0, 1920, False)])
 def test_native_retry_avoids_redundant_inference(width_limit, frame_width, found):
     from types import SimpleNamespace
+
     from experiments.small_hand_tracking.native_rescue import install_native_rescue
     calls = []
     tracker = SimpleNamespace(_inference_max_width=width_limit)

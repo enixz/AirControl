@@ -6,18 +6,18 @@ python -m experiments.small_hand_tracking.run_replay --clips 20260722_145659 \
 from __future__ import annotations
 
 import argparse
-from copy import deepcopy
 import hashlib
-from importlib.metadata import version, PackageNotFoundError
 import json
 import logging
 import math
-from pathlib import Path
 import platform
 import shutil
 import subprocess
 import sys
 import time
+from copy import deepcopy
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from .replay import ROOT, TrackerReplay, summarize
 

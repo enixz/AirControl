@@ -11,7 +11,6 @@
 import json
 import os
 import statistics
-import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
@@ -58,7 +57,7 @@ def cross_compare(rows_a, rows_b):
     371px vs 最近邻 11.2px）。
     """
     wrists, tips = [], []
-    for ra, rb in zip(rows_a, rows_b):
+    for ra, rb in zip(rows_a, rows_b, strict=False):
         if not (ra["hands"] and rb["hands"]):
             continue
         for ha in ra["hands"]:

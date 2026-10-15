@@ -37,7 +37,7 @@ class CaptureHandoffEvidence:
             return False
         points = hands[0]
         wrist = (float(points[0][1]), float(points[0][2]))
-        xs, ys = zip(*((p[1], p[2]) for p in points))
+        xs, ys = zip(*((p[1], p[2]) for p in points), strict=True)
         span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
         key = gestures[0].get("track_key")
         if key is None:
@@ -45,7 +45,7 @@ class CaptureHandoffEvidence:
             return False
         # Two nearby fresh wrists are ambiguous. Predictions and distant
         # resting hands cannot supply or block primary evidence.
-        for other, gesture in zip(hands[1:], gestures[1:]):
+        for other, gesture in zip(hands[1:], gestures[1:], strict=False):
             if gesture.get("predicted", False):
                 continue
             if math.hypot(other[0][1] - wrist[0], other[0][2] - wrist[1]) <= 1.5 * span:
@@ -68,6 +68,7 @@ class CaptureHandoffEvidence:
 
 def install_capture_handoff(patches):
     import os
+
     from orchestrator import AirControlOrchestrator
 
     original = AirControlOrchestrator._maybe_auto_switch_engine

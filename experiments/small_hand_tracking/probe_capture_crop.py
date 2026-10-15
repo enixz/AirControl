@@ -4,9 +4,9 @@ This supplies a same-frame crop from archived primary coordinates on every
 probe. It is neither a real handoff nor a tracking/operation success metric.
 """
 import argparse
-from contextlib import ExitStack
 import json
 import math
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 

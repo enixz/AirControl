@@ -1,8 +1,8 @@
 """Replay exact pre-fix methods from a verified local source snapshot."""
 import ast
-from contextlib import contextmanager, ExitStack
 import importlib
 import json
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import patch
 

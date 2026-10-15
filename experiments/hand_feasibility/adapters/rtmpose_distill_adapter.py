@@ -17,10 +17,15 @@ import sys
 import cv2
 import numpy as np
 
+if __package__:
+    from .base_adapter import BaseHandModelAdapter
+else:
+    # Support direct execution and file-based loaders as well as package imports.
+    if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from base_adapter import BaseHandModelAdapter
+
 _adapters_dir = os.path.dirname(os.path.abspath(__file__))
-if _adapters_dir not in sys.path:
-    sys.path.insert(0, _adapters_dir)
-from base_adapter import BaseHandModelAdapter
 
 APP_DIR = os.path.normpath(os.path.join(_adapters_dir, "..", "..", "..", "app"))
 
@@ -47,7 +52,6 @@ class RTMPoseDistillAdapter(BaseHandModelAdapter):
         self._x_name = self._sess.get_outputs()[0].name
         self._y_name = self._sess.get_outputs()[1].name
         # MediaPipe HandLandmarker（tasks API，仅用其框）
-        import mediapipe as mp
         from mediapipe.tasks import python as mp_python
         from mediapipe.tasks.python import vision
         task_path = os.path.join(
@@ -95,7 +99,7 @@ class RTMPoseDistillAdapter(BaseHandModelAdapter):
         out_hands = []
         simcc_ms = 0.0
 
-        for i, (x0, y0, x1, y1, conf) in enumerate(boxes):
+        for i, (x0, y0, x1, y1, _conf) in enumerate(boxes):
             # 外扩 1.4x（与 hagrid_yolo_hand_tracker 同策略）
             bw, bh = x1 - x0, y1 - y0
             cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
@@ -128,7 +132,7 @@ class RTMPoseDistillAdapter(BaseHandModelAdapter):
             # 256 → 原帧像素（crop 逆变换）
             kx_px = kx / self._input_size * cw + ex0
             ky_px = ky / self._input_size * ch + ey0
-            pts = [[float(x), float(y)] for x, y in zip(kx_px, ky_px)]
+            pts = [[float(x), float(y)] for x, y in zip(kx_px, ky_px, strict=True)]
             xs = [p[0] for p in pts]
             ys = [p[1] for p in pts]
             bbox = [min(xs), min(ys), max(xs), max(ys)]
