@@ -27,6 +27,9 @@ for package in ("mediapipe", "sherpa_onnx"):
     datas += collect_data_files(package)
     binaries += collect_dynamic_libs(package)
 
+# The face-guided ZOOM recovery path needs OpenCV's Haar XML assets.
+datas += collect_data_files("cv2", includes=["data/*.xml"])
+
 add_data_if_present(datas, "config.defaults.json", ".")
 add_data_if_present(datas, "gesture_recognizer.task", ".")
 add_data_if_present(datas, os.path.join("models", "hand_landmarker.task"), "models")

@@ -1468,7 +1468,9 @@ def _request_admin_relaunch(argv=None):
 def main():
     if "--self-test" in sys.argv:
         required_files = [
-            resource_path("config.json"),
+            # 模板拆分后包内只带 config.defaults.json；用户配置在首启时
+            # 由 ConfigManager 写入 %APPDATA%\AirControl\config.json。
+            resource_path("config.defaults.json"),
             resource_path("models", "hand_landmarker.task"),
             resource_path(
                 "models", "kws-zh-wenetspeech",

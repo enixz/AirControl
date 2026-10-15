@@ -14,7 +14,7 @@ import os
 
 import cv2
 import numpy as np
-from runtime_paths import resource_path
+from runtime_paths import native_asset_path, resource_path
 
 from .gpu_guard import gpu_lock
 
@@ -103,7 +103,7 @@ class SREngine:
             return None
         try:
             sr = cv2.dnn_superres.DnnSuperResImpl_create()
-            sr.readModel(self._espcn_path)
+            sr.readModel(native_asset_path(self._espcn_path))
             sr.setModel("espcn", 2)
             self._espcn_engine = sr
             self._logger.info("[SR] ESPCN model loaded successfully.")

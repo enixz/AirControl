@@ -17,6 +17,7 @@ import logging
 import os
 
 import numpy as np
+from runtime_paths import native_asset_path
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ class SileroVad:
         import sherpa_onnx  # 局部导入：无模型环境不拖累其他测试
 
         cfg = sherpa_onnx.VadModelConfig()
-        cfg.silero_vad.model = model_path
+        cfg.silero_vad.model = native_asset_path(model_path)
         cfg.silero_vad.threshold = float(threshold)
         cfg.silero_vad.min_silence_duration = float(min_silence_duration)
         cfg.sample_rate = 16000

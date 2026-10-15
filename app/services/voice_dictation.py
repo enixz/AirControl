@@ -12,7 +12,7 @@ import threading
 import time
 
 import numpy as np
-from runtime_paths import resource_path
+from runtime_paths import native_asset_path, resource_path
 
 try:
     import sherpa_onnx
@@ -188,8 +188,8 @@ class VoiceDictationService:
 
         logger.info("加载 SenseVoice 模型: %s", model_file)
         self._recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
-            model=model_file,
-            tokens=tokens_file,
+            model=native_asset_path(model_file),
+            tokens=native_asset_path(tokens_file),
             num_threads=self._num_threads,
             use_itn=self._use_itn,
             language=self._language,

@@ -12,6 +12,7 @@ import logging
 import os
 
 import cv2
+from runtime_paths import native_asset_path
 
 
 class FaceGuide:
@@ -77,7 +78,7 @@ class FaceGuide:
             if cascade_dir:
                 path = os.path.join(cascade_dir, "haarcascade_frontalface_default.xml")
                 if os.path.exists(path):
-                    c = cv2.CascadeClassifier(path)
+                    c = cv2.CascadeClassifier(native_asset_path(path))
                     if not c.empty():
                         self._face_cascade = c
                         self._logger.info("[FACE] Haar 人脸级联已加载（远距捕获）。")

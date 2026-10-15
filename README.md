@@ -1,10 +1,24 @@
-# 🎯 AirControl - Gesture + Voice Control System
+# AirControl MoMA Edition
+
+**移动云 MoMA 独立版本，维护分支：[`codex/moma`](https://github.com/enixz/AirControl/tree/codex/moma)。**
+
+本分支在本地手势与离线语音交互基础上，提供 MoMA 智能指令、课堂小结和随堂出题。
+ZOOM 默认开启，SR 默认 Auto；云端功能须配置自己的 `MOMA_API_KEY` 后启用。
+原非 MoMA 发布版仍可从 [`v1.4.0`](https://github.com/enixz/AirControl/tree/v1.4.0) 获取。
+
+请先阅读 [MoMA 版使用与维护说明](docs/MOMA_EDITION.md)。本分支独立维护，不自动合并回 `master`。
+
+```bash
+git clone --branch codex/moma --single-branch https://github.com/enixz/AirControl.git AirControl-MoMA
+cd AirControl-MoMA
+```
 
 <div align="center">
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078d4?logo=windows&logoColor=white)
 ![Release](https://img.shields.io/badge/Release-v1.4.0-6f42c1)
+![Edition](https://img.shields.io/badge/Edition-MoMA-27866e)
 ![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)
 ![Stars](https://img.shields.io/github/stars/enixz/AirControl?style=social)
 

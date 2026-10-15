@@ -1,5 +1,21 @@
 # Changelog
 
+## MoMA edition — 2026-10-15
+
+Maintained separately on `codex/moma`. The existing `v1.4.0` release tag
+continues to identify the original non-MoMA release.
+
+- Carry forward MoMA smart commands, classroom text generation, local
+  transcription, cloud health checks and token metering.
+- Enable ZOOM (`long_range_enabled=true`) and SR Auto in published and
+  source defaults. Keep cloud calls opt-in and API keys in environment variables.
+- Load MediaPipe model bytes and cache affected native assets by content
+  to support Windows extraction paths containing Chinese characters.
+- Include OpenCV Haar cascade XML files for face-guided recovery.
+- Correct packaged self-test to check `config.defaults.json`.
+- Validate the competition snapshot with 742 tests and 195 subtests passing,
+  2 tests skipped; packaged self-test passes in a Chinese extraction directory.
+
 ## Unreleased
 
 AirControl 2.0 cloud intelligence layer (M1–M6): an optional OpenAI-compatible

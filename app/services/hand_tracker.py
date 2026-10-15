@@ -61,7 +61,10 @@ class HandTracker(BaseHandTracker):
         # 根据文件名判断是 HandLandmarker 还是 GestureRecognizer
         is_landmarker = "landmarker" in os.path.basename(self.model_path).lower()
 
-        base_options = python.BaseOptions(model_asset_path=self.model_path)
+        # MediaPipe's native Windows file loader can misdecode Chinese paths.
+        # Python opens the Unicode path, then passes model bytes to MediaPipe.
+        with open(self.model_path, "rb") as model_file:
+            base_options = python.BaseOptions(model_asset_buffer=model_file.read())
         if is_landmarker:
             options = vision.HandLandmarkerOptions(
                 base_options=base_options,

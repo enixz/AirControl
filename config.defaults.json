@@ -33,7 +33,7 @@
     "zoom_miss_frames": 10,
     "face_detect_short": 400,
     "adaptive_skip_enabled": false,
-    "long_range_enabled": false,
+    "long_range_enabled": true,
     "geometric_constraint_enabled": false,
     "hand_prediction_enabled": true,
     "temporal_voter_enabled": false,

@@ -17,7 +17,7 @@ import threading
 import time
 
 import numpy as np
-from runtime_paths import resource_path
+from runtime_paths import native_asset_path, resource_path
 from services.voice_actions import MODE_KEYWORDS, VOICE_KEYWORD_TO_ACTION
 
 try:
@@ -511,11 +511,11 @@ class VoiceCommandService:
             raise FileNotFoundError(f"关键词文件不存在: {keywords_file}")
 
         self._kws = sherpa_onnx.KeywordSpotter(
-            tokens=tokens,
-            encoder=int8_encoder,
-            decoder=decoder,
-            joiner=int8_joiner,
-            keywords_file=keywords_file,
+            tokens=native_asset_path(tokens),
+            encoder=native_asset_path(int8_encoder),
+            decoder=native_asset_path(decoder),
+            joiner=native_asset_path(int8_joiner),
+            keywords_file=native_asset_path(keywords_file),
             keywords_threshold=self._kws_threshold(),
             num_threads=2,
             provider="cpu",
@@ -626,11 +626,11 @@ class VoiceCommandService:
         tokens = os.path.join(self._model_dir, "tokens.txt")
 
         new_kws = sherpa_onnx.KeywordSpotter(
-            tokens=tokens,
-            encoder=int8_encoder,
-            decoder=decoder,
-            joiner=int8_joiner,
-            keywords_file=keywords_file,
+            tokens=native_asset_path(tokens),
+            encoder=native_asset_path(int8_encoder),
+            decoder=native_asset_path(decoder),
+            joiner=native_asset_path(int8_joiner),
+            keywords_file=native_asset_path(keywords_file),
             keywords_threshold=self._kws_threshold(),
             num_threads=2,
             provider="cpu",

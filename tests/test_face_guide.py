@@ -49,7 +49,9 @@ class TestEnsureDetector(unittest.TestCase):
         """首次调用加载级联，_face_detector_init 置 True。"""
         fake_cascade = MagicMock()
         fake_cascade.empty.return_value = False
-        fake_path = os.path.abspath(__file__)
+        # This test mocks file existence and the native loader; keep its fake
+        # path independent of the real checkout's language or location.
+        fake_path = "C:/AirControlTest/placeholder.py"
         with patch.object(cv2, 'data', MagicMock(haarcascades=os.path.dirname(fake_path))):
             with patch('os.path.exists', return_value=True):
                 with patch('cv2.CascadeClassifier', return_value=fake_cascade):
