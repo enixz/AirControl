@@ -16,23 +16,6 @@
 
 ---
 
-## 🎬 Demo
-
-<div align="center">
-
-### 📊 Presentation Mode
-![Presentation Mode](https://raw.githubusercontent.com/enixz/AirControl/master/gif/%E6%BC%94%E7%A4%BA%E6%A8%A1%E5%BC%8F.gif)
-
-### 🖱️ Mouse Mode
-![Mouse Mode](https://raw.githubusercontent.com/enixz/AirControl/master/gif/%E9%BC%A0%E6%A0%87%E6%A8%A1%E5%BC%8F.gif)
-
-### ✏️ Drawing Mode
-![Drawing Mode](https://raw.githubusercontent.com/enixz/AirControl/master/gif/%E6%9D%BF%E4%B9%A6%E6%A8%A1%E5%BC%8F.gif)
-
-</div>
-
----
-
 ## ✨ Introduction
 
 > **AirControl** is a Windows air controller based on MediaPipe + voice recognition. Control PPT presentations, mouse cursor, screen annotation, and even launch voice assistants with just **gestures** and **voice** - no keyboard or mouse needed!
