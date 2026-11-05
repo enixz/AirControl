@@ -16,6 +16,27 @@
 
 ---
 
+## 🎬 Demo
+
+Animated examples of AirControl mouse gestures and tracking behavior, adapted from the recording guide.
+
+<table>
+<tr>
+<td width="50%"><strong>Free movement</strong><br><img src="gif/free-movement.gif" alt="Free movement animation" width="400"></td>
+<td width="50%"><strong>Quick pinch clicks</strong><br><img src="gif/quick-clicks.gif" alt="Quick pinch clicks animation" width="400"></td>
+</tr>
+<tr>
+<td width="50%"><strong>Continuous drag</strong><br><img src="gif/continuous-drag.gif" alt="Continuous drag animation" width="400"></td>
+<td width="50%"><strong>Side-on gesture</strong><br><img src="gif/side-on-gesture.gif" alt="Side-on gesture animation" width="400"></td>
+</tr>
+<tr>
+<td width="50%"><strong>Alternating hands</strong><br><img src="gif/alternating-hands.gif" alt="Alternating hands animation" width="400"></td>
+<td width="50%"><strong>Occlusion recovery</strong><br><img src="gif/occlusion-recovery.gif" alt="Occlusion recovery animation" width="400"></td>
+</tr>
+</table>
+
+---
+
 ## ✨ Introduction
 
 > **AirControl** is a Windows air controller based on MediaPipe + voice recognition. Control PPT presentations, mouse cursor, screen annotation, and even launch voice assistants with just **gestures** and **voice** - no keyboard or mouse needed!
